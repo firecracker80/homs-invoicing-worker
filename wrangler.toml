@@ -1,0 +1,17 @@
+# HOMS Invoicing Worker — deployed via Cloudflare GitHub integration
+name = "homs-invoicing-worker-0e0e"
+main = "src/index.js"
+compatibility_date = "2026-07-01"
+
+[vars]
+WORKER_URL = "https://homs-invoicing-worker-0e0e.yari-058.workers.dev"
+
+# Create both namespaces in the Cloudflare dashboard (Storage & Databases → KV),
+# then paste their IDs here. IDs are not secrets — safe to commit.
+[[kv_namespaces]]
+binding = "TENANTS"
+id = "PASTE_TENANTS_NAMESPACE_ID"
+
+[[kv_namespaces]]
+binding = "BOOKINGS"
+id = "PASTE_BOOKINGS_NAMESPACE_ID"

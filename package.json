@@ -1,0 +1,11 @@
+{
+  "name": "booking-worker",
+  "type": "module",
+  "scripts": {
+    "test": "node test-worker.js",
+    "deploy": "wrangler deploy"
+  },
+  "dependencies": {
+    "esbuild": "^0.28.1"
+  }
+}
