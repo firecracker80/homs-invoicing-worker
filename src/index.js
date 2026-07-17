@@ -60,7 +60,23 @@ async function handleBookingCreated(request, env) {
   const existing = await env.BOOKINGS.get(payload.bookingId, { type: "json" });
   const existingUrl = existing?.paypal?.approveUrl || existing?.stripe?.checkoutUrl;
   if (existingUrl) {
-    return json({ bookingId: payload.bookingId, approveUrl: existingUrl, idempotent: true });
+    // Return the FULL field set from the stored snapshot so downstream
+    // mappings (SMS, contact updates) work identically on cached hits.
+    return json({
+      bookingId: existing.bookingId,
+      approveUrl: existingUrl,
+      grandTotal: existing.charges.grandTotal.toFixed(2),
+      rentTotal: existing.charges.rentTotal.toFixed(2),
+      cleaningFee: existing.charges.cleaningFee.toFixed(2),
+      processingFee: (existing.charges.processingFee ?? 0).toFixed(2),
+      depositTotal: existing.securityDeposit.total.toFixed(2),
+      nights: existing.stay.nights,
+      nightlyRate: existing.stay.nightlyRate.toFixed(2),
+      gateway: existing.gateway || "paypal",
+      gatewayRef: existing.paypal?.orderId || existing.stripe?.sessionId || "",
+      airtableSync: existing.airtable ? "ok" : "unknown",
+      idempotent: true
+    });
   }
 
   const { snapshot, purchaseUnits } = composeBooking(payload, tenant);
