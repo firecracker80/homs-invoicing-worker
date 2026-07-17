@@ -11,8 +11,29 @@ function json(data, status = 200) {
   });
 }
 
+// Normalize the GHL webhook body to the worker's internal shape.
+// Accepts both the natural GHL flat form (firstName/lastName, stayTotal,
+// contactId, propertyName) and the canonical nested form.
+function normalizePayload(raw) {
+  const p = { ...raw };
+  // money: GHL sends stayTotal (often as a string)
+  if (p.bookingTotal == null && p.stayTotal != null) p.bookingTotal = Number(p.stayTotal);
+  if (typeof p.bookingTotal === "string") p.bookingTotal = Number(p.bookingTotal);
+  if (typeof p.cleaningFee === "string") p.cleaningFee = Number(p.cleaningFee);
+  // guest: flat firstName/lastName/email/phone → nested guest{}
+  if (!p.guest) {
+    const name = [p.firstName, p.lastName].filter(Boolean).join(" ").trim();
+    p.guest = { name: name || p.name || "", email: p.email || "", phone: p.phone || "" };
+  }
+  // ids: GHL vocabulary → internal vocabulary
+  if (!p.ghlContactId && p.contactId) p.ghlContactId = p.contactId;
+  if (!p.propertyCode && p.propertyName) p.propertyCode = p.propertyName;
+  if (!p.language && raw.language) p.language = raw.language;
+  return p;
+}
+
 async function handleBookingCreated(request, env) {
-  const payload = await request.json();
+  const payload = normalizePayload(await request.json());
 
   const missing = ["bookingId", "locationId", "checkIn", "checkOut"].filter(k => !payload[k]);
   if (missing.length) return json({ error: `Missing fields: ${missing.join(", ")}` }, 400);
@@ -21,6 +42,10 @@ async function handleBookingCreated(request, env) {
 
   const tenant = await env.TENANTS.get(payload.locationId, { type: "json" });
   if (!tenant) return json({ error: `Unknown locationId: ${payload.locationId}` }, 404);
+  // Shared-secret check: if the tenant config defines webhookSecret,
+  // the payload must carry a matching "secret" field.
+  if (tenant.webhookSecret && payload.secret !== tenant.webhookSecret)
+    return json({ error: "Unauthorized" }, 401);
   if (tenant.bookingWorkerEnabled === false)
     return json({ error: "Booking worker disabled for this account" }, 403);
 
