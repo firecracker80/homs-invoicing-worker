@@ -44,7 +44,8 @@ async function createBookingRecords(tenant, snapshot, gatewayRef) {
 
   // ---- 1. Orders ----
   const orderFields = {
-    "Reservation Number": s.bookingId,
+    // "Reservation Number" is computed (Autonumber) — Airtable assigns it.
+    // The booking's UUID lives in "GHL Booking ID".
     "Guest Name": s.guest.name,
     "Guest Email": s.guest.email,
     "Language": s.guest.language || tenant.defaultLanguage || "es",
