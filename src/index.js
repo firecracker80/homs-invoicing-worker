@@ -91,6 +91,38 @@ async function handleBookingCreated(request, env) {
     airtable = { error: err.message, needsRetry: true };
   }
 
+  // Optional push notification: if the tenant config defines ghlPaymentLinkUrl
+  // (a GHL Inbound Webhook trigger URL), POST the payment link + totals there.
+  // Fire-and-forget: a failure here must never block the booking response.
+  if (tenant.ghlPaymentLinkUrl) {
+    try {
+      await fetch(tenant.ghlPaymentLinkUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          event: "payment_link_ready",
+          bookingId: snapshot.bookingId,
+          contactId: snapshot.ghlContactId || "",
+          email: snapshot.guest.email || "",
+          phone: snapshot.guest.phone || "",
+          firstName: (snapshot.guest.name || "").split(" ")[0],
+          approveUrl,
+          grandTotal: snapshot.charges.grandTotal.toFixed(2),
+          rentTotal: snapshot.charges.rentTotal.toFixed(2),
+          cleaningFee: snapshot.charges.cleaningFee.toFixed(2),
+          processingFee: snapshot.charges.processingFee.toFixed(2),
+          depositTotal: snapshot.securityDeposit.total.toFixed(2),
+          nights: snapshot.stay.nights,
+          checkIn: snapshot.stay.checkIn,
+          checkOut: snapshot.stay.checkOut,
+          propertyName: snapshot.propertyCode || tenant.brandName
+        })
+      });
+    } catch (err) {
+      console.error(`GHL payment-link notify failed for ${snapshot.bookingId}:`, err.message);
+    }
+  }
+
   return json({
     bookingId: snapshot.bookingId,
     approveUrl,
