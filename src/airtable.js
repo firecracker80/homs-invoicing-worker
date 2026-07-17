@@ -67,7 +67,7 @@ async function createBookingRecords(tenant, snapshot, gatewayRef) {
     "Remaining Balance": round2(reservationTotal + depositRequired),
     "Balance Due": reservationTotal, // due by Payment Due Date (deposit excluded)
     "Deposit Status": "Pending Payment",
-    "Order Status": "Awaiting Payment",
+    "Order Status": "Pending Payment",
     "Payment Due Date": dueDate(tenant.invoiceDueHours ?? 24),
     "Notes": s.parentBookingId
       ? `Extension of ${s.parentBookingId}. ${methodName} ref: ${gatewayRef}`
@@ -77,50 +77,49 @@ async function createBookingRecords(tenant, snapshot, gatewayRef) {
   const [order] = await atCreate(tenant, "Orders", [orderFields]);
 
   // ---- 2. Order Items ----
+  // "Line Item #" is computed (Autonumber); descriptions live in Notes.
   const items = [
     {
-      "Line Item": `Estadía — ${s.stay.nights} noche${s.stay.nights === 1 ? "" : "s"}`,
       "Order": [order.id],
       "Item Type": "Rent",
       "Quantity": s.stay.nights,
       "Unit Price": s.stay.nightlyRate,
       "Total Price": s.charges.rentTotal,
-      "Status": "Pending"
+      "Status": "Pending",
+      "Notes": `Estadía — ${s.stay.nights} noche${s.stay.nights === 1 ? "" : "s"}`
     }
   ];
   if (s.charges.cleaningFee > 0) {
     items.push({
-      "Line Item": "Tarifa de limpieza",
       "Order": [order.id],
       "Item Type": "Cleaning Fee",
       "Quantity": 1,
       "Unit Price": s.charges.cleaningFee,
       "Total Price": s.charges.cleaningFee,
-      "Status": "Pending"
+      "Status": "Pending",
+      "Notes": "Tarifa de limpieza"
     });
   }
   if (s.charges.processingFee > 0) {
     items.push({
-      "Line Item": "Tarifa de procesamiento de pago",
       "Order": [order.id],
       "Item Type": "Processing Fee",
       "Quantity": 1,
       "Unit Price": s.charges.processingFee,
       "Total Price": s.charges.processingFee,
       "Status": "Pending",
-      "Notes": `${(s.charges.feePct * 100).toFixed(1)}% of rent + cleaning + deposit`
+      "Notes": `Tarifa de procesamiento — ${(s.charges.feePct * 100).toFixed(1)}% of rent + cleaning + deposit`
     });
   }
   for (const b of s.securityDeposit.blocks) {
     items.push({
-      "Line Item": `Depósito de seguridad (reembolsable) — bloque ${b.block}`,
       "Order": [order.id],
       "Item Type": "Security Deposit",
       "Quantity": 1,
       "Unit Price": b.amount,
       "Total Price": b.amount,
       "Status": "Pending",
-      "Notes": `Block ${b.block}: ${b.nights} nights, tier ${b.tier}`
+      "Notes": `Depósito de seguridad (reembolsable) — bloque ${b.block}: ${b.nights} nights, tier ${b.tier}`
     });
   }
   const orderItems = await atCreate(tenant, "Order Items", items);
@@ -128,7 +127,7 @@ async function createBookingRecords(tenant, snapshot, gatewayRef) {
   // ---- 3. Payments stubs (one per PayPal purchase unit) ----
   const paymentStubs = [
     {
-      "Payment #": `${s.bookingId}-RENT`,
+      // "Payment #" is computed (Autonumber); purchase-unit ref lives in Notes.
       "Order": [order.id],
       "Payment Method": methodName,
       "Payment Type": "Rent",
@@ -136,12 +135,12 @@ async function createBookingRecords(tenant, snapshot, gatewayRef) {
       "Payment Amount": reservationTotal,
       "Currency": tenant.currency || "USD",
       "Payment Status": "Pending",
-      "Cleared for Payout": false
+      "Cleared for Payout": false,
+      "Notes": `${s.bookingId}-RENT`
     }
   ];
   if (depositRequired > 0) {
     paymentStubs.push({
-      "Payment #": `${s.bookingId}-DEP`,
       "Order": [order.id],
       "Payment Method": methodName,
       "Payment Type": "Security Deposit",
@@ -149,7 +148,8 @@ async function createBookingRecords(tenant, snapshot, gatewayRef) {
       "Payment Amount": depositRequired,
       "Currency": tenant.currency || "USD",
       "Payment Status": "Pending",
-      "Cleared for Payout": false // deposits NEVER clear for payout
+      "Cleared for Payout": false, // deposits NEVER clear for payout
+      "Notes": `${s.bookingId}-DEP`
     });
   }
   const payments = await atCreate(tenant, "Payments", paymentStubs);
