@@ -77,8 +77,13 @@ function normalizePayload(raw) {
 // Detects GHL's in-editor "Test" fires: the editor cannot resolve merge tags,
 // so values arrive as literal "{{...}}" strings — impossible in a real run.
 function isEditorTest(raw) {
-  return ["bookingId", "checkIn", "checkOut", "stayTotal", "bookingTotal", "contactId"]
-    .some(k => typeof raw[k] === "string" && raw[k].includes("{{"));
+  const keys = ["bookingId", "checkIn", "checkOut", "stayTotal", "bookingTotal", "contactId"];
+  // Literal unresolved tags → editor
+  if (keys.some(k => typeof raw[k] === "string" && raw[k].includes("{{"))) return true;
+  // ALL core booking fields empty/absent → editor (a real rentalBooking run
+  // always carries at least one of these; total absence means no booking context)
+  const core = ["bookingId", "checkIn", "checkOut", "stayTotal", "bookingTotal"];
+  return core.every(k => raw[k] == null || String(raw[k]).trim() === "");
 }
 
 async function handleBookingCreated(request, env) {
