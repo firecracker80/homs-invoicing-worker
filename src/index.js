@@ -54,6 +54,7 @@ function toDateOnly(v) {
 
 function normalizePayload(raw) {
   const p = { ...raw };
+  for (const k of Object.keys(p)) if (typeof p[k] === "string" && isBlank(p[k])) p[k] = null;
   // money: GHL sends stayTotal (often formatted: "$420.00")
   if (p.bookingTotal == null && p.stayTotal != null) p.bookingTotal = toMoney(p.stayTotal);
   if (typeof p.bookingTotal === "string") p.bookingTotal = toMoney(p.bookingTotal);
@@ -76,13 +77,20 @@ function normalizePayload(raw) {
 
 // Detects GHL's in-editor "Test" fires: the editor cannot resolve merge tags,
 // so values arrive as literal "{{...}}" strings — impossible in a real run.
+// GHL renders unresolvable merge tags in three known ways depending on context:
+// literal "{{tag}}", empty string, or the literal STRING "null".
+function isBlank(v) {
+  if (v == null) return true;
+  const s = String(v).trim().toLowerCase();
+  return s === "" || s === "null" || s === "undefined";
+}
+
 function isEditorTest(raw) {
   const keys = ["bookingId", "checkIn", "checkOut", "stayTotal", "bookingTotal", "contactId"];
   // Literal unresolved tags → editor
   if (keys.some(k => typeof raw[k] === "string" && raw[k].includes("{{"))) return true;
-  // No bookingId → no rentalBooking context → cannot be a processable real run.
-  // (Editor tests partially resolve tags; rentalBooking.id is the definitive one.)
-  return raw.bookingId == null || String(raw.bookingId).trim() === "";
+  // No usable bookingId → no rentalBooking context → cannot be a real run.
+  return isBlank(raw.bookingId);
 }
 
 async function handleBookingCreated(request, env) {
