@@ -56,8 +56,37 @@ function normalizePayload(raw) {
   return p;
 }
 
+// Detects GHL's in-editor "Test" fires: the editor cannot resolve merge tags,
+// so values arrive as literal "{{...}}" strings — impossible in a real run.
+function isEditorTest(raw) {
+  return ["bookingId", "checkIn", "checkOut", "stayTotal", "bookingTotal", "contactId"]
+    .some(k => typeof raw[k] === "string" && raw[k].includes("{{"));
+}
+
 async function handleBookingCreated(request, env) {
-  const payload = normalizePayload(await request.json());
+  const raw = await request.json();
+
+  // Editor test: return a representative sample so GHL can register the
+  // response shape and save the action. No order, no records, no side effects.
+  if (isEditorTest(raw)) {
+    return json({
+      bookingId: "SAMPLE-EDITOR-TEST",
+      approveUrl: "https://www.sandbox.paypal.com/checkoutnow?token=SAMPLE",
+      grandTotal: "1037.74",
+      rentTotal: "420.00",
+      cleaningFee: "69.00",
+      processingFee: "58.74",
+      depositTotal: "490.00",
+      nights: 6,
+      nightlyRate: "70.00",
+      gateway: "paypal",
+      gatewayRef: "SAMPLE",
+      airtableSync: "ok",
+      testMode: true
+    });
+  }
+
+  const payload = normalizePayload(raw);
   // Headers take precedence over body values when present — lets GHL configs
   // carry routing/auth in HEADERS instead of the raw body.
   const headerLoc = request.headers?.get?.("X-Location-Id");
