@@ -80,10 +80,9 @@ function isEditorTest(raw) {
   const keys = ["bookingId", "checkIn", "checkOut", "stayTotal", "bookingTotal", "contactId"];
   // Literal unresolved tags → editor
   if (keys.some(k => typeof raw[k] === "string" && raw[k].includes("{{"))) return true;
-  // ALL core booking fields empty/absent → editor (a real rentalBooking run
-  // always carries at least one of these; total absence means no booking context)
-  const core = ["bookingId", "checkIn", "checkOut", "stayTotal", "bookingTotal"];
-  return core.every(k => raw[k] == null || String(raw[k]).trim() === "");
+  // No bookingId → no rentalBooking context → cannot be a processable real run.
+  // (Editor tests partially resolve tags; rentalBooking.id is the definitive one.)
+  return raw.bookingId == null || String(raw.bookingId).trim() === "";
 }
 
 async function handleBookingCreated(request, env) {
@@ -129,10 +128,15 @@ async function handleBookingCreated(request, env) {
     cleaningFee: payload.cleaningFee ?? null
   };
   const missing = ["bookingId", "locationId", "checkIn", "checkOut"].filter(k => !payload[k]);
-  if (missing.length) return json({ error: `Missing fields: ${missing.join(", ")}`, received: diag }, 400);
+  if (missing.length) {
+    console.error("Validation reject (missing). Raw body:", JSON.stringify(raw));
+    return json({ error: `Missing fields: ${missing.join(", ")}`, received: diag }, 400);
+  }
   if (!Number.isFinite(payload.bookingTotal) || payload.bookingTotal <= 0) {
-    if (!Number.isFinite(payload.nightlyRate) || payload.nightlyRate <= 0)
+    if (!Number.isFinite(payload.nightlyRate) || payload.nightlyRate <= 0) {
+      console.error("Validation reject (amount). Raw body:", JSON.stringify(raw));
       return json({ error: "Need a positive bookingTotal (stayTotal) or nightlyRate", received: diag }, 400);
+    }
   }
 
   const tenant = await env.TENANTS.get(payload.locationId, { type: "json" });
