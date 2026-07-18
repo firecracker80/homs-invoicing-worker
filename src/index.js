@@ -15,12 +15,35 @@ function json(data, status = 200) {
 // Normalize the GHL webhook body to the worker's internal shape.
 // Accepts both the natural GHL flat form (firstName/lastName, stayTotal,
 // contactId, propertyName) and the canonical nested form.
+// "$1,420.00" → 1420 ; "420" → 420 ; garbage → NaN
+function toMoney(v) {
+  if (v == null || v === "") return NaN;
+  if (typeof v === "number") return v;
+  return Number(String(v).replace(/[^0-9.\-]/g, ""));
+}
+
+// Extract a clean YYYY-MM-DD from datetime strings in common GHL formats:
+// "2026-07-22 15:00:00", "2026-07-22T15:00:00-04:00", "07/22/2026 3:00 PM"
+function toDateOnly(v) {
+  if (v == null) return v;
+  const s = String(v).trim();
+  const iso = s.match(/(\d{4})-(\d{2})-(\d{2})/);
+  if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}`;
+  const us = s.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  if (us) return `${us[3]}-${us[1].padStart(2, "0")}-${us[2].padStart(2, "0")}`;
+  return s; // let downstream validation catch anything unparseable
+}
+
 function normalizePayload(raw) {
   const p = { ...raw };
-  // money: GHL sends stayTotal (often as a string)
-  if (p.bookingTotal == null && p.stayTotal != null) p.bookingTotal = Number(p.stayTotal);
-  if (typeof p.bookingTotal === "string") p.bookingTotal = Number(p.bookingTotal);
-  if (typeof p.cleaningFee === "string") p.cleaningFee = Number(p.cleaningFee);
+  // money: GHL sends stayTotal (often formatted: "$420.00")
+  if (p.bookingTotal == null && p.stayTotal != null) p.bookingTotal = toMoney(p.stayTotal);
+  if (typeof p.bookingTotal === "string") p.bookingTotal = toMoney(p.bookingTotal);
+  if (typeof p.cleaningFee === "string") p.cleaningFee = toMoney(p.cleaningFee);
+  if (typeof p.nightlyRate === "string") p.nightlyRate = toMoney(p.nightlyRate);
+  // dates: rentalBooking.start_time/end_time are datetimes → date-only
+  if (p.checkIn) p.checkIn = toDateOnly(p.checkIn);
+  if (p.checkOut) p.checkOut = toDateOnly(p.checkOut);
   // guest: flat firstName/lastName/email/phone → nested guest{}
   if (!p.guest) {
     const name = [p.firstName, p.lastName].filter(Boolean).join(" ").trim();
@@ -42,10 +65,23 @@ async function handleBookingCreated(request, env) {
   const headerSecret = request.headers?.get?.("X-Webhook-Secret");
   if (headerSecret) payload.secret = headerSecret.trim();
 
+  // Diagnostic echo: show exactly what arrived so GHL execution logs are
+  // self-explanatory when a merge tag fails to resolve. (No secrets echoed.)
+  const diag = {
+    bookingId: payload.bookingId ?? null,
+    locationId: payload.locationId ?? null,
+    checkIn: payload.checkIn ?? null,
+    checkOut: payload.checkOut ?? null,
+    stayTotal: payload.stayTotal ?? null,
+    bookingTotal: Number.isFinite(payload.bookingTotal) ? payload.bookingTotal : String(payload.bookingTotal ?? null),
+    cleaningFee: payload.cleaningFee ?? null
+  };
   const missing = ["bookingId", "locationId", "checkIn", "checkOut"].filter(k => !payload[k]);
-  if (missing.length) return json({ error: `Missing fields: ${missing.join(", ")}` }, 400);
-  if (!payload.bookingTotal && !payload.nightlyRate)
-    return json({ error: "Need bookingTotal or nightlyRate" }, 400);
+  if (missing.length) return json({ error: `Missing fields: ${missing.join(", ")}`, received: diag }, 400);
+  if (!Number.isFinite(payload.bookingTotal) || payload.bookingTotal <= 0) {
+    if (!Number.isFinite(payload.nightlyRate) || payload.nightlyRate <= 0)
+      return json({ error: "Need a positive bookingTotal (stayTotal) or nightlyRate", received: diag }, 400);
+  }
 
   const tenant = await env.TENANTS.get(payload.locationId, { type: "json" });
   if (!tenant) return json({ error: `Unknown locationId: ${payload.locationId}` }, 404);
