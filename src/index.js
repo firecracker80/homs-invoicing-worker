@@ -22,8 +22,15 @@ function toMoney(v) {
   return Number(String(v).replace(/[^0-9.\-]/g, ""));
 }
 
-// Extract a clean YYYY-MM-DD from datetime strings in common GHL formats:
-// "2026-07-22 15:00:00", "2026-07-22T15:00:00-04:00", "07/22/2026 3:00 PM"
+// Extract a clean YYYY-MM-DD from datetime strings in every format GHL emits:
+// "2026-07-22 15:00:00", "2026-07-22T15:00:00-04:00", "07/22/2026 3:00 PM",
+// "Wednesday, July 22, 2026 3:00 PM", "miércoles, 22 de julio de 2026"
+const MONTHS = {
+  january:1,february:2,march:3,april:4,may:5,june:6,july:7,august:8,
+  september:9,october:10,november:11,december:12,
+  enero:1,febrero:2,marzo:3,abril:4,mayo:5,junio:6,julio:7,agosto:8,
+  septiembre:9,octubre:10,noviembre:11,diciembre:12
+};
 function toDateOnly(v) {
   if (v == null) return v;
   const s = String(v).trim();
@@ -31,6 +38,17 @@ function toDateOnly(v) {
   if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}`;
   const us = s.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
   if (us) return `${us[3]}-${us[1].padStart(2, "0")}-${us[2].padStart(2, "0")}`;
+  // "July 22, 2026" (optionally prefixed "Wednesday, ")
+  const en = s.match(/([A-Za-z]+)\s+(\d{1,2}),?\s+(\d{4})/);
+  if (en && MONTHS[en[1].toLowerCase()])
+    return `${en[3]}-${String(MONTHS[en[1].toLowerCase()]).padStart(2, "0")}-${en[2].padStart(2, "0")}`;
+  // "22 de julio de 2026"
+  const es = s.match(/(\d{1,2})\s+de\s+([A-Za-zéí]+)\s+de\s+(\d{4})/i);
+  if (es && MONTHS[es[2].toLowerCase()])
+    return `${es[3]}-${String(MONTHS[es[2].toLowerCase()]).padStart(2, "0")}-${es[1].padStart(2, "0")}`;
+  // Last resort: let the JS engine try, take UTC date parts
+  const d = new Date(s);
+  if (!isNaN(d)) return d.toISOString().slice(0, 10);
   return s; // let downstream validation catch anything unparseable
 }
 
