@@ -40,8 +40,13 @@ export function calcCancellation(snapshot, nowMs, tenant, override) {
     + (checkInHour - tzOffsetHours) * 3600000;               // check-in moment in UTC ms
   const hoursUntil = (anchor - nowMs) / 3600000;
 
+  // Accept any affirmative form of the exception flag (form dropdowns send
+  // human values: "Sí", "Yes", "true", checkbox "on", or the literal "full_refund")
+  const isException = ["full_refund", "yes", "si", "sí", "true", "1", "on", "excepcion", "excepción"]
+    .includes(String(override || "").trim().toLowerCase());
+
   let chargePct, tier;
-  if (override === "full_refund") { chargePct = 0; tier = "exception_full_refund"; }
+  if (isException) { chargePct = 0; tier = "exception_full_refund"; }
   else if (hoursUntil < 24)  { chargePct = 0.50; tier = "under_24h"; }
   else if (hoursUntil < 120) { chargePct = 0.30; tier = "24h_to_5d"; }
   else                       { chargePct = 0.20; tier = "over_5d"; }
@@ -122,7 +127,7 @@ async function gatewayRefund(tenant, env, snapshot, captureId, amount, note) {
 async function loadContext(request, env) {
   const body = await request.json();
   const snapshot = body.bookingId ? await env.BOOKINGS.get(body.bookingId, { type: "json" }) : null;
-  if (!snapshot) return { error: json({ error: "Unknown bookingId" }, 404) };
+  if (!snapshot) return { error: json({ error: "Unknown bookingId", receivedBookingId: body.bookingId ?? null }, 404) };
   const tenant = await env.TENANTS.get(snapshot.locationId, { type: "json" });
   if (!tenant) return { error: json({ error: "Unknown tenant" }, 404) };
   if (!adminAuthorized(request, env, tenant)) return { error: json({ error: "Unauthorized" }, 401) };
@@ -259,7 +264,7 @@ export async function handleCancel(request, env) {
       if (calc.charge > 0) {
         await atCreate(tenant, "Payout Ledger", [
           {
-            "Recipient Name": tenant.ownerName || "Owner", "Recipient PayPal": tenant.ownerPaypalEmail || "",
+            "Recipient": "Owner",
             "Payout Method": "Manual Transfer",
             "Reason": `Cancellation charge ${Math.round(calc.chargePct * 100)}% (owner ${Math.round(snapshot.payout.ownerPct * 100)}%) — ${snapshot.bookingId}`,
             "Payout Amount": calc.payoutSplit.owner, "Currency": cur,
@@ -267,7 +272,7 @@ export async function handleCancel(request, env) {
             "Payout Status": "Pending", "Order": [orderId]
           },
           {
-            "Recipient Name": tenant.managerName || "Manager", "Recipient PayPal": tenant.managerPaypalEmail || "",
+            "Recipient": "Manager",
             "Payout Method": "Manual Transfer",
             "Reason": `Cancellation charge ${Math.round(calc.chargePct * 100)}% (manager share) — ${snapshot.bookingId}`,
             "Payout Amount": calc.payoutSplit.manager, "Currency": cur,
@@ -278,8 +283,9 @@ export async function handleCancel(request, env) {
       }
     }
   } catch (err) {
-    console.error(`Cancellation Airtable sync failed for ${snapshot.bookingId}:`, err.message);
+    console.error(`Cancellation Airtable sync failed for ${snapshot.bookingId}: ${err.message}`);
     snapshot.cancellationSyncFailed = true;
+    snapshot.cancellationSyncError = err.message;
     await env.BOOKINGS.put(snapshot.bookingId, JSON.stringify(snapshot));
   }
 
@@ -294,7 +300,11 @@ export async function handleCancel(request, env) {
     checkIn: snapshot.stay.checkIn, propertyName: snapshot.propertyCode || tenant.brandName
   });
 
-  return json({ cancelled: true, paid: true, calculation: calc, refundIds });
+  return json({
+    cancelled: true, paid: true, calculation: calc, refundIds,
+    airtableSync: snapshot.cancellationSyncFailed ? "failed" : "ok",
+    airtableSyncError: snapshot.cancellationSyncError || null
+  });
 }
 
 // ======================================================= /deposit/refund ====
