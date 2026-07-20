@@ -229,10 +229,12 @@ async function settle(env, tenant, snapshot, captures) {
     const p = snapshot.payout;
     const sched = snapshot.stay.checkIn;
     const cur = tenant.currency || "USD";
+    // "Recipient" is a single-select ("Owner" / "Manager") — plain string.
+    // "Recipient Name" / "Recipient PayPal" are computed Lookups off the
+    // Order link — never write them; Airtable derives them.
     const payoutRows = [
       {
-        "Recipient Name": tenant.ownerName || "Owner",
-        "Recipient PayPal": tenant.ownerPaypalEmail || "",
+        "Recipient": "Owner",
         "Payout Method": "Manual Transfer",
         "Reason": `Rent split ${Math.round(p.ownerPct * 100)}% — ${snapshot.bookingId}`,
         "Payout Amount": p.owner, "Currency": cur,
@@ -240,8 +242,7 @@ async function settle(env, tenant, snapshot, captures) {
         "Order": [orderId]
       },
       {
-        "Recipient Name": tenant.managerName || "Manager",
-        "Recipient PayPal": tenant.managerPaypalEmail || "",
+        "Recipient": "Manager",
         "Payout Method": "Manual Transfer",
         "Reason": `Rent split ${Math.round((1 - p.ownerPct) * 100)}% — ${snapshot.bookingId}`,
         "Payout Amount": p.manager, "Currency": cur,
@@ -250,8 +251,7 @@ async function settle(env, tenant, snapshot, captures) {
       }
     ];
     if (snapshot.charges.cleaningFee > 0) payoutRows.push({
-      "Recipient Name": p.cleaningFeeTo === "owner" ? (tenant.ownerName || "Owner") : (tenant.managerName || "Manager"),
-      "Recipient PayPal": p.cleaningFeeTo === "owner" ? (tenant.ownerPaypalEmail || "") : (tenant.managerPaypalEmail || ""),
+      "Recipient": p.cleaningFeeTo === "owner" ? "Owner" : "Manager",
       "Payout Method": "Manual Transfer",
       "Reason": `Cleaning fee — ${snapshot.bookingId}`,
       "Payout Amount": snapshot.charges.cleaningFee, "Currency": cur,
