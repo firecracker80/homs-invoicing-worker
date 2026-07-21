@@ -7,6 +7,7 @@ import { createBookingRecords } from "./airtable.js";
 import { handlePayPalReturn, handlePayPalWebhook, handleStripeReturn, handleStripeWebhook } from "./payment.js";
 import { handleCancel, handleDepositRefund } from "./cancellation.js";
 import { handleExtend } from "./extension.js";
+import { handleReschedule } from "./reschedule.js";
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -277,6 +278,8 @@ export default {
         return handleStripeWebhook(request, env);
       if (request.method === "POST" && url.pathname === "/extend")
         return handleExtend(request, env);
+      if (request.method === "POST" && url.pathname === "/reschedule")
+        return handleReschedule(request, env);
       if (request.method === "POST" && url.pathname === "/cancel")
         return handleCancel(request, env);
       if (request.method === "POST" && url.pathname === "/deposit/refund")
