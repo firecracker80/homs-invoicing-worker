@@ -35,14 +35,20 @@ async function refundPayPalPartial(tenant, env, captureId, amount, note) {
   return data.id;
 }
 
+// GHL renders unresolved merge tags three ways depending on context:
+// literal "{{tag}}", empty string, or the literal STRING "null".
+function isBlank(v) {
+  if (v == null) return true;
+  const s = String(v).trim().toLowerCase();
+  return s === "" || s === "null" || s === "undefined";
+}
+
 export async function handleReschedule(request, env) {
   const body = await request.json();
 
-  // Detect an unresolved-merge-tag editor test the same way booking-created does,
-  // so GHL's in-editor "Test again" doesn't spam confusing 404s.
-  const rawVals = [body.bookingId, body.newCheckIn, body.newCheckOut].map(v => String(v ?? ""));
-  const looksLikeEditorTest = rawVals.some(v => v.includes("{{")) ||
-    rawVals.every(v => v.trim() === "" || v.trim().toLowerCase() === "null");
+  // Definitive editor-test signal: no usable bookingId. A real rentalBooking
+  // context always carries one; without it nothing downstream is processable.
+  const looksLikeEditorTest = isBlank(body.bookingId) || String(body.bookingId).includes("{{");
   if (looksLikeEditorTest) {
     return json({
       bookingId: "SAMPLE-EDITOR-TEST",
@@ -54,7 +60,7 @@ export async function handleReschedule(request, env) {
     });
   }
 
-  const snapshot = body.bookingId ? await env.BOOKINGS.get(body.bookingId, { type: "json" }) : null;
+  const snapshot = await env.BOOKINGS.get(body.bookingId, { type: "json" });
   if (!snapshot) {
     console.error("Reschedule reject: Unknown bookingId. Raw body:", JSON.stringify(body));
     return json({ error: "Unknown bookingId", receivedBookingId: body.bookingId ?? null }, 404);
@@ -66,12 +72,19 @@ export async function handleReschedule(request, env) {
   if (snapshot.cancelled) return json({ error: "Booking is cancelled" }, 400);
   if (!snapshot.settled) return json({ error: "Booking is not paid -- reschedule after settlement" }, 400);
 
-  const { newCheckIn, newCheckOut } = body;
-  if (!newCheckIn || !newCheckOut) return json({ error: "Provide newCheckIn and newCheckOut" }, 400);
+  // Treat "null"/"undefined"/empty (GHL's unresolved-tag renderings) as missing.
+  const newCheckIn = isBlank(body.newCheckIn) ? null : body.newCheckIn;
+  const newCheckOut = isBlank(body.newCheckOut) ? null : body.newCheckOut;
+  if (!newCheckIn || !newCheckOut) {
+    console.error(`Reschedule reject (missing dates) for ${snapshot.bookingId}. Raw body:`, JSON.stringify(body));
+    return json({ error: "Provide newCheckIn and newCheckOut", received: { newCheckIn: body.newCheckIn ?? null, newCheckOut: body.newCheckOut ?? null } }, 400);
+  }
 
   const newNights = Math.round((new Date(newCheckOut) - new Date(newCheckIn)) / 86400000);
-  if (!Number.isFinite(newNights) || newNights <= 0)
-    return json({ error: `Invalid date range: ${newCheckIn} -> ${newCheckOut}` }, 400);
+  if (!Number.isFinite(newNights) || newNights <= 0) {
+    console.error(`Reschedule reject (bad date range) for ${snapshot.bookingId}: ${newCheckIn} -> ${newCheckOut}`);
+    return json({ error: `Invalid date range: ${newCheckIn} -> ${newCheckOut}`, received: { newCheckIn, newCheckOut } }, 400);
+  }
 
   const rate = snapshot.stay.nightlyRate;
   const oldRent = snapshot.charges.rentTotal;
