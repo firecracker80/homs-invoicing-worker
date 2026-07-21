@@ -69,8 +69,14 @@ export async function handleReschedule(request, env) {
   const tenant = await env.TENANTS.get(snapshot.locationId, { type: "json" });
   if (!tenant) return json({ error: "Unknown tenant" }, 404);
   if (!adminAuthorized(request, env, tenant)) return json({ error: "Unauthorized" }, 401);
-  if (snapshot.cancelled) return json({ error: "Booking is cancelled" }, 400);
-  if (!snapshot.settled) return json({ error: "Booking is not paid -- reschedule after settlement" }, 400);
+  if (snapshot.cancelled) {
+    console.error(`Reschedule reject (already cancelled) for ${snapshot.bookingId}`);
+    return json({ error: "Booking is cancelled", bookingId: snapshot.bookingId }, 400);
+  }
+  if (!snapshot.settled) {
+    console.error(`Reschedule reject (not settled) for ${snapshot.bookingId}. settled=${snapshot.settled}`);
+    return json({ error: "Booking is not paid -- reschedule after settlement", bookingId: snapshot.bookingId, settled: !!snapshot.settled }, 400);
+  }
 
   // Treat "null"/"undefined"/empty (GHL's unresolved-tag renderings) as missing.
   const newCheckIn = isBlank(body.newCheckIn) ? null : body.newCheckIn;
