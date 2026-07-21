@@ -211,7 +211,6 @@ export async function handleCancel(request, env) {
       await atUpdate(tenant, "Orders", orderId, {
         "Order Status": "Cancelled",
         "Deposit Status": "Refunded",
-        "Refunded Amount": calc.totalRefund,
         "Notes": `Cancelled (${calc.tier}, charge ${Math.round(calc.chargePct * 100)}% = $${calc.charge.toFixed(2)}). Refunded $${calc.totalRefund.toFixed(2)}. ${body.reason || ""}`.trim()
       });
       // Refund payment rows
@@ -344,8 +343,7 @@ export async function handleDepositRefund(request, env) {
     if (orderId) {
       await atUpdate(tenant, "Orders", orderId, {
         "Deposit Status": status === "refunded" ? "Refunded" : status === "partial" ? "Partial" : "Claimed",
-        "Refunded Amount": refundAmount,
-        "Claim Amount": claim,
+        "Notes": `Deposit inspection: refunded $${refundAmount.toFixed(2)}, claimed $${claim.toFixed(2)}. ${body.reason || ""}`.trim(),
         "Inspection Date": new Date().toISOString().slice(0, 10)
       });
       const gw = snapshot.gateway === "stripe" ? "Stripe" : "PayPal";
