@@ -183,18 +183,58 @@ export async function handleReschedule(request, env) {
     }));
 
   } else if (totalDelta < 0) {
-    const refundAmount = round2(-totalDelta);
+    // Refund rent-portion and deposit-portion SEPARATELY, against the capture
+    // each actually came from -- combining them into one refund against the
+    // rent capture can exceed that capture's available balance (e.g. a big
+    // deposit-tier drop bundled with a small rent change) and PayPal rejects
+    // the whole request. A failure here must never crash the endpoint --
+    // report it cleanly so the admin can finish it manually in PayPal.
+    const rentRefundAmt = rentDelta < 0 ? round2(-rentDelta) : 0;
+    const depositRefundAmt = depositDelta < 0 ? round2(-depositDelta) : 0;
     const rentCaptureId = snapshot.captures?.RENT?.captureId;
+    const depCaptureId = snapshot.captures?.DEP?.captureId;
+    const parts = [];
 
-    if (rentCaptureId) {
-      const refundId = await refundPayPalPartial(
-        tenant, env, rentCaptureId, refundAmount,
-        `Reschedule ${snapshot.bookingId}: reembolso por cambio de fechas`
-      );
-      settlement = { type: "refund_issued", amount: refundAmount, refundId };
-    } else {
-      settlement = { type: "refund_needed_manual", amount: refundAmount };
+    if (rentRefundAmt > 0) {
+      if (!rentCaptureId) {
+        parts.push({ type: "rent_refund_needed_manual", amount: rentRefundAmt });
+      } else {
+        try {
+          const refundId = await refundPayPalPartial(
+            tenant, env, rentCaptureId, rentRefundAmt,
+            `Reschedule ${snapshot.bookingId}: ajuste de tarifa por cambio de fechas`
+          );
+          parts.push({ type: "rent_refund_issued", amount: rentRefundAmt, refundId });
+        } catch (err) {
+          console.error(`Reschedule rent refund failed for ${snapshot.bookingId}: ${err.message}`);
+          parts.push({ type: "rent_refund_failed", amount: rentRefundAmt, error: err.message });
+        }
+      }
     }
+
+    if (depositRefundAmt > 0) {
+      if (!depCaptureId) {
+        parts.push({ type: "deposit_refund_needed_manual", amount: depositRefundAmt });
+      } else {
+        try {
+          const refundId = await refundPayPalPartial(
+            tenant, env, depCaptureId, depositRefundAmt,
+            `Reschedule ${snapshot.bookingId}: ajuste de depósito por cambio de fechas`
+          );
+          parts.push({ type: "deposit_refund_issued", amount: depositRefundAmt, refundId });
+        } catch (err) {
+          console.error(`Reschedule deposit refund failed for ${snapshot.bookingId}: ${err.message}`);
+          parts.push({ type: "deposit_refund_failed", amount: depositRefundAmt, error: err.message });
+        }
+      }
+    }
+
+    const anyFailed = parts.some(p => p.type.includes("failed") || p.type.includes("manual"));
+    settlement = {
+      type: anyFailed ? "refund_partial_manual" : "refund_issued",
+      amount: round2(rentRefundAmt + depositRefundAmt),
+      parts
+    };
   }
 
   const oldStay = { ...snapshot.stay };
@@ -281,7 +321,20 @@ export async function settleRescheduleAdjustment(env, tenant, snapshot, capture)
   try {
     const orderId = parent?.airtable?.orderRecordId;
     if (orderId) {
+      // Reconcile the paid-amount fields, which "Deposit Required" alone
+      // doesn't cover -- without this, Airtable shows the NEW required
+      // amount but the OLD paid amount, looking like the guest never paid.
+      const originalRentGross = parent?.captures?.RENT?.gross || 0;
+      const originalDepositGross = parent?.captures?.DEP?.gross || 0;
+      const newDepositPaid = round2(originalDepositGross + (snapshot.depositDelta > 0 ? snapshot.depositDelta : 0));
+      const newTotalPaid = round2(originalRentGross + originalDepositGross + capture.gross);
+
       await atUpdate(tenant, "Orders", orderId, {
+        "Deposit Paid": newDepositPaid,
+        "Total Paid": newTotalPaid,
+        "Remaining Balance": 0,
+        "Balance Due": 0,
+        "Deposit Status": "Held",
         "Notes": `Reschedule adjustment paid: $${capture.gross.toFixed(2)} (capture ${capture.captureId}).`
       });
 
