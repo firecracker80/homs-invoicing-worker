@@ -117,6 +117,38 @@ export async function handleReschedule(request, env) {
     const chargeAmount = round2(totalDelta + deltaFee);
     const childId = `${snapshot.bookingId}-RESCHED-${newCheckOut}`;
 
+    // PayPal requires item_total to equal the exact sum of the line items
+    // (ITEM_TOTAL_MISMATCH otherwise). rentDelta and depositDelta can move in
+    // opposite directions (e.g. more nights but a lower deposit tier) while
+    // totalDelta is still positive -- itemizing only the positive component
+    // would overstate the visible line items relative to chargeAmount, which
+    // nets in the negative one. Only itemize separately when both are >= 0;
+    // otherwise collapse to a single net adjustment line.
+    const canItemizeSeparately = rentDelta >= 0 && depositDelta >= 0;
+    const adjustmentItems = canItemizeSeparately
+      ? [
+          ...(rentDelta > 0 ? [{
+            name: "Ajuste de tarifa por cambio de fechas",
+            quantity: "1",
+            unit_amount: { currency_code: cur, value: rentDelta.toFixed(2) }
+          }] : []),
+          ...(depositDelta > 0 ? [{
+            name: "Ajuste de deposito por cambio de fechas",
+            quantity: "1",
+            unit_amount: { currency_code: cur, value: depositDelta.toFixed(2) }
+          }] : [])
+        ]
+      : [{
+          name: "Ajuste neto por cambio de fechas",
+          quantity: "1",
+          unit_amount: { currency_code: cur, value: totalDelta.toFixed(2) }
+        }];
+    adjustmentItems.push({
+      name: "Tarifa de procesamiento (ajuste)",
+      quantity: "1",
+      unit_amount: { currency_code: cur, value: deltaFee.toFixed(2) }
+    });
+
     const purchaseUnits = [{
       reference_id: `${childId}-ADJ`,
       invoice_id: `${childId}-ADJ`,
@@ -125,23 +157,7 @@ export async function handleReschedule(request, env) {
         value: chargeAmount.toFixed(2),
         breakdown: { item_total: { currency_code: cur, value: chargeAmount.toFixed(2) } }
       },
-      items: [
-        ...(rentDelta > 0 ? [{
-          name: "Ajuste de tarifa por cambio de fechas",
-          quantity: "1",
-          unit_amount: { currency_code: cur, value: rentDelta.toFixed(2) }
-        }] : []),
-        ...(depositDelta > 0 ? [{
-          name: "Ajuste de deposito por cambio de fechas",
-          quantity: "1",
-          unit_amount: { currency_code: cur, value: depositDelta.toFixed(2) }
-        }] : []),
-        {
-          name: "Tarifa de procesamiento (ajuste)",
-          quantity: "1",
-          unit_amount: { currency_code: cur, value: deltaFee.toFixed(2) }
-        }
-      ]
+      items: adjustmentItems
     }];
 
     let approveUrl, gatewayRef;
