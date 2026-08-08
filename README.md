@@ -7,7 +7,14 @@ and returns the payment link to GHL.
 
 ## Endpoints
 - `POST /booking-created` — main entry (GHL Webhook action)
-- `GET /paypal/return|cancel`, `GET /stripe/return|cancel` — stubs (payment worker phase)
+- `GET /paypal/return`, `POST /paypal/webhook` — captures both purchase units, verifies signature, settles the booking
+- `GET /stripe/return`, `POST /stripe/webhook` — verifies session/HMAC, settles the booking
+- `POST /reschedule` — moves a paid booking to new dates, handles delta charge/refund (admin-triggered, `X-Admin-Secret`)
+- `POST /cancel` — tiered cancellation charge (admin-triggered)
+- `POST /deposit/refund` — post-checkout deposit refund (admin-triggered)
+- `GET /paypal/cancel`, `GET /stripe/cancel` — guest-cancelled-checkout landing
+
+Settlement (`src/payment.js`) writes captures/fees to Payments, generates Transaction Ledger + Payout Ledger rows (85/15 rent-only split, cleaning fee per profile), and notifies GHL via the tenant's `ghlPaymentConfirmedUrl` inbound webhook.
 
 ## Deploys
 Auto-deploys on push to `main` via Cloudflare Workers Builds.
@@ -19,9 +26,12 @@ TENANTS KV namespace (managed in the Cloudflare dashboard) — never commit them
     node test-deposit-rules.js  # deposit rule engine checks
 
 ## Structure
-    src/index.js            worker entry, routing, tenant dispatch
+    src/index.js            worker entry, routing, tenant dispatch, GHL payload normalization
     src/booking-composer.js invoice math + snapshot
     src/deposit-engine.js   deposit rules: tiered / fixed / per-night / % / disabled
     src/paypal.js           PayPal Orders v2
     src/stripe.js           Stripe Checkout Sessions
-    src/airtable.js         Orders / Order Items / Payments records
+    src/airtable.js         Orders / Order Items / Payments / ledger records
+    src/payment.js          capture, settlement, ledgers, GHL payment-confirmed notify
+    src/cancellation.js     tiered cancellation charges + deposit refunds
+    src/reschedule.js       move a paid booking to new dates (delta charge/refund)
