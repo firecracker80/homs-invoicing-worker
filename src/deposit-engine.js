@@ -26,7 +26,10 @@ function depositForBlock(nights, nightlyRate) {
     case "full_rent":  return round2(nights * nightlyRate);
     case "1_week":     return round2(7 * nightlyRate);
     case "3_weeks":    return round2(21 * nightlyRate);
-    case "50_percent": return round2(0.5 * nights * nightlyRate);
+    // 0.5 * nights * rate is below the 3-week flat amount for the entire
+    // 24-30 range (0.5*24=12 through 0.5*30=15, both < 21) -- floor it at
+    // the previous tier so deposit is never LOWER for a longer stay.
+    case "50_percent": return round2(Math.max(21 * nightlyRate, 0.5 * nights * nightlyRate));
   }
 }
 
