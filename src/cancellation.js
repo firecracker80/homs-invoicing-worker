@@ -3,14 +3,19 @@
 //   POST /cancel          { bookingId, override?, reason? }   header: X-Admin-Secret
 //   POST /deposit/refund  { bookingId, claimAmount?, reason? } header: X-Admin-Secret
 //
-// Policy (confirmed 2026-07-18):
+// Policy (confirmed 2026-07-18, already-checked-in tier added 2026-08-07):
 //   Charge basis: RENT ONLY. Tiers by time before check-in (3PM local, configurable):
-//     < 24 hrs        → 50%
-//     24 hrs – 5 days → 30%
-//     > 5 days        → 20%
+//     already checked in → 100% (common practice: those nights can't be resold)
+//     < 24 hrs           → 50%
+//     24 hrs – 5 days    → 30%
+//     > 5 days           → 20%
 //   Deposit: always 100% refunded on cancellation. Cleaning: 100% refunded.
 //   Processing fee: non-refundable. Cancellation charge splits per profile (85/15).
 //   override: "full_refund" → documented exceptions (refund rent+cleaning+deposit; fee still retained).
+//   The same tier ladder (cancellationTier, below) is reused by reschedule.js:
+//   shortening a paid stay is treated as a partial cancellation of the dropped
+//   nights, charged at the same rate a full cancellation would be at that
+//   notice period.
 
 import { getAccessToken } from "./paypal.js";
 import { atUpdate, atFind, atCreate } from "./airtable.js";
@@ -33,10 +38,13 @@ function adminAuthorized(request, env, tenant) {
 export { adminAuthorized, notifyGHL };
 
 // ---- tier math ----
-export function calcCancellation(snapshot, nowMs, tenant, override) {
+// Shared by /cancel (whole booking) and reschedule.js (partial cancellation
+// of dropped nights). checkInDateStr is "YYYY-MM-DD" -- the CURRENT check-in
+// on record, not a prospective new one.
+export function cancellationTier(checkInDateStr, nowMs, tenant, override) {
   const checkInHour = tenant.checkInHour ?? 15;              // 3 PM
   const tzOffsetHours = tenant.tzOffsetHours ?? -4;          // AST
-  const anchor = new Date(`${snapshot.stay.checkIn}T00:00:00Z`).getTime()
+  const anchor = new Date(`${checkInDateStr}T00:00:00Z`).getTime()
     + (checkInHour - tzOffsetHours) * 3600000;               // check-in moment in UTC ms
   const hoursUntil = (anchor - nowMs) / 3600000;
 
@@ -46,10 +54,20 @@ export function calcCancellation(snapshot, nowMs, tenant, override) {
     .includes(String(override || "").trim().toLowerCase());
 
   let chargePct, tier;
-  if (isException) { chargePct = 0; tier = "exception_full_refund"; }
+  if (isException)           { chargePct = 0;    tier = "exception_full_refund"; }
+  // hoursUntil < 0 means the check-in moment has already passed -- the guest
+  // is mid-stay (or a no-show past arrival). Common practice: those nights
+  // aren't resellable on that notice, so nothing is refunded on them.
+  else if (hoursUntil < 0)   { chargePct = 1.00; tier = "already_checked_in"; }
   else if (hoursUntil < 24)  { chargePct = 0.50; tier = "under_24h"; }
   else if (hoursUntil < 120) { chargePct = 0.30; tier = "24h_to_5d"; }
   else                       { chargePct = 0.20; tier = "over_5d"; }
+
+  return { tier, chargePct, hoursUntil: round2(hoursUntil) };
+}
+
+export function calcCancellation(snapshot, nowMs, tenant, override) {
+  const { tier, chargePct, hoursUntil } = cancellationTier(snapshot.stay.checkIn, nowMs, tenant, override);
 
   const rent = snapshot.charges.rentTotal;
   const cleaning = snapshot.charges.cleaningFee;
