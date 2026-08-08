@@ -11,7 +11,7 @@ import { calcSecurityDeposit, round2 } from "./deposit-engine.js";
 import { createOrder, getAccessToken } from "./paypal.js";
 import { createCheckoutSession } from "./stripe.js";
 import { atUpdate } from "./airtable.js";
-import { adminAuthorized, notifyGHL } from "./cancellation.js";
+import { adminAuthorized, notifyGHL, cancellationTier } from "./cancellation.js";
 import { atCreate } from "./airtable.js";
 
 const json = (data, status = 200) =>
@@ -104,12 +104,30 @@ export async function handleReschedule(request, env) {
 
   const rentDelta = round2(newRent - oldRent);
   const depositDelta = round2(newDeposit - oldDeposit);
-  const totalDelta = round2(rentDelta + depositDelta);
   const feePct = snapshot.charges.feePct ?? tenant.processingFeePct ?? 0.06;
   const cur = tenant.currency || "USD";
 
   let settlement = { type: "none", amount: 0 };
-  let deltaFeeForDisplay = 0; // shown to the guest regardless of branch
+  let deltaFeeForDisplay = 0; // processing fee shown when NEW money is charged (extensions only)
+
+  // Shortening (fewer nights) gives back rent the guest already paid for --
+  // treat it as a partial cancellation of the dropped nights, at the same
+  // tiered rate a full /cancel would charge at this notice period (including
+  // the 100% "already checked in" tier). Deposit delta is NEVER fee-adjusted:
+  // the standing rule is deposit is always refunded/charged in full, so only
+  // the rent portion absorbs an admin fee. Extending a stay (rentDelta >= 0)
+  // is not a cancellation -- no admin fee applies there.
+  let netRentDelta = rentDelta;
+  let cancellationInfo = null;
+  if (rentDelta < 0) {
+    const { tier, chargePct, hoursUntil } = cancellationTier(snapshot.stay.checkIn, Date.now(), tenant, body.override);
+    const lostRent = round2(-rentDelta);
+    const adminFee = round2(lostRent * chargePct);
+    netRentDelta = round2(-(lostRent - adminFee)); // always <= 0, since chargePct maxes at 1.00
+    cancellationInfo = { tier, chargePct, hoursUntil, lostRent, adminFee };
+  }
+
+  const totalDelta = round2(netRentDelta + depositDelta);
 
   if (totalDelta > 0) {
     const deltaFee = round2(totalDelta * feePct);
@@ -118,19 +136,19 @@ export async function handleReschedule(request, env) {
     const childId = `${snapshot.bookingId}-RESCHED-${newCheckOut}`;
 
     // PayPal requires item_total to equal the exact sum of the line items
-    // (ITEM_TOTAL_MISMATCH otherwise). rentDelta and depositDelta can move in
-    // opposite directions (e.g. more nights but a lower deposit tier) while
-    // totalDelta is still positive -- itemizing only the positive component
-    // would overstate the visible line items relative to chargeAmount, which
-    // nets in the negative one. Only itemize separately when both are >= 0;
-    // otherwise collapse to a single net adjustment line.
-    const canItemizeSeparately = rentDelta >= 0 && depositDelta >= 0;
+    // (ITEM_TOTAL_MISMATCH otherwise). netRentDelta and depositDelta can move
+    // in opposite directions (e.g. a non-tiered deposit rule that isn't
+    // monotonic in nights) while totalDelta is still positive -- itemizing
+    // only the positive component would overstate the visible line items
+    // relative to chargeAmount, which nets in the negative one. Only itemize
+    // separately when both are >= 0; otherwise collapse to a single net line.
+    const canItemizeSeparately = netRentDelta >= 0 && depositDelta >= 0;
     const adjustmentItems = canItemizeSeparately
       ? [
-          ...(rentDelta > 0 ? [{
+          ...(netRentDelta > 0 ? [{
             name: "Ajuste de tarifa por cambio de fechas",
             quantity: "1",
-            unit_amount: { currency_code: cur, value: rentDelta.toFixed(2) }
+            unit_amount: { currency_code: cur, value: netRentDelta.toFixed(2) }
           }] : []),
           ...(depositDelta > 0 ? [{
             name: "Ajuste de deposito por cambio de fechas",
@@ -191,7 +209,7 @@ export async function handleReschedule(request, env) {
       paypal: (tenant.gateway || "paypal") !== "stripe" ? { orderId: gatewayRef, approveUrl } : undefined,
       stripe: (tenant.gateway || "paypal") === "stripe" ? { sessionId: gatewayRef, checkoutUrl: approveUrl } : undefined,
       amount: chargeAmount,
-      rentDelta, depositDelta, deltaFee,
+      rentDelta: netRentDelta, depositDelta, deltaFee,
       guest: snapshot.guest,
       ghlContactId: snapshot.ghlContactId,
       propertyCode: snapshot.propertyCode,
@@ -205,7 +223,9 @@ export async function handleReschedule(request, env) {
     // deposit-tier drop bundled with a small rent change) and PayPal rejects
     // the whole request. A failure here must never crash the endpoint --
     // report it cleanly so the admin can finish it manually in PayPal.
-    const rentRefundAmt = rentDelta < 0 ? round2(-rentDelta) : 0;
+    // rentRefundAmt already has the cancellation-tier admin fee netted out
+    // (via netRentDelta above) when the reschedule dropped nights.
+    const rentRefundAmt = netRentDelta < 0 ? round2(-netRentDelta) : 0;
     const depositRefundAmt = depositDelta < 0 ? round2(-depositDelta) : 0;
     const rentCaptureId = snapshot.captures?.RENT?.captureId;
     const depCaptureId = snapshot.captures?.DEP?.captureId;
@@ -216,9 +236,12 @@ export async function handleReschedule(request, env) {
         parts.push({ type: "rent_refund_needed_manual", amount: rentRefundAmt });
       } else {
         try {
+          const feeNote = cancellationInfo?.adminFee > 0
+            ? ` (admin fee $${cancellationInfo.adminFee.toFixed(2)} retained, tier ${cancellationInfo.tier})`
+            : "";
           const refundId = await refundPayPalPartial(
             tenant, env, rentCaptureId, rentRefundAmt,
-            `Reschedule ${snapshot.bookingId}: ajuste de tarifa por cambio de fechas`
+            `Reschedule ${snapshot.bookingId}: ajuste de tarifa por cambio de fechas${feeNote}`
           );
           parts.push({ type: "rent_refund_issued", amount: rentRefundAmt, refundId });
         } catch (err) {
@@ -251,6 +274,11 @@ export async function handleReschedule(request, env) {
       amount: round2(rentRefundAmt + depositRefundAmt),
       parts
     };
+  } else if (cancellationInfo?.adminFee > 0) {
+    // Rare: the admin fee happened to exactly offset the rest of the delta
+    // (net $0 money movement) -- no gateway call needed, but the fee was
+    // still earned and gets recorded in the ledger below.
+    settlement = { type: "admin_fee_only", amount: 0 };
   }
 
   const oldStay = { ...snapshot.stay };
@@ -265,7 +293,7 @@ export async function handleReschedule(request, env) {
     at: new Date().toISOString(),
     from: oldStay,
     to: { checkIn: newCheckIn, checkOut: newCheckOut, nights: newNights },
-    rentDelta, depositDelta, totalDelta, settlement,
+    rentDelta, netRentDelta, depositDelta, totalDelta, settlement, cancellationInfo,
     reason: body.reason || ""
   }];
   await env.BOOKINGS.put(snapshot.bookingId, JSON.stringify(snapshot));
@@ -274,14 +302,44 @@ export async function handleReschedule(request, env) {
   try {
     const orderId = snapshot.airtable?.orderRecordId;
     if (orderId) {
+      const feeNote = cancellationInfo?.adminFee > 0
+        ? ` Admin fee $${cancellationInfo.adminFee.toFixed(2)} retained (tier ${cancellationInfo.tier}, ${Math.round(cancellationInfo.chargePct * 100)}%).`
+        : "";
       await atUpdate(tenant, "Orders", orderId, {
         "Check-in Date": newCheckIn,
         "Check-out Date": newCheckOut,
         "Nights": newNights,
         "Reservation Total": round2(newRent + snapshot.charges.cleaningFee + snapshot.charges.processingFee),
         "Deposit Required": newDeposit,
-        "Notes": `Reschedule: ${oldStay.checkIn}->${oldStay.checkOut} (${oldStay.nights}n) to ${newCheckIn}->${newCheckOut} (${newNights}n). Delta $${totalDelta.toFixed(2)} (${settlement.type}). ${body.reason || ""}`.trim()
+        "Notes": `Reschedule: ${oldStay.checkIn}->${oldStay.checkOut} (${oldStay.nights}n) to ${newCheckIn}->${newCheckOut} (${newNights}n). Delta $${totalDelta.toFixed(2)} (${settlement.type}).${feeNote} ${body.reason || ""}`.trim()
       });
+
+      // Record the retained admin fee the same way /cancel does: an income
+      // ledger row + an owner/manager payout split, so a reschedule that
+      // shortens a stay accounts for itself identically to a cancellation.
+      if (cancellationInfo?.adminFee > 0) {
+        const now8601 = new Date().toISOString();
+        const gw = snapshot.gateway === "stripe" ? "Stripe" : "PayPal";
+        await atCreate(tenant, "Transaction Ledger", [{
+          "Entry Date": now8601, "Related Order": [orderId], "Transaction Type": "cancellation_charge",
+          "Direction": "In", "Gateway": gw, "Reference Number": snapshot.bookingId,
+          "Amount": cancellationInfo.adminFee, "Currency": cur, "Reconciled": false,
+          "Notes": `${snapshot.bookingId} reschedule admin fee, ${Math.round(cancellationInfo.chargePct * 100)}% of $${cancellationInfo.lostRent.toFixed(2)} dropped rent (tier ${cancellationInfo.tier})`
+        }]);
+        const ownerPct = snapshot.payout?.ownerPct ?? tenant.ownerPct ?? 0.85;
+        const ownerAmt = round2(cancellationInfo.adminFee * ownerPct);
+        const managerAmt = round2(cancellationInfo.adminFee - ownerAmt);
+        await atCreate(tenant, "Payout Ledger", [
+          { "Recipient": "Owner", "Payout Method": "Manual Transfer",
+            "Reason": `Reschedule admin fee ${Math.round(ownerPct * 100)}% — ${snapshot.bookingId}`,
+            "Payout Amount": ownerAmt, "Currency": cur, "Scheduled Date": now8601.slice(0, 10),
+            "Payout Status": "Pending", "Order": [orderId] },
+          { "Recipient": "Manager", "Payout Method": "Manual Transfer",
+            "Reason": `Reschedule admin fee (manager share) — ${snapshot.bookingId}`,
+            "Payout Amount": managerAmt, "Currency": cur, "Scheduled Date": now8601.slice(0, 10),
+            "Payout Status": "Pending", "Order": [orderId] }
+        ]);
+      }
     }
   } catch (err) {
     console.error(`Reschedule Airtable sync failed for ${snapshot.bookingId}:`, err.message);
@@ -303,6 +361,8 @@ export async function handleReschedule(request, env) {
     totalDelta: totalDelta.toFixed(2),
     settlementType: settlement.type,
     approveUrl: settlement.approveUrl || "",
+    adminFeeRetained: (cancellationInfo?.adminFee ?? 0).toFixed(2),
+    cancellationTier: cancellationInfo?.tier || "",
     propertyName: snapshot.propertyCode || tenant.brandName,
     calendarUpdateRequired: "true"
   });
@@ -311,7 +371,7 @@ export async function handleReschedule(request, env) {
     bookingId: snapshot.bookingId,
     oldDates: oldStay,
     newDates: { checkIn: newCheckIn, checkOut: newCheckOut, nights: newNights },
-    rentDelta, depositDelta, totalDelta, settlement,
+    rentDelta, netRentDelta, depositDelta, totalDelta, settlement, cancellationInfo,
     airtableSync: airtableOk ? "ok" : "failed",
     calendarUpdateRequired: true
   });
