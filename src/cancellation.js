@@ -205,14 +205,37 @@ export async function handleCancel(request, env) {
   const calc = calcCancellation(snapshot, now, tenant, body.override);
   const note = `Cancelación ${snapshot.bookingId} — reembolso según política`;
 
-  const rentCaptureId = snapshot.captures?.RENT?.captureId;
+    const rentCaptureId = snapshot.captures?.RENT?.captureId;
   const depCaptureId = snapshot.captures?.DEP?.captureId;
   const refundIds = {};
-  if (calc.rentUnitRefund > 0 && rentCaptureId)
-    refundIds.rent = await gatewayRefund(tenant, env, snapshot, rentCaptureId, calc.rentUnitRefund, note);
-  if (calc.depositRefund > 0 && depCaptureId)
-    refundIds.deposit = await gatewayRefund(tenant, env, snapshot, depCaptureId,
-      snapshot.gateway === "stripe" ? calc.depositRefund : null, note); // PayPal DEP = full refund
+  const refundFailures = [];
+
+  if (calc.rentUnitRefund > 0) {
+    if (!rentCaptureId) {
+      refundFailures.push({ type: "rent_refund_needed_manual", amount: calc.rentUnitRefund });
+    } else {
+      try {
+        refundIds.rent = await gatewayRefund(tenant, env, snapshot, rentCaptureId, calc.rentUnitRefund, note);
+      } catch (err) {
+        console.error(`Cancel rent refund failed for ${snapshot.bookingId}: ${err.message}`);
+        refundFailures.push({ type: "rent_refund_failed", amount: calc.rentUnitRefund, error: err.message });
+      }
+    }
+  }
+
+  if (calc.depositRefund > 0) {
+    if (!depCaptureId) {
+      refundFailures.push({ type: "deposit_refund_needed_manual", amount: calc.depositRefund });
+    } else {
+      try {
+        refundIds.deposit = await gatewayRefund(tenant, env, snapshot, depCaptureId,
+          snapshot.gateway === "stripe" ? calc.depositRefund : null, note); // PayPal DEP = full refund
+      } catch (err) {
+        console.error(`Cancel deposit refund failed for ${snapshot.bookingId}: ${err.message}`);
+        refundFailures.push({ type: "deposit_refund_failed", amount: calc.depositRefund, error: err.message });
+      }
+    }
+  } // PayPal DEP = full refund
 
   // ---- snapshot ----
   snapshot.cancelled = true;
