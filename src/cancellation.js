@@ -156,8 +156,6 @@ async function loadContext(request, env) {
 }
 
 async function resolveOrderRecordId(tenant, snapshot) {
-
-async function resolveOrderRecordId(tenant, snapshot) {
   if (snapshot.airtable?.orderRecordId) return snapshot.airtable.orderRecordId;
   const found = await atFind(tenant, "Orders", `{GHL Booking ID}="${snapshot.bookingId}"`);
   return found?.[0]?.id || null;
