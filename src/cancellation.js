@@ -144,13 +144,11 @@ async function gatewayRefund(tenant, env, snapshot, captureId, amount, note) {
 // ---- shared helpers ----
 async function loadContext(request, env) {
   const body = await request.json();
-  const snapshot = body.bookingId ? await env.BOOKINGS.get(body.bookingId, { type: "json" }) : null;
-  if (!snapshot) return { error: json({ error: "Unknown bookingId", receivedBookingId: body.bookingId ?? null }, 404) };
-  const tenant = await env.TENANTS.get(snapshot.locationId, { type: "json" });
-  if (!tenant) return { error: json({ error: "Unknown tenant" }, 404) };
-  if (!adminAuthorized(request, env, tenant)) return { error: json({ error: "Unauthorized" }, 401) };
-  return { body, snapshot, tenant };
-}
+    const snapshot = body.bookingId ? await env.BOOKINGS.get(body.bookingId, { type: "json" }) : null;
+  if (!snapshot) {
+    console.error(`Cancel/refund reject: Unknown bookingId. Raw body:`, JSON.stringify(body));
+    return { error: json({ error: "Unknown bookingId", receivedBookingId: body.bookingId ?? null }, 404) };
+  }
 
 async function resolveOrderRecordId(tenant, snapshot) {
   if (snapshot.airtable?.orderRecordId) return snapshot.airtable.orderRecordId;
