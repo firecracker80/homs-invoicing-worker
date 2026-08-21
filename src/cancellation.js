@@ -343,8 +343,9 @@ export async function handleCancel(request, env) {
     checkIn: snapshot.stay.checkIn, propertyName: snapshot.propertyCode || tenant.brandName
   });
 
-  return json({
+    return json({
     cancelled: true, paid: true, calculation: calc, refundIds,
+    refundFailures: refundFailures.length ? refundFailures : null,
     airtableSync: snapshot.cancellationSyncFailed ? "failed" : "ok",
     airtableSyncError: snapshot.cancellationSyncError || null
   });
