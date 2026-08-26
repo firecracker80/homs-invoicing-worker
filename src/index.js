@@ -7,6 +7,7 @@ import { createBookingRecords } from "./airtable.js";
 import { handlePayPalReturn, handlePayPalWebhook, handleStripeReturn, handleStripeWebhook } from "./payment.js";
 import { handleCancel, handleDepositRefund } from "./cancellation.js";
 import { handleReschedule } from "./reschedule.js";
+import { resolveDraftInvoiceId, enrichAndSendInvoice } from "./ghl-invoice.js";
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -104,6 +105,8 @@ async function handleBookingCreated(request, env) {
     return json({
       bookingId: "SAMPLE-EDITOR-TEST",
       approveUrl: "https://www.sandbox.paypal.com/checkoutnow?token=SAMPLE",
+      mode: "paypal_url",
+      invoiceId: "SAMPLE-INVOICE-ID",
       grandTotal: "1037.74",
       rentTotal: "420.00",
       cleaningFee: "69.00",
@@ -158,15 +161,21 @@ async function handleBookingCreated(request, env) {
   if (tenant.bookingWorkerEnabled === false)
     return json({ error: "Booking worker disabled for this account" }, 403);
 
-  // idempotency: existing snapshot → return existing link
+  // idempotency: existing snapshot → return existing link/invoice, no re-fire.
+  // Re-sending a GHL invoice on a webhook retry would double-notify the
+  // guest -- ghlInvoice.invoiceId counts as "already handled" exactly like
+  // an existing PayPal/Stripe link does.
   const existing = await env.BOOKINGS.get(payload.bookingId, { type: "json" });
   const existingUrl = existing?.paypal?.approveUrl || existing?.stripe?.checkoutUrl;
-  if (existingUrl) {
+  const existingInvoiceId = existing?.ghlInvoice?.invoiceId;
+  if (existingUrl || existingInvoiceId) {
     // Return the FULL field set from the stored snapshot so downstream
     // mappings (SMS, contact updates) work identically on cached hits.
     return json({
       bookingId: existing.bookingId,
-      approveUrl: existingUrl,
+      approveUrl: existingUrl || null,
+      mode: existingInvoiceId ? "enrich" : "paypal_url",
+      invoiceId: existingInvoiceId || undefined,
       grandTotal: existing.charges.grandTotal.toFixed(2),
       rentTotal: existing.charges.rentTotal.toFixed(2),
       cleaningFee: existing.charges.cleaningFee.toFixed(2),
@@ -175,7 +184,7 @@ async function handleBookingCreated(request, env) {
       nights: existing.stay.nights,
       nightlyRate: existing.stay.nightlyRate.toFixed(2),
       gateway: existing.gateway || "paypal",
-      gatewayRef: existing.paypal?.orderId || existing.stripe?.sessionId || "",
+      gatewayRef: existing.paypal?.orderId || existing.stripe?.sessionId || existingInvoiceId || "",
       airtableSync: existing.airtable ? "ok" : "unknown",
       idempotent: true
     });
@@ -183,19 +192,57 @@ async function handleBookingCreated(request, env) {
 
   const { snapshot, purchaseUnits } = composeBooking(payload, tenant);
 
-  // Gateway dispatch — per-tenant (Accounts."Default Payment Gateway")
-  const gateway = (tenant.gateway || "paypal").toLowerCase();
-  let approveUrl, gatewayRef;
-  if (gateway === "stripe") {
-    const { sessionId, checkoutUrl } = await createCheckoutSession(tenant, env, snapshot, env.WORKER_URL);
-    snapshot.stripe = { sessionId, checkoutUrl };
-    approveUrl = checkoutUrl;
-    gatewayRef = sessionId;
-  } else {
-    const { orderId, approveUrl: ppUrl } = await createOrder(tenant, env, snapshot.bookingId, purchaseUnits, env.WORKER_URL);
-    snapshot.paypal = { orderId, approveUrl: ppUrl };
-    approveUrl = ppUrl;
-    gatewayRef = orderId;
+  // Invoice strategy — additive path, tenant KV overrides env, default is
+  // today's behavior. INVOICE_STRATEGY "enrich" targets the draft invoice
+  // GHL's rental calendar already auto-created instead of generating a
+  // PayPal/Stripe checkout link. Any failure here falls through to the
+  // existing PayPal-URL flow below unmodified — nothing lost.
+  const invoiceStrategy = tenant.invoiceStrategy ?? env.INVOICE_STRATEGY ?? "paypal_url";
+  let approveUrl, gatewayRef, gateway;
+
+  if (invoiceStrategy === "enrich") {
+    try {
+      const invoiceId = await resolveDraftInvoiceId({
+        tenant, env,
+        contactId: snapshot.ghlContactId,
+        bookingId: snapshot.bookingId,
+        hintedInvoiceId: payload.invoiceId || payload.invoice?.id || null
+      });
+      const { items } = await enrichAndSendInvoice({
+        tenant, env,
+        locationId: snapshot.locationId,
+        invoiceId,
+        snapshot,
+        contact: {
+          id: snapshot.ghlContactId,
+          name: snapshot.guest.name,
+          email: snapshot.guest.email,
+          phoneNo: snapshot.guest.phone
+        }
+      });
+      snapshot.ghlInvoice = { invoiceId, appendedItems: items.length, sentAt: new Date().toISOString() };
+      gateway = "ghl_invoice";
+      gatewayRef = invoiceId;
+      approveUrl = null; // guest pays via the invoice GHL just sent, not a link we generate
+    } catch (err) {
+      console.error(`GHL invoice enrich failed for ${snapshot.bookingId}, falling back to paypal_url:`, err.message);
+    }
+  }
+
+  // Existing PayPal-URL flow — UNMODIFIED, also the fallback target above.
+  if (!gateway) {
+    gateway = (tenant.gateway || "paypal").toLowerCase();
+    if (gateway === "stripe") {
+      const { sessionId, checkoutUrl } = await createCheckoutSession(tenant, env, snapshot, env.WORKER_URL);
+      snapshot.stripe = { sessionId, checkoutUrl };
+      approveUrl = checkoutUrl;
+      gatewayRef = sessionId;
+    } else {
+      const { orderId, approveUrl: ppUrl } = await createOrder(tenant, env, snapshot.bookingId, purchaseUnits, env.WORKER_URL);
+      snapshot.paypal = { orderId, approveUrl: ppUrl };
+      approveUrl = ppUrl;
+      gatewayRef = orderId;
+    }
   }
   snapshot.gateway = gateway;
 
@@ -216,7 +263,9 @@ async function handleBookingCreated(request, env) {
   // Optional push notification: if the tenant config defines ghlPaymentLinkUrl
   // (a GHL Inbound Webhook trigger URL), POST the payment link + totals there.
   // Fire-and-forget: a failure here must never block the booking response.
-  if (tenant.ghlPaymentLinkUrl) {
+  // Skipped in enrich mode — there is no separate link to push, GHL already
+  // emailed/texted the invoice itself as part of send-invoice above.
+  if (tenant.ghlPaymentLinkUrl && gateway !== "ghl_invoice") {
     try {
       await fetch(tenant.ghlPaymentLinkUrl, {
         method: "POST",
@@ -248,6 +297,8 @@ async function handleBookingCreated(request, env) {
   return json({
     bookingId: snapshot.bookingId,
     approveUrl,
+    mode: gateway === "ghl_invoice" ? "enrich" : "paypal_url",
+    invoiceId: snapshot.ghlInvoice?.invoiceId,
     grandTotal: snapshot.charges.grandTotal.toFixed(2),
     rentTotal: snapshot.charges.rentTotal.toFixed(2),
     cleaningFee: snapshot.charges.cleaningFee.toFixed(2),
