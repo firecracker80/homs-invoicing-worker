@@ -37,8 +37,8 @@ function resolveSecret(tenant, env, nameKey, inlineKey) {
 
 // --- thin GHL REST helper -------------------------------------------------
 async function ghlFetch(tenant, env, path, { method = "GET", body } = {}, fetchImpl = fetch) {
-  const token = resolveSecret(tenant, env, "ghlTokenSecretName", "ghlToken");
-  if (!token) throw new Error("No GHL token configured for this tenant (ghlToken / ghlTokenSecretName)");
+  const token = resolveSecret(tenant, env, "ghlTokenSecretName", "ghlPit");
+  if (!token) throw new Error("No GHL token configured for this tenant (ghlPit / ghlTokenSecretName)");
   const res = await fetchImpl(`${GHL_BASE}${path}`, {
     method,
     headers: {
