@@ -15,6 +15,7 @@ const kv = { async get(k, o) { const v = store.get(k); return v == null ? null :
 const hdr = s => ({ get: n => n === "X-Admin-Secret" ? s : null });
 
 const paypalOrderRequestIds = [];
+let calendarPutBody = null;
 global.fetch = async (url, opts = {}) => {
   if (url.includes("oauth2/token")) return { ok: true, json: async () => ({ access_token: "T" }) };
   if (url.includes("checkout/orders")) {
@@ -25,6 +26,20 @@ global.fetch = async (url, opts = {}) => {
     const b = opts.body ? JSON.parse(opts.body) : null;
     if (opts.method === "PATCH") return { ok: true, json: async () => ({ id: "patched" }) };
     return { ok: true, json: async () => ({ records: (b?.records || []).map((r, i) => ({ id: "rec" + i, fields: r.fields })) }) };
+  }
+  // ghl-calendar.js's real target -- must be checked BEFORE the generic
+  // leadconnector catch-all below, since "backend.leadconnectorhq.com" also
+  // contains that substring.
+  if (url.includes("backend.leadconnectorhq.com/calendars/bookings/details/")) {
+    return { ok: true, text: async () => JSON.stringify({ serviceBooking: {
+      contactId: "c1", appointmentTitle: "JT1 stay", deleted: false,
+      services: [{ id: "svc1", position: 0, name: "JT1 Unit A", price: 70, unitPrice: 70,
+        startDate: "old", endDate: "old", staffId: "should-not-be-echoed" }]
+    } }) };
+  }
+  if (url.includes("backend.leadconnectorhq.com/calendars/bookings/manage/")) {
+    calendarPutBody = JSON.parse(opts.body);
+    return { ok: true, text: async () => JSON.stringify({ ok: true }) };
   }
   if (url.includes("leadconnector")) return { ok: true, json: async () => ({ ok: true }) };
   throw new Error("unmocked: " + url);
@@ -37,7 +52,8 @@ await kv.put("L1", JSON.stringify({
   defaultCleaningFee: 69, cleaningFeeRecipient: "manager", bookingWorkerEnabled: true,
   gateway: "paypal", deposit: { rule: "tiered" },
   paypalApi: "https://p", paypalClientId: "C", paypalSecret: "S",
-  airtableBaseId: "a", airtableToken: "pat", defaultPropertyRecId: "rP"
+  airtableBaseId: "a", airtableToken: "pat", defaultPropertyRecId: "rP",
+  ghlPit: "test-pit"
 }));
 
 // Create a booking but never settle it (skip /paypal/return -- stays unpaid)
@@ -70,6 +86,15 @@ assert(after.stay.nights === 7, "snapshot must reflect new night count");
 assert(after.charges.rentTotal === 490, `snapshot rent must reflect new price (7 nights x $70 = $490), got ${after.charges.rentTotal}`);
 assert(!after.settled, "still unsettled -- guest has not paid yet, this only issued a fresh link");
 assert(after.paypal.orderId === "PP-2", "snapshot must point at the NEW order, not the stale original");
+
+// ghl-calendar.js integration: real GET-then-PUT round trip, new dates pushed,
+// staffId (not in the whitelist) must not be echoed back or GHL 422s.
+assert(r.calendar?.ok === true, `calendar update should have succeeded, got: ${JSON.stringify(r.calendar)}`);
+assert.equal(r.calendarUpdateRequired, false, "calendarUpdateRequired must be false when the calendar write succeeded");
+assert.ok(calendarPutBody, "expected a PUT to calendars/bookings/manage");
+assert.equal(calendarPutBody.selectedSlotInfo.services[0].startDate.startsWith("2026-09-01"), true);
+assert.equal(calendarPutBody.selectedSlotInfo.services[0].staffId, undefined, "non-whitelisted fields (staffId) must not be echoed back to GHL");
+console.log("1b) Calendar push -> ok:", r.calendar.ok, "| new startDate:", calendarPutBody.selectedSlotInfo.services[0].startDate);
 
 // Cancelled bookings must still be rejected (indentation fix must not have broken the guard)
 await worker.fetch({ method: "POST", url: "https://w.dev/booking-created", json: async () => ({
