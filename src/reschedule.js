@@ -13,6 +13,7 @@ import { createCheckoutSession } from "./stripe.js";
 import { atUpdate } from "./airtable.js";
 import { adminAuthorized, notifyGHL, cancellationTier } from "./cancellation.js";
 import { atCreate } from "./airtable.js";
+import { updateGhlBookingDates } from "./ghl-calendar.js";
 
 const json = (data, status = 200) =>
   new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json" } });
@@ -186,6 +187,8 @@ export async function handleReschedule(request, env) {
       airtableOk0 = false;
     }
 
+    const calendar = await updateGhlBookingDates(env, tenant, snapshot, newCheckIn, newCheckOut);
+    
     await notifyGHL(tenant.ghlRescheduleUrl, {
       event: "booking_rescheduled",
       bookingId: snapshot.bookingId,
@@ -203,7 +206,7 @@ export async function handleReschedule(request, env) {
       adminFeeRetained: "0.00",
       cancellationTier: "",
       propertyName: snapshot.propertyCode || tenant.brandName,
-      calendarUpdateRequired: "true"
+      calendarUpdateRequired: calendar.ok ? "false" : "true"
     });
 
     return json({
@@ -212,7 +215,7 @@ export async function handleReschedule(request, env) {
       newDates: { checkIn: newCheckIn, checkOut: newCheckOut, nights: newNights },
       settlement: { type: "unpaid_new_link", approveUrl, grandTotal: newGrandTotal },
       airtableSync: airtableOk0 ? "ok" : "failed",
-      calendarUpdateRequired: true
+      calendarUpdateRequired: !calendar.ok, calendar
     });
   }
 
@@ -460,6 +463,8 @@ export async function handleReschedule(request, env) {
     airtableOk = false;
   }
 
+  const calendar = await updateGhlBookingDates(env, tenant, snapshot, newCheckIn, newCheckOut);
+
   await notifyGHL(tenant.ghlRescheduleUrl, {
     event: "booking_rescheduled",
     bookingId: snapshot.bookingId,
@@ -478,7 +483,7 @@ export async function handleReschedule(request, env) {
     adminFeeRetained: (cancellationInfo?.adminFee ?? 0).toFixed(2),
     cancellationTier: cancellationInfo?.tier || "",
     propertyName: snapshot.propertyCode || tenant.brandName,
-    calendarUpdateRequired: "true"
+    calendarUpdateRequired: calendar.ok ? "false" : "true"
   });
 
   return json({
@@ -487,7 +492,7 @@ export async function handleReschedule(request, env) {
     newDates: { checkIn: newCheckIn, checkOut: newCheckOut, nights: newNights },
     rentDelta, netRentDelta, depositDelta, totalDelta, settlement, cancellationInfo,
     airtableSync: airtableOk ? "ok" : "failed",
-    calendarUpdateRequired: true
+    calendarUpdateRequired: !calendar.ok, calendar
   });
 }
 
