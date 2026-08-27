@@ -218,7 +218,10 @@ async function handleBookingCreated(request, env) {
           name: snapshot.guest.name,
           email: snapshot.guest.email,
           phoneNo: snapshot.guest.phone
-        }
+        },
+        // {{user.id}} on the webhook, not tenant config -- who is sending
+        // this invoice is a per-request fact, not a per-client one.
+        userId: payload.userId
       });
       snapshot.ghlInvoice = { invoiceId, appendedItems: items.length, sentAt: new Date().toISOString() };
       gateway = "ghl_invoice";

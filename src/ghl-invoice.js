@@ -26,9 +26,20 @@
 // paypalSecretName/airtableToken pattern already used in
 // paypal.js/stripe.js/airtable.js. Tenant KV needs either ghlPit (inline,
 // fine for pilot) or ghlPitSecretName (Worker secret, recommended once past
-// a couple of clients), plus ghlUserId. Field name matches the "PIT" term
-// GHL itself uses for these tokens (see ghl-account-registry.json's
-// pit_connector), and the name already in use on existing tenant entries.
+// a couple of clients). Field name matches the "PIT" term GHL itself uses
+// for these tokens (see ghl-account-registry.json's pit_connector), and the
+// name already in use on existing tenant entries.
+//
+// bookingId is NOT something HOMS invents (earlier drafts assumed a "CC-"
+// prefix) -- it IS the real rental-calendar booking id, captured at the
+// contact level in GHL and fed to /booking-created via the {{contact.booking_id}}
+// merge tag. Used as-is for the invoiceNumber correlation match.
+//
+// userId (required by send-invoice) is likewise per-REQUEST, not
+// per-tenant config: it comes from {{user.id}} on the booking webhook, same
+// as contactId/locationId already do. Keeps onboarding a new client to
+// zero static per-tenant GHL-user config -- it scales across every user in
+// every account without a KV entry per person.
 
 const GHL_BASE = "https://services.leadconnectorhq.com";
 const GHL_VERSION = "2021-07-28";
@@ -100,9 +111,10 @@ export async function resolveDraftInvoiceId(
   });
   const list = await ghlFetch(tenant, env, `/invoices/?${q}`, {}, fetchImpl);
   const invoices = list.invoices || [];
-  const wanted = `CC-${bookingId}`;
 
-  const byNumber = invoices.find(i => i.invoiceNumber === wanted);
+  // bookingId IS the correlation number -- it's the real rental-calendar
+  // booking id (from {{contact.booking_id}}), not a HOMS-invented prefix.
+  const byNumber = invoices.find(i => i.invoiceNumber === bookingId);
   if (byNumber) return byNumber._id;
 
   // no correlation number yet -> newest draft for this contact
@@ -112,10 +124,15 @@ export async function resolveDraftInvoiceId(
 }
 
 // --- enrich + send ---------------------------------------------------------
+// userId comes from the booking webhook's {{user.id}} (see index.js), not
+// tenant config -- required by send-invoice, but it identifies WHO is
+// sending, which is a per-request fact, not a per-client one.
 export async function enrichAndSendInvoice(
-  { tenant, env, locationId, invoiceId, snapshot, contact },
+  { tenant, env, locationId, invoiceId, snapshot, contact, userId },
   fetchImpl = fetch
 ) {
+  if (!userId) throw new Error("No userId on this request ({{user.id}} merge tag) -- required by send-invoice");
+
   // update-invoice requires the full body (name/currency/issueDate/dueDate
   // are required alongside invoiceItems) -- fetch the draft first so we can
   // echo its existing fields back untouched and only grow invoiceItems.
@@ -136,7 +153,7 @@ export async function enrichAndSendInvoice(
         name: existing.name || `Reserva ${snapshot.bookingId}`,
         title: existing.title,
         currency: existing.currency || tenant.currency || "USD",
-        invoiceNumber: `CC-${snapshot.bookingId}`,
+        invoiceNumber: snapshot.bookingId,
         contactDetails: contact,
         invoiceItems,
         issueDate: existing.issueDate,
@@ -146,9 +163,6 @@ export async function enrichAndSendInvoice(
     },
     fetchImpl
   );
-
-  const userId = resolveSecret(tenant, env, "ghlUserIdSecretName", "ghlUserId");
-  if (!userId) throw new Error("No GHL userId configured for this tenant (ghlUserId / ghlUserIdSecretName) -- required by send-invoice");
 
   const sent = await ghlFetch(
     tenant, env, `/invoices/${invoiceId}/send`,

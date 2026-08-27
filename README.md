@@ -17,11 +17,13 @@ and returns the payment link to GHL.
 Settlement (`src/payment.js`) writes captures/fees to Payments, generates Transaction Ledger + Payout Ledger rows (85/15 rent-only split, cleaning fee per profile), and notifies GHL via the tenant's `ghlPaymentConfirmedUrl` inbound webhook.
 
 ## Invoice strategy (GHL invoice enrichment — additive, flag-gated)
-`/booking-created` can, instead of generating a PayPal/Stripe checkout link, enrich and send the DRAFT invoice GHL's rental calendar already auto-creates at booking (rent line only): append cleaning + security deposit + processing-fee lines to it, stamp a `CC-{bookingId}` correlation number, and send it via `send-invoice`. See `src/ghl-invoice.js` for the schema notes — several assumptions in an earlier draft didn't match the live GHL API (`update-invoice` requires the full body, not just `invoiceItems`; `send-invoice`'s real fields are `userId`/`action`/`liveMode`, not `sendTo`/`deliver`) and were corrected against `describe_operation` output before this shipped.
+`/booking-created` can, instead of generating a PayPal/Stripe checkout link, enrich and send the DRAFT invoice GHL's rental calendar already auto-creates at booking (rent line only): append cleaning + security deposit + processing-fee lines to it, stamp the invoice number, and send it via `send-invoice`. See `src/ghl-invoice.js` for the schema notes — several assumptions in an earlier draft didn't match the live GHL API (`update-invoice` requires the full body, not just `invoiceItems`; `send-invoice`'s real fields are `userId`/`action`/`liveMode`, not `sendTo`/`deliver`) and were corrected against `describe_operation` output before this shipped.
 
 Controlled by `INVOICE_STRATEGY` (env var, default `"paypal_url"` — today's behavior, unchanged) with a per-tenant override (`tenant.invoiceStrategy` in the TENANTS KV entry, `"paypal_url"` or `"enrich"`). Any failure in the enrich path falls through to the existing PayPal-URL flow automatically — a guest never sees a broken booking because of it.
 
-Tenant KV additions this needs (per-client, alongside the existing PayPal/Airtable fields): `ghlPit` (or `ghlPitSecretName` for a Worker secret — a GHL Private Integration Token scoped to `invoices.readonly`+`invoices.write`), `ghlUserId` (the GHL user id `send-invoice` sends as), and optionally `ghlInvoiceSendAction` (`sms_and_email` default, or `email`/`sms`/`send_manually`) and `ghlInvoiceLiveMode` (default `true`).
+The correlation number stamped on the invoice IS `bookingId` itself — the real rental-calendar booking id, captured at the contact level and fed in via the `{{contact.booking_id}}` merge tag on the webhook body, not a HOMS-invented prefix. Likewise `send-invoice`'s required `userId` comes from `{{user.id}}` on the same webhook body, not tenant config — scales to every user on every account with zero per-client GHL-user setup.
+
+Tenant KV additions this needs (per-client, alongside the existing PayPal/Airtable fields): `ghlPit` (or `ghlPitSecretName` for a Worker secret — a GHL Private Integration Token scoped to `invoices.readonly`+`invoices.write`), and optionally `ghlInvoiceSendAction` (`sms_and_email` default, or `email`/`sms`/`send_manually`) and `ghlInvoiceLiveMode` (default `true`).
 
 ## Deploys
 Auto-deploys on push to `main` via Cloudflare Workers Builds.
@@ -29,9 +31,10 @@ Config lives in `wrangler.toml`. Tenant config and secrets live in the
 TENANTS KV namespace (managed in the Cloudflare dashboard) — never commit them here.
 
 ## Local testing (optional, requires Node 18+)
-    node test-worker.js         # full dry run, mocked PayPal/Stripe/Airtable
-    node test-ghl-invoice.js    # invoice-enrichment schema + end-to-end flag/fallback tests
-    node test-deposit-rules.js  # deposit rule engine checks
+    node test-worker.js              # full dry run, mocked PayPal/Stripe/Airtable
+    node test-ghl-invoice.js         # invoice-enrichment schema + end-to-end flag/fallback tests
+    node test-reschedule-unpaid.js   # rescheduling a never-paid booking re-prices + fresh idempotency key
+    node test-deposit-rules.js       # deposit rule engine checks
 
 ## Structure
     src/index.js            worker entry, routing, tenant dispatch, GHL payload normalization

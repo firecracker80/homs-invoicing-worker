@@ -11,7 +11,7 @@ const tenant = {
   gateway: "paypal", deposit: { rule: "tiered" },
   paypalApi: "https://p", paypalClientId: "C", paypalSecret: "S",
   airtableBaseId: "a", airtableToken: "pat", defaultPropertyRecId: "rP",
-  ghlPit: "test-ghl-pit", ghlUserId: "u_123"
+  ghlPit: "test-ghl-pit"
 };
 const env = {};
 
@@ -71,7 +71,7 @@ assert.equal(id, "inv_draft_1");
 // ---- 4. enrich + send: PUT carries the full required body, not just invoiceItems ----
 calls.length = 0;
 const result = await enrichAndSendInvoice(
-  { tenant, env, locationId: snapshot.locationId, invoiceId: id, snapshot, contact: { id: snapshot.ghlContactId, name: snapshot.guest.name, email: snapshot.guest.email, phoneNo: snapshot.guest.phone } },
+  { tenant, env, locationId: snapshot.locationId, invoiceId: id, snapshot, contact: { id: snapshot.ghlContactId, name: snapshot.guest.name, email: snapshot.guest.email, phoneNo: snapshot.guest.phone }, userId: "u_from_webhook" },
   mockFetch
 );
 
@@ -80,7 +80,7 @@ assert.ok(get, "expected a get-invoice call before the PUT");
 
 const put = calls.find(c => c.method === "PUT");
 assert.ok(put, "expected an update-invoice PUT");
-assert.equal(put.body.invoiceNumber, "CC-BK-1001", "correlation number stamped");
+assert.equal(put.body.invoiceNumber, "BK-1001", "correlation number is bookingId itself -- the real rental-calendar booking id, no HOMS-invented prefix");
 // The fields update-invoice actually REQUIRES (verified live) -- must be present, echoed from get-invoice
 for (const f of ["name", "currency", "issueDate", "dueDate"]) {
   assert.ok(put.body[f], `update-invoice body missing required field: ${f}`);
@@ -95,7 +95,7 @@ const send = calls.find(c => c.url.endsWith("/send"));
 assert.ok(send, "expected a send-invoice call");
 assert.equal(send.body.action, "sms_and_email", "action must be a real enum value, not the invented 'send'");
 assert.equal(send.body.liveMode, true);
-assert.equal(send.body.userId, "u_123");
+assert.equal(send.body.userId, "u_from_webhook", "userId must be the per-call value passed in, not resolved from tenant config");
 assert.equal(send.body.sendTo, undefined, "sendTo is not a real field on this endpoint");
 assert.equal(send.body.deliver, undefined, "deliver is not a real field on this endpoint");
 
@@ -114,6 +114,7 @@ const kv = { async get(k, o) { const v = store.get(k); return v == null ? null :
 let paypalOrderCalls = 0;
 let ghlInvoiceCalls = 0;
 let forceGhlFailure = false;
+let lastSendUserId = null;
 
 global.fetch = async (url, opts = {}) => {
   if (url.includes("oauth2/token")) return { ok: true, json: async () => ({ access_token: "T" }) };
@@ -124,6 +125,7 @@ global.fetch = async (url, opts = {}) => {
   if (url.includes("services.leadconnectorhq.com/invoices")) {
     ghlInvoiceCalls++;
     if (forceGhlFailure) return { ok: false, status: 500, text: async () => JSON.stringify({ message: "boom" }) };
+    if (url.endsWith("/send")) lastSendUserId = JSON.parse(opts.body).userId;
     return mockFetch(url, opts);
   }
   if (url.includes("airtable")) {
@@ -139,8 +141,11 @@ const worker = (await import("./src/index.js")).default;
 const workerEnv = { WORKER_URL: "https://w.dev", TENANTS: kv, BOOKINGS: kv, ADMIN_SECRET: "admin123" };
 const baseTenantKV = { ...tenant, defaultPropertyRecId: "rP" };
 
+// bookingId and userId below stand in for {{contact.booking_id}} and
+// {{user.id}} -- both per-request merge tags on the real webhook, not
+// anything HOMS invents or stores per tenant.
 const bookingBody = (bookingId, extra = {}) => ({
-  bookingId, locationId: "wLGDbGcQ4QSG3nlT3Sis", contactId: "c_abc",
+  bookingId, locationId: "wLGDbGcQ4QSG3nlT3Sis", contactId: "c_abc", userId: "u_from_ghl_workflow",
   firstName: "Test", lastName: "Guest", email: "guest@example.com", phone: "+18090000000",
   checkIn: "2026-09-01", checkOut: "2026-09-06", stayTotal: "300", cleaningFee: "50",
   ...extra
@@ -164,7 +169,15 @@ assert.equal(r6.invoiceId, "inv_draft_1");
 assert.equal(r6.approveUrl, null, "enrich mode has no PayPal link to return");
 assert.equal(paypalOrderCalls, 0, "enrich success must never fall through to PayPal");
 assert.ok(ghlInvoiceCalls > 0);
-console.log("6) invoiceStrategy=enrich -> mode:", r6.mode, "| invoiceId:", r6.invoiceId, "| PayPal calls:", paypalOrderCalls);
+assert.equal(lastSendUserId, "u_from_ghl_workflow", "send-invoice's userId must come from the webhook's {{user.id}}, not tenant config");
+console.log("6) invoiceStrategy=enrich -> mode:", r6.mode, "| invoiceId:", r6.invoiceId, "| sent as userId:", lastSendUserId, "| PayPal calls:", paypalOrderCalls);
+
+// 6b. A DIFFERENT user firing the same workflow -> send-invoice uses THEIR id,
+// proving this scales per-request rather than being pinned to one tenant-wide value.
+paypalOrderCalls = 0; ghlInvoiceCalls = 0; lastSendUserId = null;
+await (await worker.fetch({ method: "POST", url: "https://w.dev/booking-created", json: async () => bookingBody("E2E-ENRICH-2", { userId: "u_a_different_teammate" }), headers: { get: () => null } }, workerEnv)).json();
+assert.equal(lastSendUserId, "u_a_different_teammate");
+console.log("6b) Different {{user.id}} on the webhook -> sent as:", lastSendUserId);
 
 // 7. GHL failure -> silent fallback to paypal_url, guest still gets a link
 paypalOrderCalls = 0; ghlInvoiceCalls = 0; forceGhlFailure = true;
@@ -174,6 +187,14 @@ assert.ok(r7.approveUrl.includes("sandbox.paypal.com"), "guest must still receiv
 assert.equal(paypalOrderCalls, 1);
 console.log("7) GHL enrich fails -> mode:", r7.mode, "| approveUrl present:", !!r7.approveUrl, "(fallback worked, nothing lost)");
 forceGhlFailure = false;
+
+// 7b. Missing {{user.id}} on the webhook (workflow misconfigured) -> same
+// fallback path, not a hard error to the guest.
+paypalOrderCalls = 0; ghlInvoiceCalls = 0;
+const r7b = await (await worker.fetch({ method: "POST", url: "https://w.dev/booking-created", json: async () => bookingBody("E2E-NO-USERID", { userId: null }), headers: { get: () => null } }, workerEnv)).json();
+assert.equal(r7b.mode, "paypal_url", "a missing {{user.id}} must also fall back cleanly, not error out");
+assert.equal(paypalOrderCalls, 1);
+console.log("7b) Missing userId on webhook -> mode:", r7b.mode, "(fallback worked)");
 
 // 8. Idempotency: retrying an already-enriched booking must NOT re-send the invoice
 ghlInvoiceCalls = 0;

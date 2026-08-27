@@ -74,10 +74,6 @@ export async function handleReschedule(request, env) {
     console.error(`Reschedule reject (already cancelled) for ${snapshot.bookingId}`);
     return json({ error: "Booking is cancelled", bookingId: snapshot.bookingId }, 400);
   }
-  if (!snapshot.settled) {
-    console.error(`Reschedule reject (not settled) for ${snapshot.bookingId}. settled=${snapshot.settled}`);
-    return json({ error: "Booking is not paid -- reschedule after settlement", bookingId: snapshot.bookingId, settled: !!snapshot.settled }, 400);
-  }
 
   // Treat "null"/"undefined"/empty (GHL's unresolved-tag renderings) as missing.
   const newCheckIn = isBlank(body.newCheckIn) ? null : body.newCheckIn;
@@ -101,6 +97,130 @@ export async function handleReschedule(request, env) {
     newNights, rate, tenant.deposit || { rule: "tiered" }, snapshot.charges.cleaningFee
   );
   const newDeposit = newDepositCalc.totalDeposit;
+
+  // UNPAID booking: nothing was ever captured, so there's no delta to charge
+  // or refund -- just re-price the new dates and issue a fresh payment link
+  // for the full new total. The old (unpaid) link is left to expire on its own.
+  if (!snapshot.settled) {
+    const cur0 = tenant.currency || "USD";
+    const feePct0 = snapshot.charges.feePct ?? tenant.processingFeePct ?? 0.06;
+    const newProcessingFee = round2(feePct0 * (newRent + snapshot.charges.cleaningFee + newDeposit));
+    const newGrandTotal = round2(newRent + snapshot.charges.cleaningFee + newProcessingFee + newDeposit);
+
+    const purchaseUnits = [{
+      reference_id: `${snapshot.bookingId}-RENT`,
+      invoice_id: `${snapshot.bookingId}-RENT`,
+      amount: {
+        currency_code: cur0,
+        value: round2(newRent + snapshot.charges.cleaningFee + newProcessingFee).toFixed(2),
+        breakdown: { item_total: { currency_code: cur0, value: round2(newRent + snapshot.charges.cleaningFee + newProcessingFee).toFixed(2) } }
+      },
+      items: [
+        { name: `Estadía — ${newNights} noche${newNights === 1 ? "" : "s"}`, quantity: String(newNights),
+          unit_amount: { currency_code: cur0, value: rate.toFixed(2) } },
+        ...(snapshot.charges.cleaningFee > 0 ? [{ name: "Tarifa de limpieza", quantity: "1",
+          unit_amount: { currency_code: cur0, value: snapshot.charges.cleaningFee.toFixed(2) } }] : []),
+        { name: "Tarifa de procesamiento de pago", quantity: "1",
+          unit_amount: { currency_code: cur0, value: newProcessingFee.toFixed(2) } }
+      ]
+    }];
+    if (newDeposit > 0) purchaseUnits.push({
+      reference_id: `${snapshot.bookingId}-DEP`,
+      invoice_id: `${snapshot.bookingId}-DEP`,
+      amount: { currency_code: cur0, value: newDeposit.toFixed(2),
+        breakdown: { item_total: { currency_code: cur0, value: newDeposit.toFixed(2) } } },
+      items: newDepositCalc.blocks.map(b => ({
+        name: newDepositCalc.blocks.length > 1
+          ? `Depósito de seguridad (reembolsable) — bloque ${b.block}`
+          : "Depósito de seguridad (reembolsable)",
+        quantity: "1", unit_amount: { currency_code: cur0, value: b.amount.toFixed(2) }
+      }))
+    });
+
+    // A second createOrder/createCheckoutSession call against the SAME
+    // bookingId needs its own idempotency key -- reusing the bare bookingId
+    // would collide with the original (still-open) unpaid order/session and
+    // either return stale pricing or get rejected outright for a body
+    // mismatch under the same key.
+    const repriceKey = `${snapshot.bookingId}-RESCHED-${Date.now()}`;
+    let approveUrl, gatewayRef;
+    if ((tenant.gateway || "paypal") === "stripe") {
+      const fakeSnap = {
+        bookingId: snapshot.bookingId, locationId: snapshot.locationId, gateway: "stripe",
+        stay: { nights: newNights, nightlyRate: rate },
+        charges: { rentTotal: newRent, cleaningFee: snapshot.charges.cleaningFee, processingFee: newProcessingFee, grandTotal: newGrandTotal },
+        securityDeposit: { blocks: newDepositCalc.blocks, total: newDeposit }
+      };
+      const { sessionId, checkoutUrl } = await createCheckoutSession(tenant, env, fakeSnap, env.WORKER_URL, repriceKey);
+      approveUrl = checkoutUrl; gatewayRef = sessionId;
+    } else {
+      const { orderId, approveUrl: url } = await createOrder(tenant, env, snapshot.bookingId, purchaseUnits, env.WORKER_URL, repriceKey);
+      approveUrl = url; gatewayRef = orderId;
+    }
+
+    const oldStay0 = { ...snapshot.stay };
+    snapshot.stay = { ...snapshot.stay, checkIn: newCheckIn, checkOut: newCheckOut, nights: newNights };
+    snapshot.charges.rentTotal = newRent;
+    snapshot.charges.processingFee = newProcessingFee;
+    snapshot.charges.grandTotal = newGrandTotal;
+    snapshot.securityDeposit.total = newDeposit;
+    snapshot.securityDeposit.blocks = newDepositCalc.blocks;
+    if ((tenant.gateway || "paypal") === "stripe") snapshot.stripe = { sessionId: gatewayRef, checkoutUrl: approveUrl };
+    else snapshot.paypal = { orderId: gatewayRef, approveUrl };
+    snapshot.reschedules = [...(snapshot.reschedules || []), {
+      at: new Date().toISOString(), from: oldStay0,
+      to: { checkIn: newCheckIn, checkOut: newCheckOut, nights: newNights },
+      unpaid: true, reason: body.reason || ""
+    }];
+    await env.BOOKINGS.put(snapshot.bookingId, JSON.stringify(snapshot));
+
+    let airtableOk0 = true;
+    try {
+      const orderId0 = snapshot.airtable?.orderRecordId;
+      if (orderId0) {
+        await atUpdate(tenant, "Orders", orderId0, {
+          "Check-in Date": newCheckIn, "Check-out Date": newCheckOut, "Nights": newNights,
+          "Reservation Total": round2(newRent + snapshot.charges.cleaningFee + newProcessingFee),
+          "Deposit Required": newDeposit,
+          "Balance Due": round2(newRent + snapshot.charges.cleaningFee + newProcessingFee),
+          "Remaining Balance": newGrandTotal,
+          "Notes": `Reschedule (unpaid booking, new link issued): ${oldStay0.checkIn}->${oldStay0.checkOut} (${oldStay0.nights}n) to ${newCheckIn}->${newCheckOut} (${newNights}n). ${body.reason || ""}`.trim()
+        });
+      }
+    } catch (err) {
+      console.error(`Reschedule(unpaid) Airtable sync failed for ${snapshot.bookingId}:`, err.message);
+      airtableOk0 = false;
+    }
+
+    await notifyGHL(tenant.ghlRescheduleUrl, {
+      event: "booking_rescheduled",
+      bookingId: snapshot.bookingId,
+      contactId: snapshot.ghlContactId || "",
+      email: snapshot.guest?.email || "",
+      firstName: (snapshot.guest?.name || "").split(" ")[0],
+      oldCheckIn: oldStay0.checkIn, oldCheckOut: oldStay0.checkOut,
+      newCheckIn, newCheckOut, newNights,
+      rentTotal: newRent.toFixed(2),
+      depositTotal: newDeposit.toFixed(2),
+      processingFee: newProcessingFee.toFixed(2),
+      totalDelta: newGrandTotal.toFixed(2),
+      settlementType: "unpaid_new_link",
+      approveUrl,
+      adminFeeRetained: "0.00",
+      cancellationTier: "",
+      propertyName: snapshot.propertyCode || tenant.brandName,
+      calendarUpdateRequired: "true"
+    });
+
+    return json({
+      bookingId: snapshot.bookingId,
+      oldDates: oldStay0,
+      newDates: { checkIn: newCheckIn, checkOut: newCheckOut, nights: newNights },
+      settlement: { type: "unpaid_new_link", approveUrl, grandTotal: newGrandTotal },
+      airtableSync: airtableOk0 ? "ok" : "failed",
+      calendarUpdateRequired: true
+    });
+  }
 
   const rentDelta = round2(newRent - oldRent);
   const depositDelta = round2(newDeposit - oldDeposit);
