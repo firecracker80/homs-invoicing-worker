@@ -7,7 +7,6 @@ import { createBookingRecords } from "./airtable.js";
 import { handlePayPalReturn, handlePayPalWebhook, handleStripeReturn, handleStripeWebhook } from "./payment.js";
 import { handleCancel, handleDepositRefund } from "./cancellation.js";
 import { handleReschedule } from "./reschedule.js";
-import { updateGhlBookingDates } from "./ghl-calendar.js";
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
