@@ -97,7 +97,7 @@ export async function resolveDraftInvoiceId(
   });
   const list = await ghlFetch(tenant, env, `/invoices/?${q}`, {}, fetchImpl);
   const invoices = list.invoices || [];
-  const wanted = `CC-${bookingId}`;
+  const wanted = `${bookingId}`;
 
   const byNumber = invoices.find(i => i.invoiceNumber === wanted);
   if (byNumber) return byNumber._id;
