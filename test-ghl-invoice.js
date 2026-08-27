@@ -11,7 +11,7 @@ const tenant = {
   gateway: "paypal", deposit: { rule: "tiered" },
   paypalApi: "https://p", paypalClientId: "C", paypalSecret: "S",
   airtableBaseId: "a", airtableToken: "pat", defaultPropertyRecId: "rP",
-  ghlToken: "test-ghl-token", ghlUserId: "u_123"
+  ghlPit: "test-ghl-pit", ghlUserId: "u_123"
 };
 const env = {};
 

@@ -21,7 +21,7 @@ Settlement (`src/payment.js`) writes captures/fees to Payments, generates Transa
 
 Controlled by `INVOICE_STRATEGY` (env var, default `"paypal_url"` — today's behavior, unchanged) with a per-tenant override (`tenant.invoiceStrategy` in the TENANTS KV entry, `"paypal_url"` or `"enrich"`). Any failure in the enrich path falls through to the existing PayPal-URL flow automatically — a guest never sees a broken booking because of it.
 
-Tenant KV additions this needs (per-client, alongside the existing PayPal/Airtable fields): `ghlToken` (or `ghlTokenSecretName` for a Worker secret), `ghlUserId` (the GHL user id `send-invoice` sends as), and optionally `ghlInvoiceSendAction` (`sms_and_email` default, or `email`/`sms`/`send_manually`) and `ghlInvoiceLiveMode` (default `true`).
+Tenant KV additions this needs (per-client, alongside the existing PayPal/Airtable fields): `ghlPit` (or `ghlPitSecretName` for a Worker secret — a GHL Private Integration Token scoped to `invoices.readonly`+`invoices.write`), `ghlUserId` (the GHL user id `send-invoice` sends as), and optionally `ghlInvoiceSendAction` (`sms_and_email` default, or `email`/`sms`/`send_manually`) and `ghlInvoiceLiveMode` (default `true`).
 
 ## Deploys
 Auto-deploys on push to `main` via Cloudflare Workers Builds.

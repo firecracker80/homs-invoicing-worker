@@ -21,11 +21,14 @@
 //     where action is one of sms_and_email | send_manually | email | sms.
 //     There is no sendTo/deliver field in the real schema.
 //
-// Auth is PER-TENANT (this is a multi-tenant worker, one GHL token per
-// client sub-account) -- mirrors the paypalSecretName/airtableToken pattern
-// already used in paypal.js/stripe.js/airtable.js. Tenant KV needs either
-// ghlToken (inline, fine for pilot) or ghlTokenSecretName (Worker secret,
-// recommended once past a couple of clients), plus ghlUserId.
+// Auth is PER-TENANT (this is a multi-tenant worker, one GHL Private
+// Integration Token per client sub-account) -- mirrors the
+// paypalSecretName/airtableToken pattern already used in
+// paypal.js/stripe.js/airtable.js. Tenant KV needs either ghlPit (inline,
+// fine for pilot) or ghlPitSecretName (Worker secret, recommended once past
+// a couple of clients), plus ghlUserId. Field name matches the "PIT" term
+// GHL itself uses for these tokens (see ghl-account-registry.json's
+// pit_connector), and the name already in use on existing tenant entries.
 
 const GHL_BASE = "https://services.leadconnectorhq.com";
 const GHL_VERSION = "2021-07-28";
@@ -37,8 +40,8 @@ function resolveSecret(tenant, env, nameKey, inlineKey) {
 
 // --- thin GHL REST helper -------------------------------------------------
 async function ghlFetch(tenant, env, path, { method = "GET", body } = {}, fetchImpl = fetch) {
-  const token = resolveSecret(tenant, env, "ghlTokenSecretName", "ghlToken");
-  if (!token) throw new Error("No GHL token configured for this tenant (ghlToken / ghlTokenSecretName)");
+  const token = resolveSecret(tenant, env, "ghlPitSecretName", "ghlPit");
+  if (!token) throw new Error("No GHL PIT configured for this tenant (ghlPit / ghlPitSecretName)");
   const res = await fetchImpl(`${GHL_BASE}${path}`, {
     method,
     headers: {
