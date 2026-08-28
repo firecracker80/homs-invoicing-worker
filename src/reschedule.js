@@ -2,10 +2,11 @@
 //   POST /reschedule { bookingId, newCheckIn, newCheckOut, reason? }
 //   header: X-Admin-Secret (human-triggered, same as /cancel and /extend)
 //
-// LIMITATION (by design, not a bug): GHL's rental calendar has no reschedule
-// webhook/API we can drive reliably. This endpoint handles money + records
-// only. The human must still move the appointment in the GHL calendar UI --
-// the worker pushes a reminder flag so that step isn't forgotten.
+// Money + records here; the actual GHL calendar appointment is moved via
+// ghl-calendar.js's undocumented-endpoint call (updateGhlBookingDates).
+// That call never throws -- calendarUpdateRequired in the response/GHL
+// notify reflects whether it succeeded, so a failed calendar write never
+// rolls back a completed reschedule; it just flags the manual follow-up.
 
 import { calcSecurityDeposit, round2 } from "./deposit-engine.js";
 import { createOrder, getAccessToken } from "./paypal.js";
@@ -71,7 +72,7 @@ export async function handleReschedule(request, env) {
   const tenant = await env.TENANTS.get(snapshot.locationId, { type: "json" });
   if (!tenant) return json({ error: "Unknown tenant" }, 404);
   if (!adminAuthorized(request, env, tenant)) return json({ error: "Unauthorized" }, 401);
-    if (snapshot.cancelled) {
+  if (snapshot.cancelled) {
     console.error(`Reschedule reject (already cancelled) for ${snapshot.bookingId}`);
     return json({ error: "Booking is cancelled", bookingId: snapshot.bookingId }, 400);
   }
@@ -94,7 +95,7 @@ export async function handleReschedule(request, env) {
   const oldRent = snapshot.charges.rentTotal;
   const oldDeposit = snapshot.securityDeposit.total;
   const newRent = round2(newNights * rate);
-    const newDepositCalc = calcSecurityDeposit(
+  const newDepositCalc = calcSecurityDeposit(
     newNights, rate, tenant.deposit || { rule: "tiered" }, snapshot.charges.cleaningFee
   );
   const newDeposit = newDepositCalc.totalDeposit;
@@ -138,6 +139,12 @@ export async function handleReschedule(request, env) {
       }))
     });
 
+    // A second createOrder/createCheckoutSession call against the SAME
+    // bookingId needs its own idempotency key -- reusing the bare bookingId
+    // would collide with the original (still-open) unpaid order/session and
+    // either return stale pricing or get rejected outright for a body
+    // mismatch under the same key.
+    const repriceKey = `${snapshot.bookingId}-RESCHED-${Date.now()}`;
     let approveUrl, gatewayRef;
     if ((tenant.gateway || "paypal") === "stripe") {
       const fakeSnap = {
@@ -146,10 +153,10 @@ export async function handleReschedule(request, env) {
         charges: { rentTotal: newRent, cleaningFee: snapshot.charges.cleaningFee, processingFee: newProcessingFee, grandTotal: newGrandTotal },
         securityDeposit: { blocks: newDepositCalc.blocks, total: newDeposit }
       };
-      const { sessionId, checkoutUrl } = await createCheckoutSession(tenant, env, fakeSnap, env.WORKER_URL);
+      const { sessionId, checkoutUrl } = await createCheckoutSession(tenant, env, fakeSnap, env.WORKER_URL, repriceKey);
       approveUrl = checkoutUrl; gatewayRef = sessionId;
     } else {
-      const { orderId, approveUrl: url } = await createOrder(tenant, env, snapshot.bookingId, purchaseUnits, env.WORKER_URL);
+      const { orderId, approveUrl: url } = await createOrder(tenant, env, snapshot.bookingId, purchaseUnits, env.WORKER_URL, repriceKey);
       approveUrl = url; gatewayRef = orderId;
     }
 
@@ -187,8 +194,8 @@ export async function handleReschedule(request, env) {
       airtableOk0 = false;
     }
 
-    const calendar = await updateGhlBookingDates(env, tenant, snapshot, newCheckIn, newCheckOut);
-    
+    const calendar0 = await updateGhlBookingDates(env, tenant, snapshot, newCheckIn, newCheckOut);
+
     await notifyGHL(tenant.ghlRescheduleUrl, {
       event: "booking_rescheduled",
       bookingId: snapshot.bookingId,
@@ -206,7 +213,7 @@ export async function handleReschedule(request, env) {
       adminFeeRetained: "0.00",
       cancellationTier: "",
       propertyName: snapshot.propertyCode || tenant.brandName,
-      calendarUpdateRequired: calendar.ok ? "false" : "true"
+      calendarUpdateRequired: calendar0.ok ? "false" : "true"
     });
 
     return json({
@@ -215,7 +222,7 @@ export async function handleReschedule(request, env) {
       newDates: { checkIn: newCheckIn, checkOut: newCheckOut, nights: newNights },
       settlement: { type: "unpaid_new_link", approveUrl, grandTotal: newGrandTotal },
       airtableSync: airtableOk0 ? "ok" : "failed",
-      calendarUpdateRequired: !calendar.ok, calendar
+      calendarUpdateRequired: !calendar0.ok, calendar: calendar0
     });
   }
 

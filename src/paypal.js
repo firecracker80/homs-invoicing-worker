@@ -24,14 +24,20 @@ async function getAccessToken(tenant, env) {
   return (await res.json()).access_token;
 }
 
-async function createOrder(tenant, env, bookingId, purchaseUnits, workerUrl) {
+// requestId defaults to bookingId (existing behavior for every current call
+// site). Pass a distinct value when creating a SECOND order against the same
+// bookingId (e.g. re-pricing an unpaid booking on reschedule) -- PayPal keys
+// idempotency off PayPal-Request-Id, so reusing the bare bookingId there
+// would either return the stale original order or reject the new body under
+// the same key.
+async function createOrder(tenant, env, bookingId, purchaseUnits, workerUrl, requestId = bookingId) {
   const token = await getAccessToken(tenant, env);
   const res = await fetch(`${tenant.paypalApi}/v2/checkout/orders`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       "Authorization": `Bearer ${token}`,
-      "PayPal-Request-Id": bookingId
+      "PayPal-Request-Id": requestId
     },
     body: JSON.stringify({
       intent: "CAPTURE",

@@ -59,9 +59,14 @@ function buildStripeLineItems(s, currency = "usd") {
   return items;
 }
 
-async function createCheckoutSession(tenant, env, snapshot, workerUrl) {
+// idempotencyKey defaults to bookingId (existing behavior). Pass a distinct
+// value when creating a SECOND session against the same bookingId (e.g.
+// re-pricing an unpaid booking on reschedule) -- Stripe rejects a request
+// under a reused Idempotency-Key whose body differs from the original.
+async function createCheckoutSession(tenant, env, snapshot, workerUrl, idempotencyKey) {
   const secret = resolveSecret(tenant, env, "stripeSecretName", "stripeSecret");
   const bookingId = snapshot.bookingId;
+  const idemKey = idempotencyKey || bookingId;
 
   const params = {
     mode: "payment",
@@ -84,7 +89,7 @@ async function createCheckoutSession(tenant, env, snapshot, workerUrl) {
     headers: {
       "Authorization": `Bearer ${secret}`,
       "Content-Type": "application/x-www-form-urlencoded",
-      "Idempotency-Key": `booking-${bookingId}` // Stripe-native idempotency
+      "Idempotency-Key": `booking-${idemKey}` // Stripe-native idempotency
     },
     body: formEncode(params)
   });
