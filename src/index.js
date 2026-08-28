@@ -199,6 +199,7 @@ async function handleBookingCreated(request, env) {
   // existing PayPal-URL flow below unmodified — nothing lost.
   const invoiceStrategy = tenant.invoiceStrategy ?? env.INVOICE_STRATEGY ?? "paypal_url";
   let approveUrl, gatewayRef, gateway;
+  let invoiceEnrichError = null; // diagnostic only -- surfaced in the response when enrich falls back
 
   if (invoiceStrategy === "enrich") {
     try {
@@ -229,6 +230,7 @@ async function handleBookingCreated(request, env) {
       approveUrl = null; // guest pays via the invoice GHL just sent, not a link we generate
     } catch (err) {
       console.error(`GHL invoice enrich failed for ${snapshot.bookingId}, falling back to paypal_url:`, err.message);
+      invoiceEnrichError = err.message;
     }
   }
 
@@ -311,7 +313,8 @@ async function handleBookingCreated(request, env) {
     nightlyRate: snapshot.stay.nightlyRate.toFixed(2),
     gateway,
     gatewayRef,
-    airtableSync: airtable?.needsRetry ? "failed_will_retry" : "ok"
+    airtableSync: airtable?.needsRetry ? "failed_will_retry" : "ok",
+    invoiceEnrichError: invoiceEnrichError || undefined
   });
 }
 
