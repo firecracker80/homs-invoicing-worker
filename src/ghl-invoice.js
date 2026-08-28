@@ -9,10 +9,10 @@
 // try/catch fallback (see index.js) so a failure here degrades to exactly
 // today's behavior.
 //
-// Schema verified 2026-08-08 against the live GHL public API (describe_operation
-// on invoices.list-invoices / get-invoice / update-invoice / send-invoice) —
-// corrected from an earlier draft that assumed a different shape:
-//   - list-invoices has NO altId query param, only altType (+ contactId/status/etc).
+// Schema checked 2026-08-08 against describe_operation's public parameter
+// listing for invoices.list-invoices / get-invoice / update-invoice /
+// send-invoice, then corrected again 2026-08-09 against a real 401 in
+// production:
 //   - update-invoice (PUT) requires the FULL body: name, currency, issueDate,
 //     dueDate are all required alongside invoiceItems -- NOT invoiceItems alone.
 //     So enrichment always does get-invoice first and echoes those fields back.
@@ -20,6 +20,11 @@
 //   - send-invoice's real required body is { altId, altType, userId, action, liveMode }
 //     where action is one of sms_and_email | send_manually | email | sms.
 //     There is no sendTo/deliver field in the real schema.
+//   - altId + altType are BOTH required on every call, including list-invoices
+//     and get-invoice -- describe_operation's parameter listing doesn't
+//     include altId for those two, but omitting it 401s for real. Don't
+//     trust the schema tool over a live 401 on this API; this project's own
+//     registry already learned that lesson once for payments/invoices.
 //
 // Auth is PER-TENANT (this is a multi-tenant worker, one GHL Private
 // Integration Token per client sub-account) -- mirrors the
@@ -94,15 +99,19 @@ export function buildAppendItems(snapshot, tenant) {
 // --- resolve the draft's _id ---------------------------------------------
 // Prefer the id handed to you on the booking webhook. Fall back to a scoped
 // list-invoices lookup keyed by contact + our correlation number.
-// NOTE: list-invoices has no altId param in the real API -- the token's
-// bound location scopes the result implicitly.
+// altId IS required here despite not appearing in the operation's public
+// parameter schema -- confirmed live: omitting it 401s ("A 401 from the
+// invoices service almost always means a missing altId, not a missing
+// scope" per this project's own registry notes -- schema introspection
+// doesn't fully reflect runtime requirements on this API).
 export async function resolveDraftInvoiceId(
-  { tenant, env, contactId, bookingId, hintedInvoiceId },
+  { tenant, env, locationId, contactId, bookingId, hintedInvoiceId },
   fetchImpl = fetch
 ) {
   if (hintedInvoiceId) return hintedInvoiceId;
 
   const q = new URLSearchParams({
+    altId: locationId,
     altType: "location",
     contactId,
     status: "draft",
@@ -137,7 +146,7 @@ export async function enrichAndSendInvoice(
   // are required alongside invoiceItems) -- fetch the draft first so we can
   // echo its existing fields back untouched and only grow invoiceItems.
   const existing = await ghlFetch(
-    tenant, env, `/invoices/${invoiceId}?altType=location`, {}, fetchImpl
+    tenant, env, `/invoices/${invoiceId}?altId=${encodeURIComponent(locationId)}&altType=location`, {}, fetchImpl
   );
 
   const appendItems = buildAppendItems(snapshot, tenant);

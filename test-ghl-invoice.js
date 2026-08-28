@@ -30,12 +30,13 @@ function mockFetch(url, opts) {
   calls.push({ url, method: opts.method || "GET", body: opts.body ? JSON.parse(opts.body) : null, headers: opts.headers });
 
   if (url.includes("/invoices/?")) {
-    assert.ok(!url.includes("altId="), "list-invoices must NOT send altId -- not a real param on this endpoint");
+    assert.ok(url.includes(`altId=${encodeURIComponent(snapshot.locationId)}`), "list-invoices must send altId -- omitting it 401s live despite not being in describe_operation's schema");
     assert.ok(url.includes("altType=location"), "list-invoices must send altType=location");
     return jsonRes({ invoices: [{ _id: "inv_draft_1", invoiceNumber: null, createdAt: "2026-08-26T12:00:00Z" }], total: 1 });
   }
   if (url.match(/\/invoices\/[^/]+\/send$/)) return jsonRes({ emailData: {}, invoice: { _id: "inv_draft_1" }, smsData: {} });
-  if (url.match(/\/invoices\/[^/]+\?altType=location$/) && (!opts.method || opts.method === "GET")) {
+  if (url.match(/\/invoices\/[^/?]+\?.*altType=location/) && (!opts.method || opts.method === "GET")) {
+    assert.ok(url.includes(`altId=${encodeURIComponent(snapshot.locationId)}`), "get-invoice must send altId -- same 401 risk as list-invoices");
     // get-invoice: existing draft GHL's rental calendar already created (rent line only)
     return jsonRes({
       _id: "inv_draft_1", name: "Reserva BK-1001", title: "INVOICE", currency: "USD",
@@ -60,12 +61,12 @@ assert.equal(appendItems[2].amount, 24.3);
 
 // ---- 2. resolve draft id: hinted id short-circuits (zero calls) ----
 calls.length = 0;
-const hintedId = await resolveDraftInvoiceId({ tenant, env, contactId: snapshot.ghlContactId, bookingId: snapshot.bookingId, hintedInvoiceId: "inv_from_webhook" }, mockFetch);
+const hintedId = await resolveDraftInvoiceId({ tenant, env, locationId: snapshot.locationId, contactId: snapshot.ghlContactId, bookingId: snapshot.bookingId, hintedInvoiceId: "inv_from_webhook" }, mockFetch);
 assert.equal(hintedId, "inv_from_webhook");
 assert.equal(calls.length, 0, "hinted id must skip the list-invoices lookup entirely");
 
 // ---- 3. resolve draft id: no hint -> lookup, correct query shape ----
-const id = await resolveDraftInvoiceId({ tenant, env, contactId: snapshot.ghlContactId, bookingId: snapshot.bookingId, hintedInvoiceId: null }, mockFetch);
+const id = await resolveDraftInvoiceId({ tenant, env, locationId: snapshot.locationId, contactId: snapshot.ghlContactId, bookingId: snapshot.bookingId, hintedInvoiceId: null }, mockFetch);
 assert.equal(id, "inv_draft_1");
 
 // ---- 4. enrich + send: PUT carries the full required body, not just invoiceItems ----

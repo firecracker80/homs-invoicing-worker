@@ -205,6 +205,7 @@ async function handleBookingCreated(request, env) {
     try {
       const invoiceId = await resolveDraftInvoiceId({
         tenant, env,
+        locationId: snapshot.locationId,
         contactId: snapshot.ghlContactId,
         bookingId: snapshot.bookingId,
         hintedInvoiceId: payload.invoiceId || payload.invoice?.id || null
