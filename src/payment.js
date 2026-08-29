@@ -11,6 +11,7 @@
 import { getAccessToken } from "./paypal.js";
 import { atUpdate, atFind, atCreate } from "./airtable.js";
 import { settleRescheduleAdjustment } from "./reschedule.js";
+import { writeLedgerEntries } from "./ledger.js";
 
 const round2 = n => Math.round(n * 100) / 100;
 
@@ -288,6 +289,23 @@ async function settle(env, tenant, snapshot, captures) {
     await env.BOOKINGS.put(snapshot.bookingId, JSON.stringify(snapshot));
   }
 
+  // ---- Ledger (D1, non-blocking) ----
+  // Independent of the Airtable outcome above -- a D1 write failure must
+  // never roll back or fail a completed settlement, same philosophy as
+  // Airtable itself. Materializes the split so owner/manager statements are
+  // a plain GROUP BY, not a recomputation of this split logic in SQL.
+  let ledgerOk = true;
+  try {
+    const ledger = await writeLedgerEntries(env, tenant, snapshot, captures);
+    if (!ledger.ok) {
+      console.error(`Ledger write failed for ${snapshot.bookingId}: ${ledger.reason} ${ledger.error || ""}`);
+      ledgerOk = false;
+    }
+  } catch (err) {
+    console.error(`Ledger write threw for ${snapshot.bookingId}:`, err.message);
+    ledgerOk = false;
+  }
+
   // ---- GHL notification (fire-and-forget) ----
   if (tenant.ghlPaymentConfirmedUrl) {
     try {
@@ -311,7 +329,7 @@ async function settle(env, tenant, snapshot, captures) {
     }
   }
 
-  return { settled: true, totalPaid, airtableOk };
+  return { settled: true, totalPaid, airtableOk, ledgerOk };
 }
 
 function confirmationPage(tenant, snapshot) {

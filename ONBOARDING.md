@@ -76,8 +76,16 @@ Everything else (`checkInHour`/`checkOutHour`/`tzOffsetHours`, `webhookSecret`,
 `properties`, `ghlInvoiceSendAction`, `ghlInvoiceLiveMode`) has a sane
 default — only set it if this client needs something different.
 
-## 8. Test
+## 8. Ledger + statements (optional)
+Add `"otaRate": 0.15` (or whatever their real comparison rate is) if you
+want the owner statement to show what an OTA commission would have cost on
+this client's bookings. Omit it entirely and that line just doesn't appear —
+never guess a rate on a client's behalf.
+
+## 9. Test
 Fire one real booking through their form, watch Cloudflare → Logs → Begin
 log stream. `invoiceEnrichError` in the response body and GHL's actual
 validation message in the log (via `ghlFetch`) should make any tenant-
-specific issue fast to diagnose without another round of guessing.
+specific issue fast to diagnose without another round of guessing. Check
+`/reports/owner-statement?locationId=...&format=json` afterward to confirm
+the ledger picked it up.
