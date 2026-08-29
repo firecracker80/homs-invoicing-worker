@@ -25,6 +25,20 @@
 //     include altId for those two, but omitting it 401s for real. Don't
 //     trust the schema tool over a live 401 on this API; this project's own
 //     registry already learned that lesson once for payments/invoices.
+//   - list-invoices' status query param does NOT reliably match a rental-
+//     calendar-created draft -- "draft" was never verified against a real
+//     response and returned zero results live for a confirmed-existing
+//     draft. Don't filter by status server-side; fetch the contact's
+//     invoices and exclude "paid" client-side instead (a status confirmed
+//     from real data) -- see resolveDraftInvoiceId.
+//   - update-invoice 422s on THREE more things confirmed live, all from
+//     blindly echoing get-invoice's response shape into the PUT body:
+//     (1) issueDate/dueDate must be YYYY-MM-DD, but get-invoice returns
+//     full ISO datetimes -- truncate with dateOnly(). (2) discount 422s
+//     as "should not be empty" despite the schema marking it optional --
+//     always send one. (3) contactDetails.phoneNo must be E.164; a raw
+//     {{contact.phone}} merge tag isn't guaranteed to already be in that
+//     form -- normalize with toE164().
 //
 // Auth is PER-TENANT (this is a multi-tenant worker, one GHL Private
 // Integration Token per client sub-account) -- mirrors the
@@ -179,10 +193,18 @@ export async function enrichAndSendInvoice(
         title: existing.title,
         currency: existing.currency || tenant.currency || "USD",
         invoiceNumber: snapshot.bookingId,
-        contactDetails: contact,
+        contactDetails: { ...contact, phoneNo: toE164(contact.phoneNo) },
         invoiceItems,
-        issueDate: existing.issueDate,
-        dueDate: existing.dueDate,
+        // get-invoice returns full ISO datetimes ("2026-08-26T04:00:00.000Z");
+        // update-invoice's validator wants date-only ("YYYY-MM-DD") and 422s
+        // on the datetime form -- confirmed live, not documented anywhere.
+        issueDate: dateOnly(existing.issueDate) || dateOnly(new Date().toISOString()),
+        dueDate: dateOnly(existing.dueDate) || dateOnly(new Date().toISOString()),
+        // Not actually optional despite the schema marking it required:false --
+        // omitting it 422s with "discount should not be empty". Echo the
+        // existing draft's discount if it has one, else GHL's own example
+        // shape (zero, no discount applied).
+        discount: existing.discount || { value: 0, type: "percentage" },
         businessDetails: existing.businessDetails
       }
     },
@@ -209,4 +231,25 @@ export async function enrichAndSendInvoice(
 
 function round2(n) {
   return Math.round((Number(n) + Number.EPSILON) * 100) / 100;
+}
+
+// GHL's ISO datetime ("2026-08-26T04:00:00.000Z") -> plain "2026-08-26".
+// update-invoice's validator rejects the full datetime form -- confirmed
+// live -- even though get-invoice is what hands you that exact string.
+function dateOnly(s) {
+  if (!s) return s;
+  const m = String(s).match(/^(\d{4}-\d{2}-\d{2})/);
+  return m ? m[1] : s;
+}
+
+// Best-effort E.164 normalization. DR/US numbers are both NANP (+1), which
+// covers this tenant's guests; a number that's already E.164 passes through
+// unchanged. Never invents a country code for a number that isn't 10 digits.
+function toE164(phone) {
+  if (!phone) return phone;
+  const digits = String(phone).replace(/[^\d+]/g, "");
+  if (digits.startsWith("+")) return digits;
+  if (digits.length === 10) return `+1${digits}`;
+  if (digits.length === 11 && digits.startsWith("1")) return `+${digits}`;
+  return `+${digits}`;
 }

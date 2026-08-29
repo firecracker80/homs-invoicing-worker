@@ -44,10 +44,12 @@ function mockFetch(url, opts) {
   if (url.match(/\/invoices\/[^/]+\/send$/)) return jsonRes({ emailData: {}, invoice: { _id: "inv_draft_1" }, smsData: {} });
   if (url.match(/\/invoices\/[^/?]+\?.*altType=location/) && (!opts.method || opts.method === "GET")) {
     assert.ok(url.includes(`altId=${encodeURIComponent(snapshot.locationId)}`), "get-invoice must send altId -- same 401 risk as list-invoices");
-    // get-invoice: existing draft GHL's rental calendar already created (rent line only)
+    // get-invoice: existing draft GHL's rental calendar already created (rent
+    // line only). Real GHL returns full ISO datetimes here, NOT date-only --
+    // this is exactly the shape that 422'd live before the dateOnly() fix.
     return jsonRes({
       _id: "inv_draft_1", name: "Reserva BK-1001", title: "INVOICE", currency: "USD",
-      issueDate: "2026-08-26", dueDate: "2026-09-01",
+      issueDate: "2026-08-26T04:00:00.000Z", dueDate: "2026-09-01T03:59:59.999Z",
       invoiceItems: [{ name: "Estadía", currency: "USD", amount: 60, qty: 5 }],
       businessDetails: { name: "Luminara" }
     });
@@ -78,8 +80,11 @@ assert.equal(id, "inv_draft_1");
 
 // ---- 4. enrich + send: PUT carries the full required body, not just invoiceItems ----
 calls.length = 0;
+// Phone deliberately NOT E.164 (spaces/dashes/parens, the shape a raw
+// {{contact.phone}} merge tag can arrive in) -- proves toE164() normalizes
+// it rather than assuming upstream already did.
 const result = await enrichAndSendInvoice(
-  { tenant, env, locationId: snapshot.locationId, invoiceId: id, snapshot, contact: { id: snapshot.ghlContactId, name: snapshot.guest.name, email: snapshot.guest.email, phoneNo: snapshot.guest.phone }, userId: "u_from_webhook" },
+  { tenant, env, locationId: snapshot.locationId, invoiceId: id, snapshot, contact: { id: snapshot.ghlContactId, name: snapshot.guest.name, email: snapshot.guest.email, phoneNo: "(809) 000-0000" }, userId: "u_from_webhook" },
   mockFetch
 );
 
@@ -93,8 +98,10 @@ assert.equal(put.body.invoiceNumber, "BK-1001", "correlation number is bookingId
 for (const f of ["name", "currency", "issueDate", "dueDate"]) {
   assert.ok(put.body[f], `update-invoice body missing required field: ${f}`);
 }
-assert.equal(put.body.issueDate, "2026-08-26", "issueDate must be echoed from the existing draft, not invented");
-assert.equal(put.body.dueDate, "2026-09-01", "dueDate must be echoed from the existing draft, not invented");
+assert.equal(put.body.issueDate, "2026-08-26", "issueDate must be truncated to YYYY-MM-DD -- GHL's GET returns a full ISO datetime, and the PUT validator 422s on that form live");
+assert.equal(put.body.dueDate, "2026-09-01", "dueDate must be truncated to YYYY-MM-DD -- same live 422 as issueDate");
+assert.ok(put.body.discount, "discount must be present -- 422s live with 'discount should not be empty' despite the schema marking it optional");
+assert.equal(put.body.contactDetails.phoneNo, "+18090000000", "phone must be normalized to E.164 -- 422s live on '(809) 000-0000' with 'Phone number must be in E.164 format'");
 // Rent line preserved + 3 appended = 4, rent line untouched (still GHL's own $60 x5)
 assert.equal(put.body.invoiceItems.length, 4, "rent line (GHL's) + 3 appended lines");
 assert.deepEqual(put.body.invoiceItems[0], { name: "Estadía", currency: "USD", amount: 60, qty: 5 }, "existing rent line must be preserved untouched, not rebuilt");
