@@ -25,6 +25,8 @@ The correlation number stamped on the invoice IS `bookingId` itself — the real
 
 Tenant KV additions this needs (per-client, alongside the existing PayPal/Airtable fields): `ghlPit` (or `ghlPitSecretName` for a Worker secret — a GHL Private Integration Token scoped to `invoices.readonly`+`invoices.write`), and optionally `ghlInvoiceSendAction` (`sms_and_email` default, or `email`/`sms`/`send_manually`) and `ghlInvoiceLiveMode` (default `true`).
 
+See [ONBOARDING.md](./ONBOARDING.md) for the full new-client checklist.
+
 ## Deploys
 Auto-deploys on push to `main` via Cloudflare Workers Builds.
 Config lives in `wrangler.toml`. Tenant config and secrets live in the
