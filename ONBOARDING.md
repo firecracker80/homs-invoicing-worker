@@ -20,7 +20,26 @@ Settings → Private Integrations → Create New Integration, scoped to
 `invoices.readonly` + `invoices.write`. This one `ghlPit` covers both invoice
 enrichment and `ghl-calendar.js`'s calendar sync.
 
-## 4. Webhook body merge tags
+## 4. Admin secret — every client gets their own
+Generate a fresh random secret per client (`node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"`)
+and set it as `adminSecret` in their KV entry. This is what gates
+`/cancel`, `/reschedule`, `/deposit/refund`, and the `/reports/*` statement
+endpoints.
+
+**Don't rely on the global `ADMIN_SECRET` Worker secret once you have more
+than one unrelated client.** `adminAuthorized` checks `tenant.adminSecret ||
+env.ADMIN_SECRET` — the global one is a fallback shared across *every*
+tenant that doesn't set their own, so it isn't scoped to a single client at
+all. Knowing it unlocks admin actions on every client still relying on the
+fallback, not just one. Treat the global secret as your own personal/
+internal-testing fallback only — never hand it to a client's own tooling,
+and never let two unrelated clients share one.
+
+Whatever fires `/cancel`/`/reschedule` on this client's behalf (your own
+internal automation, or theirs) needs this value — store it the same place
+you'd store any other client credential, not just in this doc.
+
+## 5. Webhook body merge tags
 Confirm the `/booking-created` webhook action's JSON body includes:
 ```json
 "bookingId": "{{contact.booking_id}}",
@@ -30,12 +49,12 @@ Both of these were missing on Luminara's first setup and caused real
 failures (enrichment fell back to PayPal until each was added) — don't
 assume they're already there.
 
-## 5. Verify the rental calendar auto-creates a draft invoice
+## 6. Verify the rental calendar auto-creates a draft invoice
 The invoice-enrichment path assumes GHL's rental module creates a rent-only
 draft invoice at booking time. Check Payments → Invoices for this client
 before flipping the flag on, rather than finding out via a live failure.
 
-## 6. GHL inbound-webhook URLs (optional, per notification)
+## 7. GHL inbound-webhook URLs (optional, per notification)
 Each of these is a GHL **Inbound Webhook trigger** URL — only set the ones
 where that workflow already exists in the client's sub-account:
 - `ghlPaymentLinkUrl` — payment link ready
@@ -44,7 +63,7 @@ where that workflow already exists in the client's sub-account:
 - `ghlDepositRefundUrl` — deposit refunded
 - `ghlRescheduleUrl` — booking rescheduled
 
-## 7. The KV entry
+## 8. The KV entry
 Cloudflare dashboard → Workers & Pages → homs-invoicing-worker-0e0e →
 Storage & Databases → KV → **TENANTS** → Add entry, key = the client's
 `locationId`:
@@ -67,22 +86,25 @@ Storage & Databases → KV → **TENANTS** → Add entry, key = the client's
   "paypalClientId": "...",
   "paypalSecret": "...",
   "ghlPit": "pit-...",
+  "adminSecret": "...",
   "invoiceStrategy": "enrich"
 }
 ```
 
 Everything else (`checkInHour`/`checkOutHour`/`tzOffsetHours`, `webhookSecret`,
-`adminSecret`, `locale`, `defaultLanguage`, `invoiceDueHours`, `thankYouUrl`,
-`properties`, `ghlInvoiceSendAction`, `ghlInvoiceLiveMode`) has a sane
-default — only set it if this client needs something different.
+`locale`, `defaultLanguage`, `invoiceDueHours`, `thankYouUrl`, `properties`,
+`ghlInvoiceSendAction`, `ghlInvoiceLiveMode`) has a sane default — only set
+it if this client needs something different. `adminSecret` is the one
+exception to "has a sane default" — see step 4, it doesn't have one on
+purpose.
 
-## 8. Ledger + statements (optional)
+## 9. Ledger + statements (optional)
 Add `"otaRate": 0.15` (or whatever their real comparison rate is) if you
 want the owner statement to show what an OTA commission would have cost on
 this client's bookings. Omit it entirely and that line just doesn't appear —
 never guess a rate on a client's behalf.
 
-## 9. Test
+## 10. Test
 Fire one real booking through their form, watch Cloudflare → Logs → Begin
 log stream. `invoiceEnrichError` in the response body and GHL's actual
 validation message in the log (via `ghlFetch`) should make any tenant-
