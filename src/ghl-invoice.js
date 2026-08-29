@@ -110,11 +110,16 @@ export async function resolveDraftInvoiceId(
 ) {
   if (hintedInvoiceId) return hintedInvoiceId;
 
+  // Deliberately NOT filtering by status server-side: "draft" was an
+  // assumption from the task description, not a verified value, and a
+  // wrong guess here silently returns zero results (confirmed live -- a
+  // real draft invoice existed and this returned nothing with status=draft
+  // in the query). Fetch everything for the contact and filter client-side
+  // instead, where we can see exactly what statuses actually came back.
   const q = new URLSearchParams({
     altId: locationId,
     altType: "location",
     contactId,
-    status: "draft",
     limit: "20",
     offset: "0"
   });
@@ -126,9 +131,15 @@ export async function resolveDraftInvoiceId(
   const byNumber = invoices.find(i => i.invoiceNumber === bookingId);
   if (byNumber) return byNumber._id;
 
-  // no correlation number yet -> newest draft for this contact
-  const newest = invoices.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))[0];
-  if (!newest) throw new Error(`No draft invoice found for contact ${contactId} / booking ${bookingId}`);
+  // No correlation number yet -> newest NOT-YET-PAID invoice for this
+  // contact (excludes "paid" specifically since that's a status we DO know
+  // for certain, rather than guessing what "draft" is actually spelled).
+  const candidates = invoices.filter(i => i.status !== "paid");
+  const newest = candidates.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))[0];
+  if (!newest) {
+    const statuses = invoices.map(i => i.status).join(", ") || "none";
+    throw new Error(`No unpaid draft invoice found for contact ${contactId} / booking ${bookingId}. Fetched ${invoices.length} invoice(s), statuses: [${statuses}]`);
+  }
   return newest._id;
 }
 

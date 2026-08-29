@@ -32,7 +32,14 @@ function mockFetch(url, opts) {
   if (url.includes("/invoices/?")) {
     assert.ok(url.includes(`altId=${encodeURIComponent(snapshot.locationId)}`), "list-invoices must send altId -- omitting it 401s live despite not being in describe_operation's schema");
     assert.ok(url.includes("altType=location"), "list-invoices must send altType=location");
-    return jsonRes({ invoices: [{ _id: "inv_draft_1", invoiceNumber: null, createdAt: "2026-08-26T12:00:00Z" }], total: 1 });
+    assert.ok(!url.includes("status="), "must NOT filter by status server-side -- 'draft' was an unverified guess that returned zero results live; filter client-side instead");
+    // A real contact can have a mix: an old paid invoice (must be excluded)
+    // and the actual unpaid draft the rental calendar just created (newer,
+    // no known status string -- proves we don't need to guess it).
+    return jsonRes({ invoices: [
+      { _id: "inv_paid_old", invoiceNumber: "000012", status: "paid", createdAt: "2026-08-20T12:00:00Z" },
+      { _id: "inv_draft_1", invoiceNumber: null, createdAt: "2026-08-26T12:00:00Z" }
+    ], total: 2 });
   }
   if (url.match(/\/invoices\/[^/]+\/send$/)) return jsonRes({ emailData: {}, invoice: { _id: "inv_draft_1" }, smsData: {} });
   if (url.match(/\/invoices\/[^/?]+\?.*altType=location/) && (!opts.method || opts.method === "GET")) {
