@@ -69,9 +69,14 @@ async function ghlFetch(tenant, env, path, { method = "GET", body } = {}, fetchI
     body: body ? JSON.stringify(body) : undefined
   });
   const text = await res.text();
-  const json = text ? JSON.parse(text) : {};
+  let json;
+  try { json = text ? JSON.parse(text) : {}; } catch { json = { raw: text }; }
   if (!res.ok) {
-    const err = new Error(`GHL ${method} ${path} -> ${res.status}`);
+    // The status alone is useless for a 422 -- GHL's validation message
+    // names the exact field. Put the body IN the message (not just .payload)
+    // so it actually shows up in console.error / the log stream, matching
+    // how every other GHL-write debugging round in this project has worked.
+    const err = new Error(`GHL ${method} ${path} -> ${res.status} ${JSON.stringify(json).slice(0, 500)}`);
     err.status = res.status;
     err.payload = json;
     throw err;
