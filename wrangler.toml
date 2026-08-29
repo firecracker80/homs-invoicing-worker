@@ -15,3 +15,10 @@ id = "e991d4f4c0cc41e29a00aba8d9745c34"
 [[kv_namespaces]]
 binding = "BOOKINGS"
 id = "1138218f692649eba0b624a2492f5409"
+
+# Ledger DB for owner/manager statements + reconciliation (src/ledger.js,
+# src/reports.js). Schema in schema/homs_ledger_schema.sql.
+[[d1_databases]]
+binding = "LEDGER_DB"
+database_name = "homs-ledger"
+database_id = "4a53f696-1bf9-4084-8f72-25ce5b9c5bef"

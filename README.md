@@ -13,8 +13,17 @@ and returns the payment link to GHL.
 - `POST /cancel` — tiered cancellation charge (admin-triggered)
 - `POST /deposit/refund` — post-checkout deposit refund (admin-triggered)
 - `GET /paypal/cancel`, `GET /stripe/cancel` — guest-cancelled-checkout landing
+- `GET /reports/owner-statement`, `GET /reports/manager-statement` — D1-backed statement, `?format=json` or the default branded HTML (admin-triggered, `X-Admin-Secret`)
+- `GET /reports/reconcile` — diffs D1's income-bearing bookings against GHL's `list-transactions` for the same window (admin-triggered)
 
-Settlement (`src/payment.js`) writes captures/fees to Payments, generates Transaction Ledger + Payout Ledger rows (85/15 rent-only split, cleaning fee per profile), and notifies GHL via the tenant's `ghlPaymentConfirmedUrl` inbound webhook.
+Settlement (`src/payment.js`) writes captures/fees to Payments, generates Transaction Ledger + Payout Ledger rows (85/15 rent-only split, cleaning fee per profile), materializes the same split into D1 (`src/ledger.js`, non-blocking), and notifies GHL via the tenant's `ghlPaymentConfirmedUrl` inbound webhook.
+
+## Ledger + statements (D1)
+`src/ledger.js` writes one `ledger_entries` row per money movement at settlement time — owner/manager rent split (`income`), cleaning fee (`income`, to whoever the profile names), security deposit (`liability`, held, never split), processing fee (`pass_through`, never split), and an optional `shadow` OTA-commission comparison if the tenant has `otaRate` configured (skipped entirely otherwise — never guesses a commission rate). Idempotent: a `UNIQUE(booking_id, entry_type)` index + `INSERT OR IGNORE` means a retried settlement writes zero duplicate rows. Schema in [schema/homs_ledger_schema.sql](./schema/homs_ledger_schema.sql).
+
+`src/reports.js` serves the two statements as a plain `GROUP BY` + detail list over those rows — no split logic gets recomputed in SQL — and the reconciliation endpoint, which is only meaningful for `invoiceStrategy: "enrich"` bookings (a `paypal_url` booking never touches GHL's own transactions ledger, so it's correctly excluded rather than flagged as a false discrepancy).
+
+Add `otaRate` to a tenant's KV entry (e.g. `0.15`) to enable the shadow-commission line on their owner statements.
 
 ## Invoice strategy (GHL invoice enrichment — additive, flag-gated)
 `/booking-created` can, instead of generating a PayPal/Stripe checkout link, enrich and send the DRAFT invoice GHL's rental calendar already auto-creates at booking (rent line only): append cleaning + security deposit + processing-fee lines to it, stamp the invoice number, and send it via `send-invoice`. See `src/ghl-invoice.js` for the schema notes — several assumptions in an earlier draft didn't match the live GHL API (`update-invoice` requires the full body, not just `invoiceItems`; `send-invoice`'s real fields are `userId`/`action`/`liveMode`, not `sendTo`/`deliver`) and were corrected against `describe_operation` output before this shipped.
@@ -36,6 +45,7 @@ TENANTS KV namespace (managed in the Cloudflare dashboard) — never commit them
     node test-worker.js              # full dry run, mocked PayPal/Stripe/Airtable
     node test-ghl-invoice.js         # invoice-enrichment schema + end-to-end flag/fallback tests
     node test-reschedule-unpaid.js   # rescheduling a never-paid booking re-prices + fresh idempotency key
+    node test-ledger-reports.js      # ledger materialization, idempotency, /reports/* endpoints, reconciliation
     node test-deposit-rules.js       # deposit rule engine checks
 
 ## Structure
@@ -48,4 +58,7 @@ TENANTS KV namespace (managed in the Cloudflare dashboard) — never commit them
     src/payment.js          capture, settlement, ledgers, GHL payment-confirmed notify
     src/cancellation.js     tiered cancellation charges + deposit refunds
     src/reschedule.js       move a paid booking to new dates (delta charge/refund)
+    src/ghl-calendar.js     push new dates onto the actual GHL rental-calendar booking
     src/ghl-invoice.js      GHL invoice enrichment (additive, INVOICE_STRATEGY="enrich")
+    src/ledger.js           materializes the settlement split into D1 (ledger_entries)
+    src/reports.js          owner/manager statements + D1-vs-GHL reconciliation

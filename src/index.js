@@ -8,6 +8,7 @@ import { handlePayPalReturn, handlePayPalWebhook, handleStripeReturn, handleStri
 import { handleCancel, handleDepositRefund } from "./cancellation.js";
 import { handleReschedule } from "./reschedule.js";
 import { resolveDraftInvoiceId, enrichAndSendInvoice } from "./ghl-invoice.js";
+import { handleOwnerStatement, handleManagerStatement, handleReconcile } from "./reports.js";
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -339,6 +340,12 @@ export default {
         return handleCancel(request, env);
       if (request.method === "POST" && url.pathname === "/deposit/refund")
         return handleDepositRefund(request, env);
+      if (url.pathname === "/reports/owner-statement")
+        return handleOwnerStatement(request, env);
+      if (url.pathname === "/reports/manager-statement")
+        return handleManagerStatement(request, env);
+      if (url.pathname === "/reports/reconcile")
+        return handleReconcile(request, env);
       if (url.pathname === "/paypal/cancel" || url.pathname === "/stripe/cancel")
         return json({ status: "cancelled", note: "guest cancelled checkout" });
       return json({ error: "Not found" }, 404);
