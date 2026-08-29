@@ -45,10 +45,13 @@ function mockFetch(url, opts) {
   if (url.match(/\/invoices\/[^/?]+\?.*altType=location/) && (!opts.method || opts.method === "GET")) {
     assert.ok(url.includes(`altId=${encodeURIComponent(snapshot.locationId)}`), "get-invoice must send altId -- same 401 risk as list-invoices");
     // get-invoice: existing draft GHL's rental calendar already created (rent
-    // line only). Real GHL returns full ISO datetimes here, NOT date-only --
-    // this is exactly the shape that 422'd live before the dateOnly() fix.
+    // line only), WITH GHL's own auto-assigned invoiceNumber -- proves the
+    // PUT appends to it rather than overwriting GHL's sequential numbering.
+    // Real GHL also returns full ISO datetimes here, NOT date-only -- this
+    // is exactly the shape that 422'd live before the dateOnly() fix.
     return jsonRes({
       _id: "inv_draft_1", name: "Reserva BK-1001", title: "INVOICE", currency: "USD",
+      invoiceNumber: "000018",
       issueDate: "2026-08-26T04:00:00.000Z", dueDate: "2026-09-01T03:59:59.999Z",
       invoiceItems: [{ name: "Estadía", currency: "USD", amount: 60, qty: 5 }],
       businessDetails: { name: "Luminara" }
@@ -93,7 +96,7 @@ assert.ok(get, "expected a get-invoice call before the PUT");
 
 const put = calls.find(c => c.method === "PUT");
 assert.ok(put, "expected an update-invoice PUT");
-assert.equal(put.body.invoiceNumber, "BK-1001", "correlation number is bookingId itself -- the real rental-calendar booking id, no HOMS-invented prefix");
+assert.equal(put.body.invoiceNumber, "000018-BK-1001", "must APPEND bookingId to GHL's own invoiceNumber, not replace it -- keeps the guest-facing sequential numbering intact");
 // The fields update-invoice actually REQUIRES (verified live) -- must be present, echoed from get-invoice
 for (const f of ["name", "currency", "issueDate", "dueDate"]) {
   assert.ok(put.body[f], `update-invoice body missing required field: ${f}`);
@@ -117,6 +120,28 @@ assert.equal(send.body.deliver, undefined, "deliver is not a real field on this 
 console.log("PASS (unit) — ghl-invoice.js matches the verified live API schema");
 console.log(`  Appended ${result.appendedItems.length} lines to the existing ${put.body.invoiceItems.length - result.appendedItems.length}-line draft`);
 console.log(`  Sent via action=${send.body.action}, liveMode=${send.body.liveMode}`);
+
+// ---- 4b. retry lookup: substring match against an already-stamped number ----
+// Simulates a second webhook fire hitting list-invoices directly (e.g. the
+// hinted-id path was unavailable) after this exact invoice was already
+// enriched once. GHL's own number ("000018") isn't known in advance, so this
+// MUST be a substring match, not the exact "===" the earlier CC-prefix design used.
+calls.length = 0;
+async function retryMockFetch(url, opts) {
+  if (url.includes("/invoices/?")) {
+    return jsonRes({ invoices: [
+      { _id: "inv_paid_old", invoiceNumber: "000012", status: "paid", createdAt: "2026-08-20T12:00:00Z" },
+      { _id: "inv_draft_1", invoiceNumber: "000018-BK-1001", status: "sent", createdAt: "2026-08-26T12:00:00Z" },
+      // A DIFFERENT, unrelated newer invoice for the same contact -- proves
+      // the substring match on bookingId wins over "just take the newest".
+      { _id: "inv_unrelated", invoiceNumber: "000019", status: "sent", createdAt: "2026-08-27T12:00:00Z" }
+    ], total: 3 });
+  }
+  throw new Error("unexpected call in retry test: " + url);
+}
+const retryId = await resolveDraftInvoiceId({ tenant, env, locationId: snapshot.locationId, contactId: snapshot.ghlContactId, bookingId: snapshot.bookingId, hintedInvoiceId: null }, retryMockFetch);
+assert.equal(retryId, "inv_draft_1", "must find the already-stamped invoice by substring match, not fall through to 'newest' and grab the unrelated one");
+console.log("4b) Retry lookup against a stamped '000018-BK-1001' -> found inv_draft_1, not the newer unrelated invoice");
 
 // =========================================================================
 // Part 2 — end-to-end through the actual worker, proving the flag wiring

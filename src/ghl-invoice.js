@@ -49,10 +49,15 @@
 // for these tokens (see ghl-account-registry.json's pit_connector), and the
 // name already in use on existing tenant entries.
 //
-// bookingId is NOT something HOMS invents (earlier drafts assumed a "CC-"
-// prefix) -- it IS the real rental-calendar booking id, captured at the
-// contact level in GHL and fed to /booking-created via the {{contact.booking_id}}
-// merge tag. Used as-is for the invoiceNumber correlation match.
+// bookingId is NOT something HOMS invents -- it IS the real rental-calendar
+// booking id, captured at the contact level in GHL and fed to
+// /booking-created via the {{contact.booking_id}} merge tag.
+//
+// It's APPENDED to GHL's own invoiceNumber ("000018-D6Stqz...") rather than
+// replacing it, so the guest-facing sequential numbering GHL assigns stays
+// intact. That means resolveDraftInvoiceId's retry-lookup can't do an exact
+// match (GHL's own number isn't known until after the invoice is found) --
+// it matches by substring instead.
 //
 // userId (required by send-invoice) is likewise per-REQUEST, not
 // per-tenant config: it comes from {{user.id}} on the booking webhook, same
@@ -145,9 +150,12 @@ export async function resolveDraftInvoiceId(
   const list = await ghlFetch(tenant, env, `/invoices/?${q}`, {}, fetchImpl);
   const invoices = list.invoices || [];
 
-  // bookingId IS the correlation number -- it's the real rental-calendar
-  // booking id (from {{contact.booking_id}}), not a HOMS-invented prefix.
-  const byNumber = invoices.find(i => i.invoiceNumber === bookingId);
+  // The stamped invoiceNumber is GHL's own number with bookingId APPENDED
+  // ("000018-D6Stqz...") so GHL's native numbering sequence stays intact --
+  // see enrichAndSendInvoice. That means an exact match isn't possible here:
+  // on a retry we don't know what GHL's original number was until we've
+  // already found the invoice, so match by substring instead.
+  const byNumber = invoices.find(i => i.invoiceNumber && i.invoiceNumber.includes(bookingId));
   if (byNumber) return byNumber._id;
 
   // No correlation number yet -> newest NOT-YET-PAID invoice for this
@@ -182,6 +190,15 @@ export async function enrichAndSendInvoice(
   const appendItems = buildAppendItems(snapshot, tenant);
   const invoiceItems = [...(existing.invoiceItems || []), ...appendItems];
 
+  // Keep GHL's own sequential number (guest-facing on the invoice/PDF/email)
+  // and append the booking id for correlation instead of overwriting it --
+  // e.g. "000018-D6Stqz...". Guarded against double-appending if this ever
+  // runs twice against an already-stamped invoice (shouldn't happen -- the
+  // caller's idempotency check short-circuits retries -- but cheap to guard).
+  const invoiceNumber = existing.invoiceNumber
+    ? (existing.invoiceNumber.includes(snapshot.bookingId) ? existing.invoiceNumber : `${existing.invoiceNumber}-${snapshot.bookingId}`)
+    : snapshot.bookingId;
+
   await ghlFetch(
     tenant, env, `/invoices/${invoiceId}`,
     {
@@ -192,7 +209,7 @@ export async function enrichAndSendInvoice(
         name: existing.name || `Reserva ${snapshot.bookingId}`,
         title: existing.title,
         currency: existing.currency || tenant.currency || "USD",
-        invoiceNumber: snapshot.bookingId,
+        invoiceNumber,
         contactDetails: { ...contact, phoneNo: toE164(contact.phoneNo) },
         invoiceItems,
         // get-invoice returns full ISO datetimes ("2026-08-26T04:00:00.000Z");
