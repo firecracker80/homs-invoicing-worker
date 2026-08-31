@@ -22,3 +22,28 @@ id = "1138218f692649eba0b624a2492f5409"
 binding = "LEDGER_DB"
 database_name = "homs-ledger"
 database_id = "4a53f696-1bf9-4084-8f72-25ce5b9c5bef"
+
+# ============================================================================
+# STAGING — completely separate data (own KV, own D1), deploys from the
+# `staging` branch. See STAGING.md for the one manual Cloudflare-dashboard
+# step this needs (creating the staging Worker itself + its Build config)
+# and the promote-to-production flow. Never point this at a real tenant's
+# GHL/PayPal/Airtable credentials -- seed it with sandbox-only config.
+[env.staging]
+name = "homs-invoicing-worker-0e0e-staging"
+
+[env.staging.vars]
+WORKER_URL = "https://homs-invoicing-worker-0e0e-staging.yari-058.workers.dev"
+
+[[env.staging.kv_namespaces]]
+binding = "TENANTS"
+id = "e37d25ba95f84456b9b0b13de2ad6757"
+
+[[env.staging.kv_namespaces]]
+binding = "BOOKINGS"
+id = "af89eb524ae84cc0845caefbf70dfc98"
+
+[[env.staging.d1_databases]]
+binding = "LEDGER_DB"
+database_name = "homs-ledger-staging"
+database_id = "051289d3-0730-427f-8052-5166c01cabd2"
