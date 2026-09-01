@@ -107,6 +107,12 @@ function composeBooking(payload, tenantProfile) {
       owner: ownerAmt,
       manager: managerAmt,
       cleaningFeeTo: tenantProfile.cleaningFeeRecipient || "manager",
+      // Per-property override first (a tenant with several owners/managers
+      // across different properties), falling back to a tenant-wide name
+      // (a tenant with just one of each). Both optional -- null just means
+      // statements for this booking won't be name-filterable, not an error.
+      ownerName: tenantProfile.propertyOwnerNames?.[payload.propertyCode] ?? tenantProfile.ownerName ?? null,
+      managerName: tenantProfile.propertyManagerNames?.[payload.propertyCode] ?? tenantProfile.managerName ?? null,
       status: "pending"
     }
   };

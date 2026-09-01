@@ -1,8 +1,13 @@
 // reports.js — owner/manager statements + D1-vs-GHL reconciliation.
 // Routes (wired in index.js):
-//   GET /reports/owner-statement    ?locationId&from&to&format=json|html&token=...
-//   GET /reports/manager-statement  ?locationId&from&to&format=json|html&token=...
+//   GET /reports/owner-statement    ?locationId&from&to&format=json|html&token=...&recipientName=...
+//   GET /reports/manager-statement  ?locationId&from&to&format=json|html&token=...&recipientName=...
 //   GET /reports/reconcile          ?locationId&from&to
+//
+// recipientName is optional -- only needed for a tenant with more than one
+// owner or manager (see ledger.js's per-property name resolution). A tenant
+// with just one of each can omit it; recipient alone already scopes the
+// whole location's owner/manager rows.
 //
 // /reconcile is admin-gated (X-Admin-Secret) only, same model as /cancel and
 // /reschedule -- it's an internal diagnostic tool, never iframed.
@@ -64,21 +69,29 @@ function resolveWindow(url) {
   return { from: `${from}T00:00:00.000Z`, to: toExclusive.toISOString(), fromLabel: from, toLabel: to };
 }
 
-async function queryStatement(env, locationId, recipient, from, to) {
+async function queryStatement(env, locationId, recipient, from, to, recipientName) {
+  // recipientName is optional -- a tenant with one owner and one manager
+  // total never needs it (recipient alone already scopes the whole
+  // location's owner/manager rows). A tenant with several owners or
+  // managers across different properties passes it to narrow further,
+  // matching ledger.js's per-property name resolution.
+  const nameClause = recipientName ? " AND recipient_name = ?5" : "";
+  const params = recipientName ? [locationId, recipient, from, to, recipientName] : [locationId, recipient, from, to];
+
   const summaryRes = await env.LEDGER_DB.prepare(
     `SELECT entry_type, category, currency, SUM(amount_minor) AS total_minor, COUNT(*) AS entry_count
      FROM ledger_entries
-     WHERE location_id = ?1 AND recipient = ?2 AND created_at >= ?3 AND created_at < ?4
+     WHERE location_id = ?1 AND recipient = ?2 AND created_at >= ?3 AND created_at < ?4${nameClause}
      GROUP BY entry_type, category, currency
      ORDER BY entry_type`
-  ).bind(locationId, recipient, from, to).all();
+  ).bind(...params).all();
 
   const detailRes = await env.LEDGER_DB.prepare(
     `SELECT booking_id, invoice_number, invoice_id, entry_type, category, amount_minor, currency, description, created_at
      FROM ledger_entries
-     WHERE location_id = ?1 AND recipient = ?2 AND created_at >= ?3 AND created_at < ?4
+     WHERE location_id = ?1 AND recipient = ?2 AND created_at >= ?3 AND created_at < ?4${nameClause}
      ORDER BY created_at DESC`
-  ).bind(locationId, recipient, from, to).all();
+  ).bind(...params).all();
 
   const summary = (summaryRes.results || []).map(r => ({
     entryType: r.entry_type, category: r.category, currency: r.currency,
@@ -181,12 +194,14 @@ async function handleStatement(request, env, recipient, recipientLabel, tokenFie
   if (!env.LEDGER_DB) return json({ error: "Ledger not configured (LEDGER_DB binding missing)" }, 500);
 
   const { from, to, fromLabel, toLabel } = resolveWindow(url);
-  const stmt = await queryStatement(env, locationId, recipient, from, to);
+  const recipientName = url.searchParams.get("recipientName") || null;
+  const stmt = await queryStatement(env, locationId, recipient, from, to, recipientName);
+  const label = recipientName ? `${recipientLabel} — ${recipientName}` : recipientLabel;
 
   if ((url.searchParams.get("format") || "html") === "json") {
-    return json({ locationId, recipient, from: fromLabel, to: toLabel, ...stmt });
+    return json({ locationId, recipient, recipientName, from: fromLabel, to: toLabel, ...stmt });
   }
-  return html(statementHtml({ brandName: tenant.brandName || locationId, recipientLabel, fromLabel, toLabel, stmt }));
+  return html(statementHtml({ brandName: tenant.brandName || locationId, recipientLabel: label, fromLabel, toLabel, stmt }));
 }
 
 export async function handleOwnerStatement(request, env) {

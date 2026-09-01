@@ -104,6 +104,25 @@ want the owner statement to show what an OTA commission would have cost on
 this client's bookings. Omit it entirely and that line just doesn't appear —
 never guess a rate on a client's behalf.
 
+**Multiple owners or managers under one tenant.** A tenant with just one
+owner and one manager total doesn't need anything here — `/reports/owner-statement`
+and `/reports/manager-statement` already scope to the whole location.
+A tenant managing several properties for *different* owners (or a manager
+who only handles some of them) needs a name on each row to tell them apart:
+```json
+"ownerName": "Jane Doe",
+"managerName": "Property Co",
+"propertyOwnerNames": { "PROP-B": "Marco" },
+"propertyManagerNames": { "PROP-B": "Diego" }
+```
+`ownerName`/`managerName` are the tenant-wide default; `propertyOwnerNames`/
+`propertyManagerNames` (keyed by `propertyCode`) override it per property.
+Then pass `&recipientName=Marco` on the statement URL to scope to just that
+person — see [reports.js](src/reports.js) and [STATEMENTS.md](STATEMENTS.md)
+for the iframe/token delivery mechanism. This only affects bookings created
+*after* the name config is set — it isn't backfilled onto already-written
+ledger rows.
+
 ## 10. Test
 Fire one real booking through their form, watch Cloudflare → Logs → Begin
 log stream. `invoiceEnrichError` in the response body and GHL's actual

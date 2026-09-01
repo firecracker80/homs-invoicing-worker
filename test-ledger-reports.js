@@ -5,6 +5,7 @@
 // SQL engine.
 import assert from "node:assert";
 import { writeLedgerEntries } from "./src/ledger.js";
+import { composeBooking } from "./src/booking-composer.js";
 
 // ---- minimal in-memory D1 mock ----
 function makeMockD1() {
@@ -23,8 +24,9 @@ function makeMockD1() {
 
   function select(sql, params) {
     if (sql.includes("GROUP BY entry_type, category, currency")) {
-      const [locationId, recipient, from, to] = params;
-      const filtered = rows.filter(r => r.location_id === locationId && r.recipient === recipient && r.created_at >= from && r.created_at < to);
+      const [locationId, recipient, from, to, recipientName] = params;
+      const filtered = rows.filter(r => r.location_id === locationId && r.recipient === recipient && r.created_at >= from && r.created_at < to
+        && (recipientName === undefined || r.recipient_name === recipientName));
       const groups = new Map();
       for (const r of filtered) {
         const key = `${r.entry_type}|${r.category}|${r.currency}`;
@@ -35,8 +37,9 @@ function makeMockD1() {
       return { results: [...groups.values()] };
     }
     if (sql.includes("ORDER BY created_at DESC")) {
-      const [locationId, recipient, from, to] = params;
-      return { results: rows.filter(r => r.location_id === locationId && r.recipient === recipient && r.created_at >= from && r.created_at < to)
+      const [locationId, recipient, from, to, recipientName] = params;
+      return { results: rows.filter(r => r.location_id === locationId && r.recipient === recipient && r.created_at >= from && r.created_at < to
+        && (recipientName === undefined || r.recipient_name === recipientName))
         .sort((a, b) => b.created_at.localeCompare(a.created_at)) };
     }
     if (sql.includes("DISTINCT booking_id, invoice_id, invoice_number")) {
@@ -111,6 +114,34 @@ const r3 = await writeLedgerEntries({ LEDGER_DB: db3 }, { currency: "USD" }, mak
 assert.equal(r3.rowsWritten, 5, "no otaRate on tenant -> 5 rows, no shadow_ota_commission");
 assert.ok(!db3._rows.some(r => r.entry_type === "shadow_ota_commission"));
 console.log("3) No tenant.otaRate -> shadow entry correctly omitted (never guesses a rate)");
+
+// ---- 3b. booking-composer.js: owner/manager name resolution order ----
+// Per-property override wins over the tenant-wide default; a tenant with
+// only one owner/manager can skip per-property config entirely.
+const multiOwnerTenant = {
+  ownerPct: 0.85, currency: "USD", ownerName: "Yari", managerName: "Priya",
+  propertyOwnerNames: { "PROP-B": "Marco" }, propertyManagerNames: { "PROP-B": "Diego" }
+};
+const { snapshot: compA } = composeBooking({ bookingId: "CMP-A", locationId: "L1", propertyCode: "PROP-A", checkIn: "2026-09-01", checkOut: "2026-09-04", nightlyRate: 100 }, multiOwnerTenant);
+assert.equal(compA.payout.ownerName, "Yari", "no per-property override for PROP-A -> falls back to tenant-wide ownerName");
+assert.equal(compA.payout.managerName, "Priya");
+const { snapshot: compB } = composeBooking({ bookingId: "CMP-B", locationId: "L1", propertyCode: "PROP-B", checkIn: "2026-09-01", checkOut: "2026-09-04", nightlyRate: 100 }, multiOwnerTenant);
+assert.equal(compB.payout.ownerName, "Marco", "PROP-B has its own owner -> per-property override wins");
+assert.equal(compB.payout.managerName, "Diego");
+const { snapshot: compNone } = composeBooking({ bookingId: "CMP-C", locationId: "L1", propertyCode: null, checkIn: "2026-09-01", checkOut: "2026-09-04", nightlyRate: 100 }, { ownerPct: 0.85, currency: "USD" });
+assert.equal(compNone.payout.ownerName, null, "single-owner tenant with no name config at all -> null, not an error");
+console.log("3b) booking-composer name resolution: per-property override > tenant-wide default > null");
+
+// ---- 3c. ledger.js writes the resolved name onto every row for that role ----
+const db3c = makeMockD1();
+await writeLedgerEntries({ LEDGER_DB: db3c }, { ...multiOwnerTenant, otaRate: 0.15 }, makeSnapshot("BK-NAMED", { payout: { basis: 700, ownerPct: 0.85, owner: 595, manager: 105, cleaningFeeTo: "manager", ownerName: "Marco", managerName: "Diego" } }), captures);
+const namedRows = Object.fromEntries(db3c._rows.map(r => [r.entry_type, r]));
+assert.equal(namedRows.rent_split_owner.recipient_name, "Marco");
+assert.equal(namedRows.rent_split_manager.recipient_name, "Diego");
+assert.equal(namedRows.cleaning_fee.recipient_name, "Diego", "cleaningFeeTo=manager -> carries the manager's name, not the owner's");
+assert.equal(namedRows.shadow_ota_commission.recipient_name, "Marco");
+assert.equal(namedRows.deposit_held.recipient_name, null, "guest/platform rows never carry an owner/manager name");
+console.log("3c) ledger.js: recipient_name flows onto every owner/manager row, correctly split by who actually earned it");
 
 // ---- 4. No LEDGER_DB binding -> reports non-fatal, doesn't throw ----
 const r4 = await writeLedgerEntries({}, tenant, makeSnapshot("BK-NO-DB"), captures);
@@ -243,6 +274,27 @@ assert.equal(rightManagerToken.status, 200, "the manager's own scoped token must
 const ownerTokenOnManagerRoute = await worker.fetch({ method: "GET", url: "https://w.dev/reports/manager-statement?locationId=L2&format=json&token=owner-tok-abc", headers: { get: () => null } }, env);
 assert.equal(ownerTokenOnManagerRoute.status, 401, "the owner's token must not unlock the manager statement");
 console.log("10b) ?token= auth: scoped correctly per recipient, no cross-over, admin header still works alongside it");
+
+// ---- 10c. ?recipientName= filtering: one location, two owners (several
+// properties under the same tenant) -- must never blend their totals ----
+await kv.put("L3", JSON.stringify({ brandName: "Multi-owner Tenant" }));
+const seedOwnerRow = (recipientName, amountMinor, bookingId) => ledgerDb.prepare(
+  `INSERT OR IGNORE INTO ledger_entries
+   (location_id, booking_id, invoice_number, invoice_id, recipient, recipient_name, category, entry_type, amount_minor, currency, description, source, created_at)
+   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+).bind("L3", bookingId, null, null, "owner", recipientName, "income", "rent_split_owner", amountMinor, "USD", "test", "payment_confirmed", new Date().toISOString()).run();
+await seedOwnerRow("Yari", 59500, "BK-YARI-1");
+await seedOwnerRow("Marco", 42000, "BK-MARCO-1");
+
+const yariOnly = await (await worker.fetch({ method: "GET", url: "https://w.dev/reports/owner-statement?locationId=L3&format=json&recipientName=Yari", headers: hdr("admin123") }, env)).json();
+assert.equal(yariOnly.incomeTotal, 595.00, "recipientName=Yari must only total Yari's row, not Marco's");
+
+const marcoOnly = await (await worker.fetch({ method: "GET", url: "https://w.dev/reports/owner-statement?locationId=L3&format=json&recipientName=Marco", headers: hdr("admin123") }, env)).json();
+assert.equal(marcoOnly.incomeTotal, 420.00, "recipientName=Marco must only total Marco's row, not Yari's");
+
+const bothCombined = await (await worker.fetch({ method: "GET", url: "https://w.dev/reports/owner-statement?locationId=L3&format=json", headers: hdr("admin123") }, env)).json();
+assert.equal(bothCombined.incomeTotal, 1015.00, "omitting recipientName -> the old whole-location behavior, both owners combined");
+console.log("10c) ?recipientName= filtering: two owners under one location, each statement scoped correctly, omitting it still aggregates both (unchanged default behavior)");
 
 // ---- 11/12. /reports/reconcile is only meaningful for enrich-mode bookings
 // (ones with a real GHL invoice_id) -- E2E-1 went through paypal_url and

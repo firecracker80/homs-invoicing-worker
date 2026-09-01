@@ -22,16 +22,23 @@ export async function writeLedgerEntries(env, tenant, snapshot, captures) {
   const basis = snapshot.payout.basis;
   const rows = [];
 
+  // Which named individual each role resolves to for this booking's property
+  // -- a tenant with several owners/managers needs this to tell their
+  // statements apart; a tenant with just one of each can leave it unset and
+  // every row for that role just carries a null recipient_name.
+  const ownerName = snapshot.payout.ownerName ?? null;
+  const managerName = snapshot.payout.managerName ?? null;
+
   // 1. Owner's rent split -- income
   rows.push({
-    recipient: "owner", category: "income", entry_type: "rent_split_owner",
+    recipient: "owner", recipientName: ownerName, category: "income", entry_type: "rent_split_owner",
     amount: snapshot.payout.owner,
     description: `Rent split ${Math.round(snapshot.payout.ownerPct * 100)}% of $${basis.toFixed(2)}`
   });
 
   // 2. Manager's rent split -- income
   rows.push({
-    recipient: "manager", category: "income", entry_type: "rent_split_manager",
+    recipient: "manager", recipientName: managerName, category: "income", entry_type: "rent_split_manager",
     amount: snapshot.payout.manager,
     description: `Rent split ${Math.round((1 - snapshot.payout.ownerPct) * 100)}% of $${basis.toFixed(2)}`
   });
@@ -40,7 +47,8 @@ export async function writeLedgerEntries(env, tenant, snapshot, captures) {
   if (snapshot.charges.cleaningFee > 0) {
     const cleaningTo = snapshot.payout.cleaningFeeTo === "owner" ? "owner" : "manager";
     rows.push({
-      recipient: cleaningTo, category: "income", entry_type: "cleaning_fee",
+      recipient: cleaningTo, recipientName: cleaningTo === "owner" ? ownerName : managerName,
+      category: "income", entry_type: "cleaning_fee",
       amount: snapshot.charges.cleaningFee,
       description: "Cleaning fee"
     });
@@ -72,7 +80,7 @@ export async function writeLedgerEntries(env, tenant, snapshot, captures) {
   // never guess a commission percentage on a client's behalf.
   if (tenant.otaRate > 0) {
     rows.push({
-      recipient: "owner", category: "shadow", entry_type: "shadow_ota_commission",
+      recipient: "owner", recipientName: ownerName, category: "shadow", entry_type: "shadow_ota_commission",
       amount: round2(tenant.otaRate * basis),
       description: `What a ${Math.round(tenant.otaRate * 100)}% OTA commission would have cost on this booking`
     });
@@ -90,7 +98,7 @@ export async function writeLedgerEntries(env, tenant, snapshot, captures) {
     // rows already written, never double-counts.
     const stmts = rows.map(r => env.LEDGER_DB.prepare(sql).bind(
       snapshot.locationId, snapshot.bookingId, null, invoiceId,
-      r.recipient, null, r.category, r.entry_type, toMinor(r.amount), cur,
+      r.recipient, r.recipientName ?? null, r.category, r.entry_type, toMinor(r.amount), cur,
       r.description, "payment_confirmed", now
     ));
     await env.LEDGER_DB.batch(stmts);
