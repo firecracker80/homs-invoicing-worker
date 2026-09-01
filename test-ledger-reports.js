@@ -296,6 +296,15 @@ const bothCombined = await (await worker.fetch({ method: "GET", url: "https://w.
 assert.equal(bothCombined.incomeTotal, 1015.00, "omitting recipientName -> the old whole-location behavior, both owners combined");
 console.log("10c) ?recipientName= filtering: two owners under one location, each statement scoped correctly, omitting it still aggregates both (unchanged default behavior)");
 
+// ---- 10d. ?brandName= overrides tenant.brandName -- lets a GHL merge tag
+// (resolved by GHL in the Custom Menu Link's own URL field) drive the
+// displayed name, editable from GHL without touching KV ----
+const brandOverrideRes = await worker.fetch({ method: "GET", url: "https://w.dev/reports/owner-statement?locationId=L3&recipientName=Yari&brandName=Luminara%20Hospitality", headers: hdr("admin123") }, env);
+assert.ok(brandOverrideRes.body.includes("Luminara Hospitality"), "?brandName= in the URL must override tenant.brandName from KV");
+const brandFallbackRes = await worker.fetch({ method: "GET", url: "https://w.dev/reports/owner-statement?locationId=L3&recipientName=Yari", headers: hdr("admin123") }, env);
+assert.ok(brandFallbackRes.body.includes("Multi-owner Tenant"), "omitting ?brandName= must still fall back to tenant.brandName from KV");
+console.log("10d) ?brandName= in the URL overrides tenant.brandName; omitted, falls back to KV as before");
+
 // ---- 11/12. /reports/reconcile is only meaningful for enrich-mode bookings
 // (ones with a real GHL invoice_id) -- E2E-1 went through paypal_url and
 // never set snapshot.ghlInvoice, so it's correctly EXCLUDED from unmatched

@@ -1,7 +1,7 @@
 // reports.js — owner/manager statements + D1-vs-GHL reconciliation.
 // Routes (wired in index.js):
-//   GET /reports/owner-statement    ?locationId&from&to&format=json|html&token=...&recipientName=...
-//   GET /reports/manager-statement  ?locationId&from&to&format=json|html&token=...&recipientName=...
+//   GET /reports/owner-statement    ?locationId&from&to&format=json|html&token=...&recipientName=...&brandName=...
+//   GET /reports/manager-statement  ?locationId&from&to&format=json|html&token=...&recipientName=...&brandName=...
 //   GET /reports/reconcile          ?locationId&from&to
 //
 // recipientName is optional -- only needed for a tenant with more than one
@@ -198,10 +198,16 @@ async function handleStatement(request, env, recipient, recipientLabel, tokenFie
   const stmt = await queryStatement(env, locationId, recipient, from, to, recipientName);
   const label = recipientName ? `${recipientLabel} — ${recipientName}` : recipientLabel;
 
+  // brandName can come from the URL (a GHL merge tag like
+  // {{custom_values.wbrand_name}} resolves there, since that field is
+  // rendered by GHL itself before the iframe loads -- unlike tenant.brandName
+  // in KV, which GHL never sees). Falls back to KV, then locationId.
+  const brandName = url.searchParams.get("brandName") || tenant.brandName || locationId;
+
   if ((url.searchParams.get("format") || "html") === "json") {
     return json({ locationId, recipient, recipientName, from: fromLabel, to: toLabel, ...stmt });
   }
-  return html(statementHtml({ brandName: tenant.brandName || locationId, recipientLabel: label, fromLabel, toLabel, stmt }));
+  return html(statementHtml({ brandName, recipientLabel: label, fromLabel, toLabel, stmt }));
 }
 
 export async function handleOwnerStatement(request, env) {
