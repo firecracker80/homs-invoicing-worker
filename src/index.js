@@ -9,6 +9,7 @@ import { handleCancel, handleDepositRefund } from "./cancellation.js";
 import { handleReschedule } from "./reschedule.js";
 import { resolveDraftInvoiceId, enrichAndSendInvoice } from "./ghl-invoice.js";
 import { handleOwnerStatement, handleManagerStatement, handleReconcile } from "./reports.js";
+import { handleProvisionTenant } from "./provision.js";
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -346,6 +347,8 @@ export default {
         return handleManagerStatement(request, env);
       if (url.pathname === "/reports/reconcile")
         return handleReconcile(request, env);
+      if (url.pathname === "/admin/provision-tenant" && (request.method === "GET" || request.method === "POST"))
+        return handleProvisionTenant(request, env);
       if (url.pathname === "/paypal/cancel" || url.pathname === "/stripe/cancel")
         return json({ status: "cancelled", note: "guest cancelled checkout" });
       return json({ error: "Not found" }, 404);

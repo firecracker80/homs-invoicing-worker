@@ -64,7 +64,27 @@ where that workflow already exists in the client's sub-account:
 - `ghlRescheduleUrl` — booking rescheduled
 
 ## 8. The KV entry
-Cloudflare dashboard → Workers & Pages → homs-invoicing-worker-0e0e →
+
+**Fast path — auto-provision from GHL's Custom Values.** If you've already
+filled in the client's Custom Values when cloning the snapshot (steps 1-7
+cover most of the same fields), you can skip typing everything a second
+time. See [provision.js](src/provision.js) — hit it as a GET first (dry
+run, never writes) to sanity-check the mapping, then POST to actually write:
+```
+GET  https://homs-invoicing-worker-0e0e.yari-058.workers.dev/admin/provision-tenant?locationId=...&ghlPit=...
+POST https://homs-invoicing-worker-0e0e.yari-058.workers.dev/admin/provision-tenant?locationId=...&ghlPit=...
+```
+`X-Admin-Secret` header = the **global** `ADMIN_SECRET` Worker secret (not a
+tenant's own — the tenant doesn't exist yet). Check `unmappedCustomValues`
+in the response for anything it didn't recognize, and `mappedFromCustomValues`
+for what it did. It only covers what's mappable from Custom Values —
+Airtable (step 1), the gateway's live credentials beyond client ID/secret,
+`invoiceStrategy`, and anything under step 9 still need filling in by hand
+afterward. Re-running it against an already-provisioned tenant requires
+`&force=true` and merges rather than overwrites (a hand-set field like
+`otaRate` survives; provisioned fields refresh).
+
+**Manual path.** Cloudflare dashboard → Workers & Pages → homs-invoicing-worker-0e0e →
 Storage & Databases → KV → **TENANTS** → Add entry, key = the client's
 `locationId`:
 
