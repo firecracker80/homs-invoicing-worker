@@ -1,12 +1,16 @@
 // reports.js — owner/manager statements + D1-vs-GHL reconciliation.
 // Routes (wired in index.js):
-//   GET /reports/owner-statement    ?locationId&from&to&format=json|html
-//   GET /reports/manager-statement  ?locationId&from&to&format=json|html
+//   GET /reports/owner-statement    ?locationId&from&to&format=json|html&token=...
+//   GET /reports/manager-statement  ?locationId&from&to&format=json|html&token=...
 //   GET /reports/reconcile          ?locationId&from&to
 //
-// All three are admin-gated (X-Admin-Secret), same model as /cancel and
-// /reschedule -- there's no owner/manager self-service login anywhere in
-// this system, so these are internal/admin tools for now, not a portal.
+// /reconcile is admin-gated (X-Admin-Secret) only, same model as /cancel and
+// /reschedule -- it's an internal diagnostic tool, never iframed.
+//
+// The two statement routes accept EITHER the admin header OR a per-recipient
+// ?token=, so they can be embedded as an iframe (e.g. a GHL Custom Menu Link)
+// where no custom header can be sent. See statementAuthorized() below for why
+// that token is intentionally its own thing, not adminSecret.
 //
 // Statements are a plain GROUP BY + detail list over ledger_entries, which
 // is already the materialized split (see ledger.js) -- no split logic gets
@@ -28,6 +32,23 @@ function adminAuthorized(request, tenant, env) {
   const given = request.headers?.get?.("X-Admin-Secret") || "";
   const expected = tenant?.adminSecret || env.ADMIN_SECRET;
   return expected && given === expected;
+}
+
+// Owner/manager statements are meant to be iframed (GHL Custom Menu Link),
+// which can't send the X-Admin-Secret header -- so these two routes also
+// accept a ?token= query param, checked against a token scoped to just this
+// recipient (tenant.ownerReportToken / tenant.managerReportToken). Deliberately
+// NOT the same value as adminSecret: adminSecret also gates /cancel and
+// /reschedule, and this token ends up sitting in an iframe src (browser
+// history, possibly referrer headers) -- a leak of the report token only
+// exposes one recipient's statement, not the ability to cancel a booking.
+// Scoped per recipient (not one shared report token) so the owner's link
+// can't be used to view the manager's numbers, or vice versa.
+function statementAuthorized(request, tenant, env, url, tokenField) {
+  if (adminAuthorized(request, tenant, env)) return true;
+  const expected = tenant?.[tokenField];
+  const given = url.searchParams.get("token") || "";
+  return Boolean(expected) && given === expected;
 }
 
 // Default window: last 30 days, if the caller didn't specify one.
@@ -149,14 +170,14 @@ function escapeHtml(s) {
   return String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
-async function handleStatement(request, env, recipient, recipientLabel) {
+async function handleStatement(request, env, recipient, recipientLabel, tokenField) {
   const url = new URL(request.url);
   const locationId = url.searchParams.get("locationId");
   if (!locationId) return json({ error: "locationId is required" }, 400);
 
   const tenant = await env.TENANTS.get(locationId, { type: "json" });
   if (!tenant) return json({ error: `Unknown locationId: ${locationId}` }, 404);
-  if (!adminAuthorized(request, tenant, env)) return json({ error: "Unauthorized" }, 401);
+  if (!statementAuthorized(request, tenant, env, url, tokenField)) return json({ error: "Unauthorized" }, 401);
   if (!env.LEDGER_DB) return json({ error: "Ledger not configured (LEDGER_DB binding missing)" }, 500);
 
   const { from, to, fromLabel, toLabel } = resolveWindow(url);
@@ -169,10 +190,10 @@ async function handleStatement(request, env, recipient, recipientLabel) {
 }
 
 export async function handleOwnerStatement(request, env) {
-  return handleStatement(request, env, "owner", "Owner");
+  return handleStatement(request, env, "owner", "Owner", "ownerReportToken");
 }
 export async function handleManagerStatement(request, env) {
-  return handleStatement(request, env, "manager", "Manager");
+  return handleStatement(request, env, "manager", "Manager", "managerReportToken");
 }
 
 // --- reconciliation ---------------------------------------------------------

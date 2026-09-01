@@ -221,6 +221,29 @@ const mgrRes = await (await worker.fetch({ method: "GET", url: "https://w.dev/re
 assert.equal(mgrRes.incomeTotal, round2(105 + 69), "manager income = 15% rent split + cleaning fee (cleaningFeeTo=manager)");
 console.log("10) /reports/manager-statement JSON -> incomeTotal:", mgrRes.incomeTotal, "(15% rent split + cleaning fee)");
 
+// ---- 10b. Iframe-friendly ?token= auth: scoped per recipient, can't cross over ----
+await kv.put("L2", JSON.stringify({
+  brandName: "JT2", ownerReportToken: "owner-tok-abc", managerReportToken: "mgr-tok-xyz"
+}));
+const noAuth = await worker.fetch({ method: "GET", url: "https://w.dev/reports/owner-statement?locationId=L2&format=json", headers: { get: () => null } }, env);
+assert.equal(noAuth.status, 401, "no header and no token -> still 401");
+
+const wrongToken = await worker.fetch({ method: "GET", url: "https://w.dev/reports/owner-statement?locationId=L2&format=json&token=not-it", headers: { get: () => null } }, env);
+assert.equal(wrongToken.status, 401, "a token that doesn't match ownerReportToken -> 401");
+
+const crossToken = await worker.fetch({ method: "GET", url: "https://w.dev/reports/owner-statement?locationId=L2&format=json&token=mgr-tok-xyz", headers: { get: () => null } }, env);
+assert.equal(crossToken.status, 401, "the manager's token must not unlock the owner statement");
+
+const rightOwnerToken = await worker.fetch({ method: "GET", url: "https://w.dev/reports/owner-statement?locationId=L2&format=json&token=owner-tok-abc", headers: { get: () => null } }, env);
+assert.equal(rightOwnerToken.status, 200, "the owner's own scoped token, with no header at all, must work (this is the iframe path)");
+
+const rightManagerToken = await worker.fetch({ method: "GET", url: "https://w.dev/reports/manager-statement?locationId=L2&format=json&token=mgr-tok-xyz", headers: { get: () => null } }, env);
+assert.equal(rightManagerToken.status, 200, "the manager's own scoped token must work on the manager route");
+
+const ownerTokenOnManagerRoute = await worker.fetch({ method: "GET", url: "https://w.dev/reports/manager-statement?locationId=L2&format=json&token=owner-tok-abc", headers: { get: () => null } }, env);
+assert.equal(ownerTokenOnManagerRoute.status, 401, "the owner's token must not unlock the manager statement");
+console.log("10b) ?token= auth: scoped correctly per recipient, no cross-over, admin header still works alongside it");
+
 // ---- 11/12. /reports/reconcile is only meaningful for enrich-mode bookings
 // (ones with a real GHL invoice_id) -- E2E-1 went through paypal_url and
 // never set snapshot.ghlInvoice, so it's correctly EXCLUDED from unmatched
