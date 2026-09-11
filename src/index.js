@@ -3,7 +3,6 @@
 import { composeBooking } from "./booking-composer.js";
 import { createOrder } from "./paypal.js";
 import { createCheckoutSession } from "./stripe.js";
-import { createBookingRecords } from "./airtable.js";
 import { handlePayPalReturn, handlePayPalWebhook, handleStripeReturn, handleStripeWebhook } from "./payment.js";
 import { handleCancel, handleDepositRefund } from "./cancellation.js";
 import { handleReschedule } from "./reschedule.js";
@@ -118,7 +117,6 @@ async function handleBookingCreated(request, env) {
       nightlyRate: "70.00",
       gateway: "paypal",
       gatewayRef: "SAMPLE",
-      airtableSync: "ok",
       testMode: true
     });
   }
@@ -187,7 +185,6 @@ async function handleBookingCreated(request, env) {
       nightlyRate: existing.stay.nightlyRate.toFixed(2),
       gateway: existing.gateway || "paypal",
       gatewayRef: existing.paypal?.orderId || existing.stripe?.sessionId || existingInvoiceId || "",
-      airtableSync: existing.airtable ? "ok" : "unknown",
       idempotent: true
     });
   }
@@ -256,17 +253,10 @@ async function handleBookingCreated(request, env) {
 
   await env.BOOKINGS.put(snapshot.bookingId, JSON.stringify(snapshot));
 
-  // Airtable mirror — non-blocking by design
-  let airtable = null;
-  try {
-    airtable = await createBookingRecords(tenant, snapshot, gatewayRef);
-    // Persist record IDs so the payment worker updates directly (no searching)
-    snapshot.airtable = { orderRecordId: airtable.orderRecordId, paymentIds: airtable.paymentIds };
-    await env.BOOKINGS.put(snapshot.bookingId, JSON.stringify(snapshot));
-  } catch (err) {
-    console.error(`Airtable sync failed for ${snapshot.bookingId}:`, err.message);
-    airtable = { error: err.message, needsRetry: true };
-  }
+  // No GHL/D1 write here -- nothing has been paid yet. The Transaction/Payment
+  // records get created in payment.js's settle() (via ledger.js) once the
+  // capture actually completes, so an abandoned checkout never shows up as a
+  // real transaction.
 
   // Optional push notification: if the tenant config defines ghlPaymentLinkUrl
   // (a GHL Inbound Webhook trigger URL), POST the payment link + totals there.
@@ -316,7 +306,6 @@ async function handleBookingCreated(request, env) {
     nightlyRate: snapshot.stay.nightlyRate.toFixed(2),
     gateway,
     gatewayRef,
-    airtableSync: airtable?.needsRetry ? "failed_will_retry" : "ok",
     invoiceEnrichError: invoiceEnrichError || undefined
   });
 }
