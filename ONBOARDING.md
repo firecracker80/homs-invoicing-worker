@@ -11,9 +11,18 @@ Duplicate the base template for the new client. Grab:
 - `defaultPropertyRecId` — the property record's `rec...` ID
 
 ## 2. Payment gateway
-Either PayPal (`paypalApi`, `paypalClientId`, `paypalSecret`) or Stripe
+Either PayPal (`paypalApi`, `paypalClientId`, `paypalSecretName`) or Stripe
 (`stripeSecretName`/`stripeSecret`), matching whichever this client uses —
 set `gateway` accordingly.
+
+**Put the PayPal secret in a Worker secret, not KV and not GHL:**
+```
+wrangler secret put PAYPAL_SECRET_<CLIENT>
+```
+then set `"paypalSecretName": "PAYPAL_SECRET_<CLIENT>"`. Inline `paypalSecret`
+in KV still works (pilot fallback in `paypal.js`) but is readable by anyone
+with KV access. Leave the `wpaypal_secret_key` Custom Value **blank** in GHL —
+it's readable by every sub-account user, and provisioning never reads it.
 
 ## 3. GHL Private Integration Token
 Settings → Private Integrations → Create New Integration, scoped to
@@ -71,13 +80,18 @@ cover most of the same fields), you can skip typing everything a second
 time. See [provision.js](src/provision.js) — hit it as a GET first (dry
 run, never writes) to sanity-check the mapping, then POST to actually write:
 ```
-GET  https://homs-invoicing-worker-0e0e.yari-058.workers.dev/admin/provision-tenant?locationId=...&ghlPit=...
-POST https://homs-invoicing-worker-0e0e.yari-058.workers.dev/admin/provision-tenant?locationId=...&ghlPit=...
+GET  https://homs-invoicing-worker-0e0e.yari-058.workers.dev/admin/provision-tenant?locationId=...&ghlPit=...&paypalSecretName=PAYPAL_SECRET_<CLIENT>
+POST https://homs-invoicing-worker-0e0e.yari-058.workers.dev/admin/provision-tenant?locationId=...&ghlPit=...&paypalSecretName=PAYPAL_SECRET_<CLIENT>
 ```
+Set the Worker secret (step 2) **before** calling this. `paypalSecretName` is
+the secret's *name*, never its value. Without it, `gateway` is not inferred;
+if the named secret isn't set on the Worker, the response carries a
+`warnings` entry telling you the `wrangler secret put` to run.
 `X-Admin-Secret` header = the **global** `ADMIN_SECRET` Worker secret (not a
 tenant's own — the tenant doesn't exist yet). Check `unmappedCustomValues`
-in the response for anything it didn't recognize, and `mappedFromCustomValues`
-for what it did. It only covers what's mappable from Custom Values —
+in the response for anything it didn't recognize, `mappedFromCustomValues`
+for what it did, `skippedSensitive` for credentials it deliberately ignored,
+and `warnings`. It only covers what's mappable from Custom Values —
 Airtable (step 1), the gateway's live credentials beyond client ID/secret,
 `invoiceStrategy`, and anything under step 9 still need filling in by hand
 afterward. Re-running it against an already-provisioned tenant requires
@@ -104,7 +118,7 @@ Storage & Databases → KV → **TENANTS** → Add entry, key = the client's
   "airtableToken": "pat...",
   "paypalApi": "https://api-m.sandbox.paypal.com",
   "paypalClientId": "...",
-  "paypalSecret": "...",
+  "paypalSecretName": "PAYPAL_SECRET_CLIENT",
   "ghlPit": "pit-...",
   "adminSecret": "...",
   "invoiceStrategy": "enrich"

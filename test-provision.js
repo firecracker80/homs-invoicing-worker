@@ -10,89 +10,123 @@ function makeKv(seed = {}) {
 }
 const hdr = s => ({ get: n => n === "X-Admin-Secret" ? s : null });
 
+// fieldKey in the exact shape GHL's live API returns it -- the merge-tag form,
+// verified 2026-09-11 against all 19 values on DEMO-HOMS and Luminara. The
+// previous fixture used bare keys ("wbrand_name"), which encoded the same
+// wrong assumption as the code and so passed while production matched nothing.
+const cv = (slug, name, value) => ({ fieldKey: `{{ custom_values.${slug} }}`, name, value });
 const REAL_CUSTOM_VALUES = [
-  { fieldKey: "wadmin_secret", name: "WAdmin Secret", value: "sekret123" },
-  { fieldKey: "wbrand_name", name: "WBrand Name", value: "Luminara Hospitality" },
-  { fieldKey: "wcleaning_fee", name: "WCleaning Fee", value: "69" },
-  { fieldKey: "wcurrency", name: "WCurrency", value: "USD" },
-  { fieldKey: "wghl_cancelation_url", name: "WGHL Cancelation URL", value: "https://services.leadconnectorhq.com/hooks/cancel" },
-  { fieldKey: "wlocale", name: "WLocale", value: "es-ES" },
-  { fieldKey: "wlocation_id", name: "WLocation ID", value: "wLGDbGcQ4QSG3nlT3Sis" },
-  { fieldKey: "wmanager", name: "WManager", value: "Priya" },
-  { fieldKey: "wowner_revenue_split", name: "WOwner Revenue Split", value: "85" },
-  { fieldKey: "wpaypal_client_id", name: "WPayPal Client ID", value: "client_abc" },
-  { fieldKey: "wpaypal_secret_key", name: "WPaypal Secret Key", value: "secret_xyz" },
-  { fieldKey: "wproperty_owner", name: "WProperty Owner", value: "Yari" },
-  { fieldKey: "wwebhook_secret", name: "WWebhook Secret", value: "whsec_1" },
-  { fieldKey: "wmgr_paypal_email", name: "WMgr PayPal Email", value: "mgr@x.com" },
-  { fieldKey: "wpaypal_webhook_id", name: "WPaypal Webhook ID", value: "WH-999" }
+  cv("wadmin_secret", "WAdmin Secret", "sekret123"),
+  cv("wbrand_name", "WBrand Name", "Luminara Hospitality"),
+  cv("wcleaning_fee", "WCleaning Fee", "69"),
+  cv("wcurrency", "WCurrency", "USD"),
+  cv("wghl_cancelation_url", "WGHL Cancelation URL", "https://services.leadconnectorhq.com/hooks/cancel"),
+  cv("wlocale", "WLocale", "es-ES"),
+  cv("wlocation_id", "WLocation ID", "wLGDbGcQ4QSG3nlT3Sis"),
+  cv("wmanager", "WManager", "Priya"),
+  cv("wowner_revenue_split", "WOwner Revenue Split", "85"),
+  cv("wpaypal_client_id", "WPayPal Client ID", "client_abc"),
+  cv("wpaypal_secret_key", "WPaypal Secret Key", "secret_xyz"),
+  cv("wproperty_owner", "WProperty Owner", "Yari"),
+  cv("wwebhook_secret", "WWebhook Secret", "whsec_1"),
+  cv("wowner_paypal_email", "WOwner PayPal Email", "owner@x.com"),
+  cv("wmgr_paypal_email", "WMgr PayPal Email", "mgr@x.com"),
+  cv("wpaypal_webhook", "WPaypal Webhook", "WH-999"),
+  cv("wsomething_new", "WSomething New", "unmapped-on-purpose")
 ];
 
-let lastFetchedUrl = null;
 global.fetch = async (url) => {
-  lastFetchedUrl = url;
   if (url.includes("/customValues")) {
     if (url.includes("bad-pit-location")) return { ok: false, status: 403, text: async () => JSON.stringify({ message: "The token does not have access to this location." }) };
+    if (url.includes("bare-keys")) return { ok: true, status: 200, text: async () => JSON.stringify({ customValues: [{ fieldKey: "wbrand_name", name: "WBrand Name", value: "Bare" }] }) };
     return { ok: true, status: 200, text: async () => JSON.stringify({ customValues: REAL_CUSTOM_VALUES }) };
   }
   throw new Error("unmocked: " + url);
 };
 
 const { handleProvisionTenant } = await import("./src/provision.js");
+const call = (env, method, qs, secret = "admin123") =>
+  handleProvisionTenant({ method, url: `https://w.dev/admin/provision-tenant?${qs}`, headers: secret == null ? { get: () => null } : hdr(secret) }, env);
 
-// ---- 1. Unauthorized without the (global) admin secret ----
+// ---- 1. Unauthorized without, or with the wrong, admin secret ----
 const kv1 = makeKv();
-const env1 = { ADMIN_SECRET: "admin123", TENANTS: kv1 };
-const unauth = await handleProvisionTenant({ method: "GET", url: "https://w.dev/admin/provision-tenant?locationId=L1&ghlPit=pit1", headers: { get: () => null } }, env1);
-assert.equal(unauth.status, 401);
-console.log("1) No X-Admin-Secret -> 401");
+const env1 = { ADMIN_SECRET: "admin123", TENANTS: kv1, PAYPAL_SECRET_LUM: "set" };
+assert.equal((await call(env1, "GET", "locationId=L1&ghlPit=pit1", null)).status, 401);
+assert.equal((await call(env1, "GET", "locationId=L1&ghlPit=pit1", "admin12")).status, 401, "a prefix of the secret must not pass");
+assert.equal((await call({ TENANTS: kv1 }, "GET", "locationId=L1&ghlPit=pit1", "")).status, 401, "unset ADMIN_SECRET fails closed, even against an empty header");
+console.log("1) Missing, wrong, or unconfigured admin secret -> 401");
 
 // ---- 2. Missing locationId / ghlPit -> 400 ----
-const noLoc = await handleProvisionTenant({ method: "GET", url: "https://w.dev/admin/provision-tenant?ghlPit=pit1", headers: hdr("admin123") }, env1);
-assert.equal(noLoc.status, 400);
-const noPit = await handleProvisionTenant({ method: "GET", url: "https://w.dev/admin/provision-tenant?locationId=L1", headers: hdr("admin123") }, env1);
-assert.equal(noPit.status, 400);
+assert.equal((await call(env1, "GET", "ghlPit=pit1")).status, 400);
+assert.equal((await call(env1, "GET", "locationId=L1")).status, 400);
 console.log("2) Missing locationId or ghlPit -> 400 for each");
 
-// ---- 3. GET (dry run): maps known fields, converts percent, infers gateway, never writes ----
-const dry = await (await handleProvisionTenant({ method: "GET", url: "https://w.dev/admin/provision-tenant?locationId=L1&ghlPit=pit1", headers: hdr("admin123") }, env1)).json();
+// ---- 3. GET (dry run) against the real wrapped fieldKey format ----
+const dry = await (await call(env1, "GET", "locationId=L1&ghlPit=pit1&paypalSecretName=PAYPAL_SECRET_LUM")).json();
 assert.equal(dry.dryRun, true);
-assert.equal(dry.wouldWrite.brandName, "Luminara Hospitality");
+assert.equal(dry.wouldWrite.brandName, "Luminara Hospitality", "wrapped '{{ custom_values.wbrand_name }}' must map");
 assert.equal(dry.wouldWrite.ownerPct, 0.85, "\"85\" from GHL must convert to the 0.85 fraction the worker's split math expects");
-assert.equal(dry.wouldWrite.gateway, "paypal", "paypalClientId + paypalSecret both present -> gateway inferred as paypal");
+assert.equal(dry.wouldWrite.defaultCleaningFee, 69);
+assert.equal(dry.wouldWrite.paypalWebhookId, "WH-999", "wpaypal_webhook -> paypalWebhookId, read by payment.js webhook verification");
+assert.equal(dry.wouldWrite.ownerPaypalEmail, "owner@x.com");
+assert.equal(dry.wouldWrite.managerPaypalEmail, "mgr@x.com");
 assert.equal(dry.wouldWrite.ghlPit, "pit1", "the PIT handed to this call must end up in the written tenant too, not just used to fetch");
 assert.equal(dry.wouldWrite.bookingWorkerEnabled, true);
 assert.ok(!("wlocation_id" in dry.wouldWrite) && dry.wouldWrite.locationId === undefined, "wlocation_id is the KV key, must never become a JSON field");
-assert.equal(dry.unmappedCustomValues.length, 2, "wmgr_paypal_email and wpaypal_webhook_id have no matching Worker field -- surfaced, not silently dropped");
-assert.ok(dry.unmappedCustomValues.some(u => u.fieldKey === "wmgr_paypal_email"));
+assert.equal(dry.mappedFromCustomValues.length, 14, "every known value maps -- none silently lost to the fieldKey wrapper");
+assert.deepEqual(dry.unmappedCustomValues.map(u => u.name), ["WSomething New"], "only the genuinely unknown value is unmapped");
 assert.equal(kv1._store.size, 0, "GET must never write, regardless of what it found");
-console.log("3) GET dry run: correct field mapping, 85 -> 0.85, gateway inferred, PIT carried through, nothing written");
+console.log("3) GET dry run: wrapped fieldKeys map, 85 -> 0.85, webhook ID + payout emails mapped, nothing written");
 
-// ---- 4. POST creates a brand-new tenant ----
-const written = await (await handleProvisionTenant({ method: "POST", url: "https://w.dev/admin/provision-tenant?locationId=L1&ghlPit=pit1", headers: hdr("admin123") }, env1)).json();
+// ---- 4. PayPal secret is never copied out of GHL ----
+assert.equal(dry.wouldWrite.paypalSecret, undefined, "wpaypal_secret_key must not land in KV");
+assert.ok(!JSON.stringify(dry).includes("secret_xyz"), "the secret value must not be echoed anywhere in the response");
+assert.deepEqual(dry.skippedSensitive, ["wpaypal_secret_key"]);
+assert.equal(dry.wouldWrite.paypalSecretName, "PAYPAL_SECRET_LUM");
+assert.equal(dry.wouldWrite.gateway, "paypal", "client ID + paypalSecretName -> gateway inferred");
+assert.deepEqual(dry.warnings, [], "named secret exists on this env -> no warning");
+console.log("4) PayPal secret skipped and not echoed; paypalSecretName carried through; gateway inferred");
+
+// ---- 5. No paypalSecretName, or one that isn't set -> no gateway guess, explicit warning ----
+const noName = await (await call(env1, "GET", "locationId=L1&ghlPit=pit1")).json();
+assert.equal(noName.wouldWrite.gateway, undefined, "never infer a payment gateway without a usable secret");
+assert.ok(noName.warnings.some(w => w.includes("paypalSecretName")));
+const unset = await (await call(env1, "GET", "locationId=L1&ghlPit=pit1&paypalSecretName=PAYPAL_SECRET_TYPO")).json();
+assert.ok(unset.warnings.some(w => w.includes("wrangler secret put PAYPAL_SECRET_TYPO")));
+console.log("5) Missing or unset paypalSecretName -> gateway not inferred, warning tells you the fix");
+
+// ---- 6. Bare fieldKeys still map (in case GHL ever returns them) ----
+const bare = await (await call(env1, "GET", "locationId=bare-keys&ghlPit=pit1")).json();
+assert.equal(bare.wouldWrite.brandName, "Bare");
+console.log("6) Bare fieldKey form still maps");
+
+// ---- 7. POST creates a brand-new tenant ----
+const written = await (await call(env1, "POST", "locationId=L1&ghlPit=pit1&paypalSecretName=PAYPAL_SECRET_LUM")).json();
 assert.equal(written.dryRun, false);
-assert.equal(JSON.parse(kv1._store.get("L1")).brandName, "Luminara Hospitality");
-console.log("4) POST with no existing tenant -> writes to KV under the literal locationId key");
+const stored = JSON.parse(kv1._store.get("L1"));
+assert.equal(stored.brandName, "Luminara Hospitality");
+assert.equal(stored.paypalSecret, undefined);
+console.log("7) POST with no existing tenant -> writes to KV under the literal locationId key, no inline PayPal secret");
 
-// ---- 5. POST again without force -> 409, doesn't touch the existing entry ----
-const conflict = await handleProvisionTenant({ method: "POST", url: "https://w.dev/admin/provision-tenant?locationId=L1&ghlPit=pit1", headers: hdr("admin123") }, env1);
-assert.equal(conflict.status, 409);
-console.log("5) POST against an already-provisioned locationId without &force=true -> 409, refuses to clobber");
+// ---- 8. POST again without force -> 409, doesn't touch the existing entry ----
+assert.equal((await call(env1, "POST", "locationId=L1&ghlPit=pit1")).status, 409);
+console.log("8) POST against an already-provisioned locationId without &force=true -> 409, refuses to clobber");
 
-// ---- 6. force=true merges -- a hand-set field survives, provisioned fields still update ----
+// ---- 9. force=true merges -- hand-set fields survive, including an existing inline secret ----
 const existingTenant = JSON.parse(kv1._store.get("L1"));
-existingTenant.otaRate = 0.15; // set by hand, not something provisioning knows about
-existingTenant.brandName = "Old Name"; // should get overwritten by the fresher custom value
+existingTenant.otaRate = 0.15;           // set by hand, not something provisioning knows about
+existingTenant.brandName = "Old Name";   // should get overwritten by the fresher custom value
+existingTenant.paypalSecret = "legacy";  // pilot-era inline secret: provisioning must not delete it
 kv1._store.set("L1", JSON.stringify(existingTenant));
-const merged = await (await handleProvisionTenant({ method: "POST", url: "https://w.dev/admin/provision-tenant?locationId=L1&ghlPit=pit1&force=true", headers: hdr("admin123") }, env1)).json();
+const merged = await (await call(env1, "POST", "locationId=L1&ghlPit=pit1&force=true")).json();
 assert.equal(merged.written.otaRate, 0.15, "a field only a human set (otaRate) must survive a forced re-provision");
 assert.equal(merged.written.brandName, "Luminara Hospitality", "provisioned fields overwrite stale existing values");
-console.log("6) &force=true merges: hand-set fields preserved, provisioned fields refreshed");
+assert.equal(merged.written.paypalSecret, "legacy", "re-provisioning a live tenant must not strip the inline secret payments still depend on");
+console.log("9) &force=true merges: hand-set fields and the legacy inline secret preserved, provisioned fields refreshed");
 
-// ---- 7. GHL API error (e.g. wrong PIT / no access) propagates cleanly, not a 500 crash ----
-const kv2 = makeKv();
-const ghlErr = await handleProvisionTenant({ method: "GET", url: "https://w.dev/admin/provision-tenant?locationId=bad-pit-location&ghlPit=badpit", headers: hdr("admin123") }, { ADMIN_SECRET: "admin123", TENANTS: kv2 });
+// ---- 10. GHL API error (e.g. wrong PIT / no access) propagates cleanly, not a 500 crash ----
+const ghlErr = await call({ ADMIN_SECRET: "admin123", TENANTS: makeKv() }, "GET", "locationId=bad-pit-location&ghlPit=badpit");
 assert.equal(ghlErr.status, 403);
-console.log("7) GHL rejects the PIT/location -> that status code propagates, not a generic 500");
+console.log("10) GHL rejects the PIT/location -> that status code propagates, not a generic 500");
 
-console.log("\nPASS — provision.js maps custom values correctly, never writes on GET, guards against clobbering an existing tenant, merges cleanly under &force=true.");
+console.log("\nPASS — provision.js maps GHL's real fieldKey format, never copies the PayPal secret, never writes on GET, guards against clobbering, merges cleanly under &force=true.");
