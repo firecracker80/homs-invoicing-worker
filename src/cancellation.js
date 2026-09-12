@@ -18,7 +18,8 @@
 //   notice period.
 
 import { getAccessToken } from "./paypal.js";
-import { atUpdate, atFind, atCreate } from "./airtable.js";
+import { writeAndSyncRows } from "./ledger.js";
+import { updateObjectRecord } from "./ghl.js";
 
 const round2 = n => Math.round(n * 100) / 100;
 const json = (data, status = 200) =>
@@ -155,10 +156,11 @@ async function loadContext(request, env) {
   return { body, snapshot, tenant };
 }
 
-async function resolveOrderRecordId(tenant, snapshot) {
-  if (snapshot.airtable?.orderRecordId) return snapshot.airtable.orderRecordId;
-  const found = await atFind(tenant, "Orders", `{GHL Booking ID}="${snapshot.bookingId}"`);
-  return found?.[0]?.id || null;
+// The Transaction record only exists once a booking has actually settled
+// (payment.js's settle(), via ledger.js, is what creates it) -- an unpaid
+// booking has none to update.
+function resolveTransactionId(snapshot) {
+  return snapshot.ghl?.transactionId || null;
 }
 
 async function notifyGHL(url, payload) {
@@ -177,20 +179,14 @@ export async function handleCancel(request, env) {
   if (snapshot.cancelled) return json({ alreadyCancelled: true, cancellation: snapshot.cancellation });
 
   const now = Date.now();
-  const cur = tenant.currency || "USD";
 
   // ---- UNPAID booking: no refunds, just void ----
   if (!snapshot.settled) {
     snapshot.cancelled = true;
     snapshot.cancellation = { tier: "unpaid_void", at: new Date(now).toISOString(), reason: body.reason || "" };
     await env.BOOKINGS.put(snapshot.bookingId, JSON.stringify(snapshot));
-    try {
-      const orderId = await resolveOrderRecordId(tenant, snapshot);
-      if (orderId) await atUpdate(tenant, "Orders", orderId, {
-        "Order Status": "Cancelled",
-        "Notes": `Cancelled before payment. ${body.reason || ""}`.trim()
-      });
-    } catch (err) { console.error("Cancel(unpaid) Airtable failed:", err.message); }
+    // No Transaction record exists yet for an unpaid booking, and no money
+    // moved -- nothing to write to D1 or GHL here.
     await notifyGHL(tenant.ghlCancellationUrl, {
       event: "booking_cancelled", bookingId: snapshot.bookingId,
       contactId: snapshot.ghlContactId || "",
@@ -248,85 +244,76 @@ export async function handleCancel(request, env) {
   snapshot.payout.status = "cancelled_adjusted";
   await env.BOOKINGS.put(snapshot.bookingId, JSON.stringify(snapshot));
 
-  // ---- Airtable ----
+  // ---- D1 + GHL ledger ----
+  // Reverses the income originally booked at settlement (rent + cleaning
+  // splits) and books the retained cancellation charge as new income, split
+  // the same way the original rent was. Deposit refund is a liability
+  // clearing (deposit was never counted as income), tracked for audit only.
   try {
-    const orderId = await resolveOrderRecordId(tenant, snapshot);
-    if (orderId) {
-      await atUpdate(tenant, "Orders", orderId, {
-        "Order Status": "Cancelled",
-        "Deposit Status": "Refunded",
-        "Notes": `Cancelled (${calc.tier}, charge ${Math.round(calc.chargePct * 100)}% = $${calc.charge.toFixed(2)}). Refunded $${calc.totalRefund.toFixed(2)}. ${body.reason || ""}`.trim()
-      });
-      // Refund payment rows
-      const refundRows = [];
-      if (refundIds.rent) refundRows.push({
-        "Order": [orderId], "Payment Method": snapshot.gateway === "stripe" ? "Stripe" : "PayPal",
-        "Payment Type": "Refund", "Payment Amount": calc.rentUnitRefund,
-        "Gateway Transaction ID": refundIds.rent, "Currency": cur,
-        "Payment Status": "Completed", "Cleared for Payout": false,
-        "Notes": `${snapshot.bookingId}-RENT refund (rent ${calc.rentRefund.toFixed(2)} + cleaning ${calc.cleaningRefund.toFixed(2)})`
-      });
-      if (refundIds.deposit) refundRows.push({
-        "Order": [orderId], "Payment Method": snapshot.gateway === "stripe" ? "Stripe" : "PayPal",
-        "Payment Type": "Refund", "Payment Amount": calc.depositRefund,
-        "Gateway Transaction ID": refundIds.deposit, "Currency": cur,
-        "Payment Status": "Completed", "Cleared for Payout": false,
-        "Notes": `${snapshot.bookingId}-DEP refund (full deposit)`
-      });
-      if (refundRows.length) await atCreate(tenant, "Payments", refundRows);
+    const ownerPct = snapshot.payout.ownerPct;
+    const rows = [];
 
-      // Transaction Ledger
-      const now8601 = new Date(now).toISOString();
-      const gw = snapshot.gateway === "stripe" ? "Stripe" : "PayPal";
-      const ledger = [];
-      if (refundIds.rent) ledger.push({
-        "Entry Date": now8601, "Related Order": [orderId], "Transaction Type": "rent_refund",
-        "Direction": "Out", "Gateway": gw, "Reference Number": refundIds.rent,
-        "Amount": calc.rentUnitRefund, "Currency": cur, "Reconciled": false,
-        "Notes": `${snapshot.bookingId} cancellation refund (rent+cleaning)`
+    if (refundIds.rent) {
+      const ownerRentReversal = round2(calc.rentRefund * ownerPct);
+      rows.push({
+        recipient: "owner", category: "income", entry_type: "cancellation_rent_refund_owner",
+        amount: -ownerRentReversal, reference: refundIds.rent, source: "cancellation",
+        description: `Rent refund reversal (${Math.round(ownerPct * 100)}% share) — ${calc.tier}`
       });
-      if (refundIds.deposit) ledger.push({
-        "Entry Date": now8601, "Related Order": [orderId], "Transaction Type": "deposit_refund",
-        "Direction": "Out", "Gateway": gw, "Reference Number": refundIds.deposit,
-        "Amount": calc.depositRefund, "Currency": cur, "Reconciled": false,
-        "Notes": `${snapshot.bookingId} deposit returned on cancellation`
+      rows.push({
+        recipient: "manager", category: "income", entry_type: "cancellation_rent_refund_manager",
+        amount: -round2(calc.rentRefund - ownerRentReversal), reference: refundIds.rent, source: "cancellation",
+        description: `Rent refund reversal (manager share) — ${calc.tier}`
       });
-      if (calc.charge > 0) ledger.push({
-        "Entry Date": now8601, "Related Order": [orderId], "Transaction Type": "cancellation_charge",
-        "Direction": "In", "Gateway": gw, "Reference Number": snapshot.bookingId,
-        "Amount": calc.charge, "Currency": cur, "Reconciled": false,
-        "Notes": `${snapshot.bookingId} ${Math.round(calc.chargePct * 100)}% cancellation charge (${calc.tier})`
-      });
-      if (ledger.length) await atCreate(tenant, "Transaction Ledger", ledger);
-
-      // Payout Ledger: void originals, create charge-split rows
-      for (const id of snapshot.airtable?.payoutLedgerIds || []) {
-        try { await atUpdate(tenant, "Payout Ledger", id, { "Payout Status": "Cancelled", "Notes": "Booking cancelled — superseded by cancellation-charge split" }); }
-        catch (err) { console.error("Payout void failed:", err.message); }
+      if (calc.cleaningRefund > 0) {
+        const cleaningTo = snapshot.payout.cleaningFeeTo === "owner" ? "owner" : "manager";
+        rows.push({
+          recipient: cleaningTo, category: "income", entry_type: "cancellation_cleaning_refund",
+          amount: -calc.cleaningRefund, reference: refundIds.rent, source: "cancellation",
+          description: "Cleaning fee refund reversal"
+        });
       }
-      if (calc.charge > 0) {
-        await atCreate(tenant, "Payout Ledger", [
-          {
-            "Recipient": "Owner",
-            "Payout Method": "Manual Transfer",
-            "Reason": `Cancellation charge ${Math.round(calc.chargePct * 100)}% (owner ${Math.round(snapshot.payout.ownerPct * 100)}%) — ${snapshot.bookingId}`,
-            "Payout Amount": calc.payoutSplit.owner, "Currency": cur,
-            "Scheduled Date": new Date(now).toISOString().slice(0, 10),
-            "Payout Status": "Pending", "Order": [orderId]
-          },
-          {
-            "Recipient": "Manager",
-            "Payout Method": "Manual Transfer",
-            "Reason": `Cancellation charge ${Math.round(calc.chargePct * 100)}% (manager share) — ${snapshot.bookingId}`,
-            "Payout Amount": calc.payoutSplit.manager, "Currency": cur,
-            "Scheduled Date": new Date(now).toISOString().slice(0, 10),
-            "Payout Status": "Pending", "Order": [orderId]
-          }
-        ]);
+    }
+
+    if (refundIds.deposit) {
+      rows.push({
+        recipient: "guest", category: "liability", entry_type: "cancellation_deposit_refund",
+        amount: calc.depositRefund, reference: refundIds.deposit, source: "cancellation",
+        description: "Security deposit returned on cancellation"
+      });
+    }
+
+    if (calc.charge > 0) {
+      rows.push({
+        recipient: "owner", category: "income", entry_type: "cancellation_charge_owner",
+        amount: calc.payoutSplit.owner, reference: "cancellation", source: "cancellation",
+        description: `Cancellation charge ${Math.round(calc.chargePct * 100)}% (${calc.tier}), owner share`
+      });
+      rows.push({
+        recipient: "manager", category: "income", entry_type: "cancellation_charge_manager",
+        amount: calc.payoutSplit.manager, reference: "cancellation", source: "cancellation",
+        description: `Cancellation charge ${Math.round(calc.chargePct * 100)}% (${calc.tier}), manager share`
+      });
+    }
+
+    if (rows.length) {
+      const result = await writeAndSyncRows(env, tenant, snapshot, rows);
+      if (!result.d1.ok) console.error(`Cancellation D1 write failed for ${snapshot.bookingId}: ${result.d1.reason} ${result.d1.error || ""}`);
+      if (!result.ghl.ok) console.error(`Cancellation GHL sync failed for ${snapshot.bookingId}: ${result.ghl.reason} ${result.ghl.error || ""}`);
+
+      const transactionId = resolveTransactionId(snapshot);
+      if (transactionId) {
+        const pit = resolveSecret(tenant, env, "ghlPitSecretName", "ghlPit");
+        if (pit) await updateObjectRecord(pit, "custom_objects.transactions", transactionId, { payment_status: "refunded" });
+      }
+      if (!result.d1.ok || !result.ghl.ok) {
+        snapshot.cancellationSyncFailed = true;
+        snapshot.cancellationSyncError = [result.d1.error, result.ghl.error].filter(Boolean).join("; ");
+        await env.BOOKINGS.put(snapshot.bookingId, JSON.stringify(snapshot));
       }
     }
   } catch (err) {
-    console.error(`Cancellation Airtable sync failed for ${snapshot.bookingId}: ${err.message}`);
+    console.error(`Cancellation ledger sync failed for ${snapshot.bookingId}: ${err.message}`);
     snapshot.cancellationSyncFailed = true;
     snapshot.cancellationSyncError = err.message;
     await env.BOOKINGS.put(snapshot.bookingId, JSON.stringify(snapshot));
@@ -346,8 +333,8 @@ export async function handleCancel(request, env) {
     return json({
     cancelled: true, paid: true, calculation: calc, refundIds,
     refundFailures: refundFailures.length ? refundFailures : null,
-    airtableSync: snapshot.cancellationSyncFailed ? "failed" : "ok",
-    airtableSyncError: snapshot.cancellationSyncError || null
+    ledgerSync: snapshot.cancellationSyncFailed ? "failed" : "ok",
+    ledgerSyncError: snapshot.cancellationSyncError || null
   });
 }
 
@@ -368,7 +355,6 @@ export async function handleDepositRefund(request, env) {
   const captureId = snapshot.captures?.DEP?.captureId || dep.paypalCaptureId;
   if (!captureId) return json({ error: "No deposit capture ID on record" }, 500);
 
-  const cur = tenant.currency || "USD";
   const note = `Devolución de depósito ${snapshot.bookingId}` + (claim > 0 ? ` (menos $${claim.toFixed(2)} por daños)` : "");
 
   let refundId = null;
@@ -383,38 +369,38 @@ export async function handleDepositRefund(request, env) {
   snapshot.securityDeposit.claimAmount = claim;
   await env.BOOKINGS.put(snapshot.bookingId, JSON.stringify(snapshot));
 
+  // ---- D1 + GHL ledger ----
+  // The refund itself is a liability clearing (the deposit was never counted
+  // as income). A retained damage claim IS new income -- attributed to the
+  // owner, since property damage compensation is the owner's, not the
+  // manager's, in every profile this worker has seen. Revisit if a tenant
+  // ever needs the manager to receive damage claims instead.
   try {
-    const orderId = await resolveOrderRecordId(tenant, snapshot);
-    if (orderId) {
-      await atUpdate(tenant, "Orders", orderId, {
-        "Deposit Status": status === "refunded" ? "Refunded" : status === "partial" ? "Partial" : "Claimed",
-        "Notes": `Deposit inspection: refunded $${refundAmount.toFixed(2)}, claimed $${claim.toFixed(2)}. ${body.reason || ""}`.trim(),
-        "Inspection Date": new Date().toISOString().slice(0, 10)
-      });
-      const gw = snapshot.gateway === "stripe" ? "Stripe" : "PayPal";
-      const rows = [];
-      if (refundId) rows.push({
-        "Entry Date": new Date().toISOString(), "Related Order": [orderId],
-        "Transaction Type": "deposit_refund", "Direction": "Out", "Gateway": gw,
-        "Reference Number": refundId, "Amount": refundAmount, "Currency": cur,
-        "Reconciled": false, "Notes": `${snapshot.bookingId} deposit refund after inspection`
-      });
-      if (claim > 0) rows.push({
-        "Entry Date": new Date().toISOString(), "Related Order": [orderId],
-        "Transaction Type": "deposit_claim", "Direction": "In", "Gateway": gw,
-        "Reference Number": snapshot.bookingId, "Amount": claim, "Currency": cur,
-        "Reconciled": false, "Notes": `${snapshot.bookingId} damage claim retained. ${body.reason || ""}`.trim()
-      });
-      if (rows.length) await atCreate(tenant, "Transaction Ledger", rows);
-      if (refundId) await atCreate(tenant, "Payments", [{
-        "Order": [orderId], "Payment Method": gw, "Payment Type": "Refund",
-        "Payment Amount": refundAmount, "Gateway Transaction ID": refundId,
-        "Currency": cur, "Payment Status": "Completed", "Cleared for Payout": false,
-        "Notes": `${snapshot.bookingId}-DEP refund after inspection`
-      }]);
+    const rows = [];
+    if (refundId) rows.push({
+      recipient: "guest", category: "liability", entry_type: "deposit_refund_inspection",
+      amount: refundAmount, reference: refundId, source: "deposit_refund",
+      description: "Security deposit returned after inspection"
+    });
+    if (claim > 0) rows.push({
+      recipient: "owner", category: "income", entry_type: "deposit_claim_retained",
+      amount: claim, reference: "deposit_claim", source: "deposit_refund",
+      description: `Damage claim retained. ${body.reason || ""}`.trim()
+    });
+
+    if (rows.length) {
+      const result = await writeAndSyncRows(env, tenant, snapshot, rows);
+      if (!result.d1.ok) console.error(`Deposit refund D1 write failed for ${snapshot.bookingId}: ${result.d1.reason} ${result.d1.error || ""}`);
+      if (!result.ghl.ok) console.error(`Deposit refund GHL sync failed for ${snapshot.bookingId}: ${result.ghl.reason} ${result.ghl.error || ""}`);
+
+      const transactionId = resolveTransactionId(snapshot);
+      if (transactionId && status === "refunded") {
+        const pit = resolveSecret(tenant, env, "ghlPitSecretName", "ghlPit");
+        if (pit) await updateObjectRecord(pit, "custom_objects.transactions", transactionId, { payment_status: "refunded" });
+      }
     }
   } catch (err) {
-    console.error(`Deposit refund Airtable sync failed for ${snapshot.bookingId}:`, err.message);
+    console.error(`Deposit refund ledger sync failed for ${snapshot.bookingId}:`, err.message);
   }
 
   await notifyGHL(tenant.ghlDepositRefundUrl, {
