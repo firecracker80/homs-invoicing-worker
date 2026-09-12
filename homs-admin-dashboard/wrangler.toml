@@ -1,0 +1,25 @@
+# HOMS Admin Dashboard — lives in the same repo as the invoicing workers
+# (homs-invoicing-worker-0e0e / -staging), as its own subdirectory. Deployed
+# via its own Cloudflare Build config with root directory set to
+# /homs-admin-dashboard. Never touches the invoicing workers' KV/D1 -- see
+# the KV binding note below.
+name = "homs-admin-dashboard"
+main = "src/index.js"
+compatibility_date = "2025-01-01"
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+
+# Multi-tenant registry, keyed by GHL locationId. Separate from the invoicing
+# worker's TENANTS namespace on purpose -- this Worker never touches that
+# production KV. id filled in after `wrangler kv namespace create DASHBOARD_TENANTS`.
+[[kv_namespaces]]
+binding = "DASHBOARD_TENANTS"
+id = "c54a35e3a8b945fd9f5fccb8fe685894"
+
+# Per-tenant secrets, one per client, referenced by name from each tenant's
+# KV entry (tenant.ghlPitSecretName) -- never stored in KV or committed here.
+# Set via:
+#   wrangler secret put GHL_PIT_DEMO_HOMS
+# or Cloudflare dashboard -> Worker -> Settings -> Variables and Secrets.

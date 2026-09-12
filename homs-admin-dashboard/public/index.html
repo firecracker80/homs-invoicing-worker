@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HOMS Admin Dashboard</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">HOMS</span>
+      <span class="brand-sub">Admin Dashboard <span class="demo-pill">DEMO</span></span>
+    </div>
+    <div class="search-wrap">
+      <input id="search" type="search" placeholder="Search by name, property, booking ID, cleaner, transaction, OTA channel..." autocomplete="off" />
+    </div>
+    <div class="topbar-actions">
+      <span id="fetchedAt" class="fetched-at"></span>
+      <button id="refresh" class="btn">Refresh</button>
+    </div>
+  </header>
+
+  <nav class="tabs" id="tabs">
+    <button class="tab active" data-tab="overview">Overview</button>
+    <button class="tab" data-tab="properties">Properties</button>
+    <button class="tab" data-tab="ota">OTA Channels</button>
+    <button class="tab" data-tab="transactions">Transactions</button>
+    <button class="tab" data-tab="checklists">Cleaning Checklists</button>
+    <button class="tab" data-tab="expenses">Expenses</button>
+    <button class="tab" data-tab="inventory">Property Inventory</button>
+    <button class="tab" data-tab="reports">Reports</button>
+    <button class="tab" data-tab="statement">Owner Statement</button>
+  </nav>
+
+  <main id="app">
+    <div id="loading" class="state-msg">Loading live data from GHL…</div>
+    <div id="error" class="state-msg error" hidden></div>
+
+    <div id="searchResults" class="panel" hidden></div>
+
+    <section id="panel-overview" class="panel"></section>
+    <section id="panel-properties" class="panel" hidden></section>
+    <section id="panel-ota" class="panel" hidden></section>
+    <section id="panel-transactions" class="panel" hidden></section>
+    <section id="panel-checklists" class="panel" hidden></section>
+    <section id="panel-expenses" class="panel" hidden></section>
+    <section id="panel-inventory" class="panel" hidden></section>
+    <section id="panel-reports" class="panel" hidden></section>
+    <section id="panel-statement" class="panel" hidden></section>
+  </main>
+
+  <div id="detailOverlay" class="overlay" hidden>
+    <div class="detail-card">
+      <button id="detailClose" class="detail-close">&times;</button>
+      <div id="detailBody"></div>
+    </div>
+  </div>
+
+  <div id="addExpenseOverlay" class="overlay" hidden>
+    <div class="detail-card">
+      <button id="addExpenseClose" class="detail-close">&times;</button>
+      <h2>Add Expense</h2>
+      <form id="addExpenseForm" class="stacked-form">
+        <label>Property
+          <select id="aeProperty" required></select>
+        </label>
+        <label>Paid On
+          <input type="date" id="aePaidOn" required />
+        </label>
+        <label>Category
+          <select id="aeCategory" required></select>
+        </label>
+        <label>Description
+          <input type="text" id="aeDescription" placeholder="e.g. Pest control" />
+        </label>
+        <label>Amount ($)
+          <input type="number" id="aeAmount" step="0.01" min="0" required />
+        </label>
+        <div id="aeError" class="form-error" hidden></div>
+        <button type="submit" class="btn btn-primary" id="aeSubmit">Submit Expense</button>
+        <p class="form-note">New expenses are flagged "Needs Review" until confirmed.</p>
+      </form>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
