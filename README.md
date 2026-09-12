@@ -2,8 +2,9 @@
 
 Booking/invoicing worker for the HOMS platform. Receives GHL reservation
 webhooks, computes rent + cleaning + processing fee + tiered security deposit,
-creates an itemized PayPal or Stripe checkout, mirrors records to Airtable,
-and returns the payment link to GHL.
+creates an itemized PayPal or Stripe checkout, records the booking's money
+movements in a D1 ledger synced to the client's own GHL objects, and returns
+the payment link to GHL.
 
 ## Endpoints
 - `POST /booking-created` — main entry (GHL Webhook action)
@@ -16,7 +17,7 @@ and returns the payment link to GHL.
 - `GET /reports/owner-statement`, `GET /reports/manager-statement` — D1-backed statement, `?format=json` or the default branded HTML (admin-triggered, `X-Admin-Secret`)
 - `GET /reports/reconcile` — diffs D1's income-bearing bookings against GHL's `list-transactions` for the same window (admin-triggered)
 
-Settlement (`src/payment.js`) writes captures/fees to Payments, generates Transaction Ledger + Payout Ledger rows (85/15 rent-only split, cleaning fee per profile), materializes the same split into D1 (`src/ledger.js`, non-blocking), and notifies GHL via the tenant's `ghlPaymentConfirmedUrl` inbound webhook.
+Settlement (`src/payment.js`) materializes the capture, fees and split (85/15 rent-only, cleaning fee per profile) into D1 (`src/ledger.js`), syncs those rows to the client's GHL `Payment`/`Transaction` custom objects, and notifies GHL via the tenant's `ghlPaymentConfirmedUrl` inbound webhook.
 
 ## Ledger + statements (D1)
 `src/ledger.js` writes one `ledger_entries` row per money movement at settlement time — owner/manager rent split (`income`), cleaning fee (`income`, to whoever the profile names), security deposit (`liability`, held, never split), processing fee (`pass_through`, never split), and an optional `shadow` OTA-commission comparison if the tenant has `otaRate` configured (skipped entirely otherwise — never guesses a commission rate). Idempotent: a `UNIQUE(booking_id, entry_type)` index + `INSERT OR IGNORE` means a retried settlement writes zero duplicate rows. Schema in [schema/homs_ledger_schema.sql](./schema/homs_ledger_schema.sql).
@@ -32,7 +33,7 @@ Controlled by `INVOICE_STRATEGY` (env var, default `"paypal_url"` — today's be
 
 The correlation number stamped on the invoice IS `bookingId` itself — the real rental-calendar booking id, captured at the contact level and fed in via the `{{contact.booking_id}}` merge tag on the webhook body, not a HOMS-invented prefix. Likewise `send-invoice`'s required `userId` comes from `{{user.id}}` on the same webhook body, not tenant config — scales to every user on every account with zero per-client GHL-user setup.
 
-Tenant KV additions this needs (per-client, alongside the existing PayPal/Airtable fields): `ghlPit` (or `ghlPitSecretName` for a Worker secret — a GHL Private Integration Token scoped to `invoices.readonly`+`invoices.write`), and optionally `ghlInvoiceSendAction` (`sms_and_email` default, or `email`/`sms`/`send_manually`) and `ghlInvoiceLiveMode` (default `true`).
+Tenant KV additions this needs (per-client, alongside the existing PayPal fields): `ghlPit` (or `ghlPitSecretName` for a Worker secret — a GHL Private Integration Token scoped to `invoices.readonly`+`invoices.write`), and optionally `ghlInvoiceSendAction` (`sms_and_email` default, or `email`/`sms`/`send_manually`) and `ghlInvoiceLiveMode` (default `true`).
 
 See [ONBOARDING.md](./ONBOARDING.md) for the full new-client checklist.
 
@@ -54,11 +55,10 @@ TENANTS KV namespace (managed in the Cloudflare dashboard) — never commit them
     src/deposit-engine.js   deposit rules: tiered / fixed / per-night / % / disabled
     src/paypal.js           PayPal Orders v2
     src/stripe.js           Stripe Checkout Sessions
-    src/airtable.js         Orders / Order Items / Payments / ledger records
     src/payment.js          capture, settlement, ledgers, GHL payment-confirmed notify
     src/cancellation.js     tiered cancellation charges + deposit refunds
     src/reschedule.js       move a paid booking to new dates (delta charge/refund)
     src/ghl-calendar.js     push new dates onto the actual GHL rental-calendar booking
     src/ghl-invoice.js      GHL invoice enrichment (additive, INVOICE_STRATEGY="enrich")
-    src/ledger.js           materializes the settlement split into D1 (ledger_entries)
+    src/ledger.js           settlement split into D1 (ledger_entries), synced to GHL Payment/Transaction objects
     src/reports.js          owner/manager statements + D1-vs-GHL reconciliation
