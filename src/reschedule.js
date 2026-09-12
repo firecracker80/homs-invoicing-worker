@@ -11,10 +11,20 @@
 import { calcSecurityDeposit, round2 } from "./deposit-engine.js";
 import { createOrder, getAccessToken } from "./paypal.js";
 import { createCheckoutSession } from "./stripe.js";
-import { atUpdate } from "./airtable.js";
+import { writeAndSyncRows } from "./ledger.js";
+import { updateObjectRecord } from "./ghl.js";
 import { adminAuthorized, notifyGHL, cancellationTier } from "./cancellation.js";
-import { atCreate } from "./airtable.js";
 import { updateGhlBookingDates } from "./ghl-calendar.js";
+
+function resolveSecret(tenant, env, nameKey, inlineKey) {
+  if (tenant[nameKey] && env[tenant[nameKey]]) return env[tenant[nameKey]];
+  return tenant[inlineKey];
+}
+
+// The Transaction record only exists once a booking has actually settled.
+function resolveTransactionId(snapshot) {
+  return snapshot.ghl?.transactionId || null;
+}
 
 const json = (data, status = 200) =>
   new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json" } });
@@ -59,7 +69,7 @@ export async function handleReschedule(request, env) {
       newDates: { checkIn: "2026-08-05", checkOut: "2026-08-09", nights: 4 },
       rentDelta: "70.00", depositDelta: "0.00", totalDelta: "70.00",
       settlement: { type: "additional_charge_pending", amount: 74.20, approveUrl: "https://www.sandbox.paypal.com/checkoutnow?token=SAMPLE" },
-      airtableSync: "ok", calendarUpdateRequired: true, testMode: true
+      calendarUpdateRequired: true, testMode: true
     });
   }
 
@@ -176,23 +186,8 @@ export async function handleReschedule(request, env) {
     }];
     await env.BOOKINGS.put(snapshot.bookingId, JSON.stringify(snapshot));
 
-    let airtableOk0 = true;
-    try {
-      const orderId0 = snapshot.airtable?.orderRecordId;
-      if (orderId0) {
-        await atUpdate(tenant, "Orders", orderId0, {
-          "Check-in Date": newCheckIn, "Check-out Date": newCheckOut, "Nights": newNights,
-          "Reservation Total": round2(newRent + snapshot.charges.cleaningFee + newProcessingFee),
-          "Deposit Required": newDeposit,
-          "Balance Due": round2(newRent + snapshot.charges.cleaningFee + newProcessingFee),
-          "Remaining Balance": newGrandTotal,
-          "Notes": `Reschedule (unpaid booking, new link issued): ${oldStay0.checkIn}->${oldStay0.checkOut} (${oldStay0.nights}n) to ${newCheckIn}->${newCheckOut} (${newNights}n). ${body.reason || ""}`.trim()
-        });
-      }
-    } catch (err) {
-      console.error(`Reschedule(unpaid) Airtable sync failed for ${snapshot.bookingId}:`, err.message);
-      airtableOk0 = false;
-    }
+    // No Transaction record exists yet for an unpaid booking, and no money
+    // moved -- nothing to write to D1 or GHL here.
 
     const calendar0 = await updateGhlBookingDates(env, tenant, snapshot, newCheckIn, newCheckOut);
 
@@ -221,7 +216,6 @@ export async function handleReschedule(request, env) {
       oldDates: oldStay0,
       newDates: { checkIn: newCheckIn, checkOut: newCheckOut, nights: newNights },
       settlement: { type: "unpaid_new_link", approveUrl, grandTotal: newGrandTotal },
-      airtableSync: airtableOk0 ? "ok" : "failed",
       calendarUpdateRequired: !calendar0.ok, calendar: calendar0
     });
   }
@@ -422,52 +416,73 @@ export async function handleReschedule(request, env) {
   }];
   await env.BOOKINGS.put(snapshot.bookingId, JSON.stringify(snapshot));
 
-  let airtableOk = true;
+  // ---- D1 + GHL ledger ----
+  // Admin fee retained (shortened stay): new income, split by ownerPct, same
+  // as /cancel's charge. Rent/deposit refunds actually issued (from
+  // settlement.parts): the rent portion reverses owner/manager income
+  // proportionally; the deposit portion is a liability, never counted as
+  // income, tracked for audit only.
+  let ledgerOk = true;
+  let ghlOk = true;
   try {
-    const orderId = snapshot.airtable?.orderRecordId;
-    if (orderId) {
-      const feeNote = cancellationInfo?.adminFee > 0
-        ? ` Admin fee $${cancellationInfo.adminFee.toFixed(2)} retained (tier ${cancellationInfo.tier}, ${Math.round(cancellationInfo.chargePct * 100)}%).`
-        : "";
-      await atUpdate(tenant, "Orders", orderId, {
-        "Check-in Date": newCheckIn,
-        "Check-out Date": newCheckOut,
-        "Nights": newNights,
-        "Reservation Total": round2(newRent + snapshot.charges.cleaningFee + snapshot.charges.processingFee),
-        "Deposit Required": newDeposit,
-        "Notes": `Reschedule: ${oldStay.checkIn}->${oldStay.checkOut} (${oldStay.nights}n) to ${newCheckIn}->${newCheckOut} (${newNights}n). Delta $${totalDelta.toFixed(2)} (${settlement.type}).${feeNote} ${body.reason || ""}`.trim()
-      });
+    const transactionId = resolveTransactionId(snapshot);
+    const eventRef = `resched-${newCheckOut}`;
+    const ownerPct = snapshot.payout?.ownerPct ?? tenant.ownerPct ?? 0.85;
+    const rows = [];
 
-      // Record the retained admin fee the same way /cancel does: an income
-      // ledger row + an owner/manager payout split, so a reschedule that
-      // shortens a stay accounts for itself identically to a cancellation.
-      if (cancellationInfo?.adminFee > 0) {
-        const now8601 = new Date().toISOString();
-        const gw = snapshot.gateway === "stripe" ? "Stripe" : "PayPal";
-        await atCreate(tenant, "Transaction Ledger", [{
-          "Entry Date": now8601, "Related Order": [orderId], "Transaction Type": "cancellation_charge",
-          "Direction": "In", "Gateway": gw, "Reference Number": snapshot.bookingId,
-          "Amount": cancellationInfo.adminFee, "Currency": cur, "Reconciled": false,
-          "Notes": `${snapshot.bookingId} reschedule admin fee, ${Math.round(cancellationInfo.chargePct * 100)}% of $${cancellationInfo.lostRent.toFixed(2)} dropped rent (tier ${cancellationInfo.tier})`
-        }]);
-        const ownerPct = snapshot.payout?.ownerPct ?? tenant.ownerPct ?? 0.85;
-        const ownerAmt = round2(cancellationInfo.adminFee * ownerPct);
-        const managerAmt = round2(cancellationInfo.adminFee - ownerAmt);
-        await atCreate(tenant, "Payout Ledger", [
-          { "Recipient": "Owner", "Payout Method": "Manual Transfer",
-            "Reason": `Reschedule admin fee ${Math.round(ownerPct * 100)}% — ${snapshot.bookingId}`,
-            "Payout Amount": ownerAmt, "Currency": cur, "Scheduled Date": now8601.slice(0, 10),
-            "Payout Status": "Pending", "Order": [orderId] },
-          { "Recipient": "Manager", "Payout Method": "Manual Transfer",
-            "Reason": `Reschedule admin fee (manager share) — ${snapshot.bookingId}`,
-            "Payout Amount": managerAmt, "Currency": cur, "Scheduled Date": now8601.slice(0, 10),
-            "Payout Status": "Pending", "Order": [orderId] }
-        ]);
-      }
+    if (cancellationInfo?.adminFee > 0) {
+      const ownerAmt = round2(cancellationInfo.adminFee * ownerPct);
+      rows.push({
+        recipient: "owner", category: "income", entry_type: "reschedule_admin_fee_owner",
+        amount: ownerAmt, reference: eventRef, source: "reschedule",
+        description: `Reschedule admin fee, ${Math.round(cancellationInfo.chargePct * 100)}% of $${cancellationInfo.lostRent.toFixed(2)} dropped rent (tier ${cancellationInfo.tier})`
+      });
+      rows.push({
+        recipient: "manager", category: "income", entry_type: "reschedule_admin_fee_manager",
+        amount: round2(cancellationInfo.adminFee - ownerAmt), reference: eventRef, source: "reschedule",
+        description: `Reschedule admin fee (manager share), tier ${cancellationInfo.tier}`
+      });
+    }
+
+    const rentRefundPart = settlement.parts?.find(p => p.type === "rent_refund_issued");
+    if (rentRefundPart) {
+      const ownerShare = round2(rentRefundPart.amount * ownerPct);
+      rows.push({
+        recipient: "owner", category: "income", entry_type: "reschedule_refund_owner",
+        amount: -ownerShare, reference: rentRefundPart.refundId, source: "reschedule",
+        description: "Rent refund reversal — reschedule shortened stay"
+      });
+      rows.push({
+        recipient: "manager", category: "income", entry_type: "reschedule_refund_manager",
+        amount: -round2(rentRefundPart.amount - ownerShare), reference: rentRefundPart.refundId, source: "reschedule",
+        description: "Rent refund reversal (manager share) — reschedule shortened stay"
+      });
+    }
+    const depositRefundPart = settlement.parts?.find(p => p.type === "deposit_refund_issued");
+    if (depositRefundPart) {
+      rows.push({
+        recipient: "guest", category: "liability", entry_type: "other",
+        amount: depositRefundPart.amount, reference: depositRefundPart.refundId, source: "reschedule",
+        description: "Deposit adjustment refund — reschedule shortened stay"
+      });
+    }
+
+    if (rows.length) {
+      const result = await writeAndSyncRows(env, tenant, snapshot, rows);
+      if (!result.d1.ok) { console.error(`Reschedule D1 write failed for ${snapshot.bookingId}: ${result.d1.reason} ${result.d1.error || ""}`); ledgerOk = false; }
+      if (!result.ghl.ok) { console.error(`Reschedule GHL sync failed for ${snapshot.bookingId}: ${result.ghl.reason} ${result.ghl.error || ""}`); ghlOk = false; }
+    }
+
+    if (transactionId) {
+      const pit = resolveSecret(tenant, env, "ghlPitSecretName", "ghlPit");
+      if (pit) await updateObjectRecord(pit, "custom_objects.transactions", transactionId, {
+        checkin_date: newCheckIn, checkout_date: newCheckOut,
+      });
     }
   } catch (err) {
-    console.error(`Reschedule Airtable sync failed for ${snapshot.bookingId}:`, err.message);
-    airtableOk = false;
+    console.error(`Reschedule ledger sync failed for ${snapshot.bookingId}:`, err.message);
+    ledgerOk = false;
+    ghlOk = false;
   }
 
   const calendar = await updateGhlBookingDates(env, tenant, snapshot, newCheckIn, newCheckOut);
@@ -498,7 +513,7 @@ export async function handleReschedule(request, env) {
     oldDates: oldStay,
     newDates: { checkIn: newCheckIn, checkOut: newCheckOut, nights: newNights },
     rentDelta, netRentDelta, depositDelta, totalDelta, settlement, cancellationInfo,
-    airtableSync: airtableOk ? "ok" : "failed",
+    ledgerSync: ledgerOk ? "ok" : "failed", ghlSync: ghlOk ? "ok" : "failed",
     calendarUpdateRequired: !calendar.ok, calendar
   });
 }
@@ -517,69 +532,50 @@ export async function settleRescheduleAdjustment(env, tenant, snapshot, capture)
   await env.BOOKINGS.put(snapshot.bookingId, JSON.stringify(snapshot));
 
   const parent = await env.BOOKINGS.get(snapshot.parentBookingId, { type: "json" });
-  const cur = tenant.currency || "USD";
-  let airtableOk = true;
+  let ledgerOk = true;
+  let ghlOk = true;
 
+  // This function runs against the CHILD delta-charge booking (a synthetic
+  // snapshot with no .stay/.ghl of its own) -- every ledger/GHL write below
+  // uses `parent`, the real reservation, same as the original Airtable code
+  // always updated the PARENT's Order record, never the child's.
   try {
-    const orderId = parent?.airtable?.orderRecordId;
-    if (orderId) {
-      // Reconcile the paid-amount fields, which "Deposit Required" alone
-      // doesn't cover -- without this, Airtable shows the NEW required
-      // amount but the OLD paid amount, looking like the guest never paid.
-      const originalRentGross = parent?.captures?.RENT?.gross || 0;
-      const originalDepositGross = parent?.captures?.DEP?.gross || 0;
-      const newDepositPaid = round2(originalDepositGross + (snapshot.depositDelta > 0 ? snapshot.depositDelta : 0));
-      const newTotalPaid = round2(originalRentGross + originalDepositGross + capture.gross);
-
-      await atUpdate(tenant, "Orders", orderId, {
-        "Deposit Paid": newDepositPaid,
-        "Total Paid": newTotalPaid,
-        "Remaining Balance": 0,
-        "Balance Due": 0,
-        "Deposit Status": "Held",
-        "Notes": `Reschedule adjustment paid: $${capture.gross.toFixed(2)} (capture ${capture.captureId}).`
-      });
-
-      await atCreate(tenant, "Payments", [{
-        "Order": [orderId], "Payment Method": snapshot.gateway === "stripe" ? "Stripe" : "PayPal",
-        "Payment Type": "Reschedule Adjustment",
-        "Gateway Transaction ID": capture.captureId,
-        "Payment Amount": capture.gross, "Gateway Fee": capture.fee, "Net Received": capture.net,
-        "Currency": cur, "Payment Status": "Completed", "Received Date": now,
-        "PayPal Payer ID": capture.payerId || "", "PayPal Email": capture.payerEmail || "",
-        "Cleared for Payout": true
-      }]);
-
-      await atCreate(tenant, "Transaction Ledger", [{
-        "Entry Date": now, "Related Order": [orderId], "Transaction Type": "reschedule_charge",
-        "Direction": "In", "Gateway": snapshot.gateway === "stripe" ? "Stripe" : "PayPal",
-        "Reference Number": capture.captureId, "Amount": capture.gross, "Currency": cur,
-        "Reconciled": false,
-        "Notes": `${snapshot.bookingId} reschedule adjustment (rent ${snapshot.rentDelta}, deposit ${snapshot.depositDelta}, fee ${snapshot.deltaFee})`
-      }]);
-
-      // Payout Ledger: split ONLY the rent-delta portion (real rent revenue).
-      // Deposit-delta is pass-through (held); the processing fee is retained.
-      if (snapshot.rentDelta > 0 && parent) {
+    if (parent) {
+      // Payout: split ONLY the rent-delta portion (real rent revenue). Deposit-
+      // delta is pass-through (held); the processing fee is retained -- neither
+      // is income, so neither gets a ledger row.
+      const rows = [];
+      if (snapshot.rentDelta > 0) {
         const ownerPct = parent.payout?.ownerPct ?? tenant.ownerPct ?? 0.85;
         const ownerAmt = round2(snapshot.rentDelta * ownerPct);
-        const managerAmt = round2(snapshot.rentDelta - ownerAmt);
-        const sched = parent.stay?.checkIn || now.slice(0, 10);
-        await atCreate(tenant, "Payout Ledger", [
-          { "Recipient": "Owner", "Payout Method": "Manual Transfer",
-            "Reason": `Reschedule rent adjustment ${Math.round(ownerPct * 100)}% — ${snapshot.bookingId}`,
-            "Payout Amount": ownerAmt, "Currency": cur, "Scheduled Date": sched,
-            "Payout Status": "Pending", "Order": [orderId] },
-          { "Recipient": "Manager", "Payout Method": "Manual Transfer",
-            "Reason": `Reschedule rent adjustment (manager share) — ${snapshot.bookingId}`,
-            "Payout Amount": managerAmt, "Currency": cur, "Scheduled Date": sched,
-            "Payout Status": "Pending", "Order": [orderId] }
-        ]);
+        rows.push({
+          recipient: "owner", category: "income", entry_type: "reschedule_charge_owner",
+          amount: ownerAmt, reference: capture.captureId, source: "reschedule",
+          description: `Reschedule adjustment, owner share (rent ${snapshot.rentDelta}, deposit ${snapshot.depositDelta}, fee ${snapshot.deltaFee})`
+        });
+        rows.push({
+          recipient: "manager", category: "income", entry_type: "reschedule_charge_manager",
+          amount: round2(snapshot.rentDelta - ownerAmt), reference: capture.captureId, source: "reschedule",
+          description: `Reschedule adjustment, manager share (rent ${snapshot.rentDelta}, deposit ${snapshot.depositDelta}, fee ${snapshot.deltaFee})`
+        });
+      }
+
+      if (rows.length) {
+        const result = await writeAndSyncRows(env, tenant, parent, rows);
+        if (!result.d1.ok) { console.error(`Reschedule adjustment D1 write failed for ${snapshot.bookingId}: ${result.d1.reason} ${result.d1.error || ""}`); ledgerOk = false; }
+        if (!result.ghl.ok) { console.error(`Reschedule adjustment GHL sync failed for ${snapshot.bookingId}: ${result.ghl.reason} ${result.ghl.error || ""}`); ghlOk = false; }
+      }
+
+      const transactionId = parent.ghl?.transactionId;
+      if (transactionId) {
+        const pit = resolveSecret(tenant, env, "ghlPitSecretName", "ghlPit");
+        if (pit) await updateObjectRecord(pit, "custom_objects.transactions", transactionId, { payment_status: "paid" });
       }
     }
   } catch (err) {
-    console.error(`Reschedule adjustment Airtable sync failed for ${snapshot.bookingId}:`, err.message);
-    airtableOk = false;
+    console.error(`Reschedule adjustment ledger sync failed for ${snapshot.bookingId}:`, err.message);
+    ledgerOk = false;
+    ghlOk = false;
   }
 
   // Reuse the EXISTING "Payment Confirmed" workflow -- no new GHL build needed.
@@ -595,5 +591,5 @@ export async function settleRescheduleAdjustment(env, tenant, snapshot, capture)
     propertyName: snapshot.propertyCode || tenant.brandName
   });
 
-  return { settled: true, airtableOk };
+  return { settled: true, ledgerOk, ghlOk };
 }

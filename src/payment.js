@@ -9,7 +9,6 @@
 // no matter how many of these fire or in what order.
 
 import { getAccessToken } from "./paypal.js";
-import { atUpdate, atFind, atCreate } from "./airtable.js";
 import { settleRescheduleAdjustment } from "./reschedule.js";
 import { writeLedgerEntries } from "./ledger.js";
 
@@ -163,7 +162,7 @@ async function verifyStripeWebhook(tenant, env, request, rawBody) {
 
 // ------------------------------------------------------------- Settlement ----
 
-// Idempotent settlement: updates snapshot, Airtable, ledgers, notifies GHL.
+// Idempotent settlement: updates snapshot, writes the D1 + GHL ledger, notifies GHL.
 async function settle(env, tenant, snapshot, captures) {
   if (snapshot.settled) return { alreadySettled: true };
 
@@ -180,130 +179,32 @@ async function settle(env, tenant, snapshot, captures) {
   snapshot.securityDeposit.paypalCaptureId = dep?.captureId || null;
   await env.BOOKINGS.put(snapshot.bookingId, JSON.stringify(snapshot));
 
-  // ---- Airtable ----
-  const at = snapshot.airtable || {};
-  let airtableOk = true;
-  try {
-    // Orders: resolve record id (stored, else search by GHL Booking ID)
-    let orderId = at.orderRecordId;
-    if (!orderId) {
-      const found = await atFind(tenant, "Orders", `{GHL Booking ID}="${snapshot.bookingId}"`);
-      orderId = found?.[0]?.id;
-    }
-    if (!orderId) throw new Error("Order record not found");
-
-    await atUpdate(tenant, "Orders", orderId, {
-      "Total Paid": totalPaid,
-      "Deposit Paid": dep?.gross || 0,
-      "Remaining Balance": 0,
-      "Balance Due": 0,
-      "Order Status": "Paid",
-      "Deposit Status": dep ? "Held" : "Pending Payment"
-    });
-
-    // Payments rows
-    for (const unit of ["RENT", "DEP"]) {
-      const cap = captures[unit];
-      if (!cap) continue;
-      let payId = at.paymentIds?.[unit];
-      if (!payId) {
-        const found = await atFind(tenant, "Payments", `{Notes}="${snapshot.bookingId}-${unit}"`);
-        payId = found?.[0]?.id;
-      }
-      if (!payId) continue;
-      await atUpdate(tenant, "Payments", payId, {
-        "Payment Status": "Completed",
-        "Gateway Transaction ID": cap.captureId,
-        "Gateway Fee": cap.fee,
-        "Net Received": cap.net,
-        "Received Date": now,
-        "PayPal Payer ID": captures.payerId || "",
-        "PayPal Email": captures.payerEmail || "",
-        "Cleared for Payout": unit === "RENT" // deposits never clear for payout
-      });
-    }
-
-    // Transaction Ledger: one row per capture
-    const ledgerRows = [];
-    if (rent) ledgerRows.push({
-      "Entry Date": now, "Related Order": [orderId],
-      "Transaction Type": "rent_capture", "Direction": "In",
-      "Gateway": snapshot.gateway === "stripe" ? "Stripe" : "PayPal",
-      "Reference Number": rent.captureId, "Amount": rent.gross,
-      "Currency": tenant.currency || "USD", "Reconciled": false,
-      "Notes": `${snapshot.bookingId} rent+cleaning+fee | fee ${rent.fee} | net ${rent.net}`
-    });
-    if (dep) ledgerRows.push({
-      "Entry Date": now, "Related Order": [orderId],
-      "Transaction Type": "deposit_capture", "Direction": "In",
-      "Gateway": snapshot.gateway === "stripe" ? "Stripe" : "PayPal",
-      "Reference Number": dep.captureId, "Amount": dep.gross,
-      "Currency": tenant.currency || "USD", "Reconciled": false,
-      "Notes": `${snapshot.bookingId} security deposit (held) | fee ${dep.fee} | net ${dep.net}`
-    });
-    if (ledgerRows.length) await atCreate(tenant, "Transaction Ledger", ledgerRows);
-
-    // Payout Ledger: owner split, manager split, cleaning fee — rent-only basis,
-    // scheduled per "After Check-in" policy.
-    const p = snapshot.payout;
-    const sched = snapshot.stay.checkIn;
-    const cur = tenant.currency || "USD";
-    // "Recipient" is a single-select ("Owner" / "Manager") — plain string.
-    // "Recipient Name" / "Recipient PayPal" are computed Lookups off the
-    // Order link — never write them; Airtable derives them.
-    const payoutRows = [
-      {
-        "Recipient": "Owner",
-        "Payout Method": "Manual Transfer",
-        "Reason": `Rent split ${Math.round(p.ownerPct * 100)}% — ${snapshot.bookingId}`,
-        "Payout Amount": p.owner, "Currency": cur,
-        "Scheduled Date": sched, "Payout Status": "Pending",
-        "Order": [orderId]
-      },
-      {
-        "Recipient": "Manager",
-        "Payout Method": "Manual Transfer",
-        "Reason": `Rent split ${Math.round((1 - p.ownerPct) * 100)}% — ${snapshot.bookingId}`,
-        "Payout Amount": p.manager, "Currency": cur,
-        "Scheduled Date": sched, "Payout Status": "Pending",
-        "Order": [orderId]
-      }
-    ];
-    if (snapshot.charges.cleaningFee > 0) payoutRows.push({
-      "Recipient": p.cleaningFeeTo === "owner" ? "Owner" : "Manager",
-      "Payout Method": "Manual Transfer",
-      "Reason": `Cleaning fee — ${snapshot.bookingId}`,
-      "Payout Amount": snapshot.charges.cleaningFee, "Currency": cur,
-      "Scheduled Date": sched, "Payout Status": "Pending",
-      "Order": [orderId]
-    });
-    const createdPayouts = await atCreate(tenant, "Payout Ledger", payoutRows);
-    // Store payout row IDs so cancellations can void them directly
-    snapshot.airtable = snapshot.airtable || {};
-    snapshot.airtable.payoutLedgerIds = createdPayouts.map(r => r.id);
-    await env.BOOKINGS.put(snapshot.bookingId, JSON.stringify(snapshot));
-  } catch (err) {
-    console.error(`Settlement Airtable sync failed for ${snapshot.bookingId}:`, err.message);
-    airtableOk = false;
-    snapshot.settlementSyncFailed = true;
-    await env.BOOKINGS.put(snapshot.bookingId, JSON.stringify(snapshot));
-  }
-
-  // ---- Ledger (D1, non-blocking) ----
-  // Independent of the Airtable outcome above -- a D1 write failure must
-  // never roll back or fail a completed settlement, same philosophy as
-  // Airtable itself. Materializes the split so owner/manager statements are
-  // a plain GROUP BY, not a recomputation of this split logic in SQL.
+  // ---- Ledger (D1 + GHL, non-blocking) ----
+  // writeLedgerEntries materializes the same split rows into D1 (the durable
+  // ledger) and into the tenant's own GHL account (custom_objects.payments,
+  // linked to custom_objects.transactions) -- the latter is what feeds the
+  // admin dashboard's Owner Statement, since the dashboard already reads GHL
+  // objects and already has the Property/OTA/Guest associations in place.
+  // Either half failing must never roll back or fail a completed settlement.
   let ledgerOk = true;
+  let ghlOk = true;
   try {
     const ledger = await writeLedgerEntries(env, tenant, snapshot, captures);
-    if (!ledger.ok) {
-      console.error(`Ledger write failed for ${snapshot.bookingId}: ${ledger.reason} ${ledger.error || ""}`);
+    if (!ledger.d1.ok) {
+      console.error(`D1 ledger write failed for ${snapshot.bookingId}: ${ledger.d1.reason} ${ledger.d1.error || ""}`);
       ledgerOk = false;
+    }
+    if (!ledger.ghl.ok) {
+      console.error(`GHL ledger sync failed for ${snapshot.bookingId}: ${ledger.ghl.reason} ${ledger.ghl.error || ""}`);
+      ghlOk = false;
+    } else {
+      snapshot.ghl = { transactionId: ledger.ghl.transactionId, paymentIds: ledger.ghl.paymentIds };
+      await env.BOOKINGS.put(snapshot.bookingId, JSON.stringify(snapshot));
     }
   } catch (err) {
     console.error(`Ledger write threw for ${snapshot.bookingId}:`, err.message);
     ledgerOk = false;
+    ghlOk = false;
   }
 
   // ---- GHL notification (fire-and-forget) ----
@@ -329,7 +230,7 @@ async function settle(env, tenant, snapshot, captures) {
     }
   }
 
-  return { settled: true, totalPaid, airtableOk, ledgerOk };
+  return { settled: true, totalPaid, ledgerOk, ghlOk };
 }
 
 function confirmationPage(tenant, snapshot) {
