@@ -16,6 +16,12 @@ import { fetchAllObjectRecords, fetchSubscriptions, fetchTransactions } from "./
 
 const EXPENSE_OBJECT = "custom_objects.expenses";
 
+// Revenue that never touches GHL -- Upwork contracts, partner earnings paid by
+// bank transfer. Without this the P&L reads only what GHL processed and reports
+// a zero that looks real: the worst asymmetry a P&L can have, since expenses are
+// captured thoroughly while income is captured by accident.
+const REVENUE_OBJECT = "custom_objects.revenue_entries";
+
 const num = (v) => {
   const n = Number(v);
   return Number.isFinite(n) ? n : 0;
@@ -44,6 +50,39 @@ export function normalizeVendorExpense(record) {
     // A record that can't be placed in time can't appear in a monthly P&L.
     // Surfaced rather than silently dropped.
     incomplete: !p.paid_on || !money(p.amount),
+  };
+}
+
+export function normalizeRevenueEntry(record) {
+  const p = record.properties || {};
+  // GHL MONETORY fields reject negative values, so a refund is stored as a
+  // positive magnitude with entry_type "adjustment" and negated here. Without
+  // this, refunds inflate revenue instead of reducing it.
+  const isAdjustment = (p.entry_type || "earning") === "adjustment";
+  const sign = isAdjustment ? -1 : 1;
+  const gross = money(p.gross_amount) * sign;
+  const fees = money(p.fees) * sign;
+  const net = money(p.net_amount) * sign;
+  return {
+    id: record.id,
+    name: p.revenue_name || "(unnamed)",
+    payer: p.payer || null,
+    source: p.source || "other",
+    gross,
+    fees,
+    // Trust a stored net, but fall back to gross-less-fees so a half-filled
+    // record still contributes something sane instead of a silent zero.
+    entryType: isAdjustment ? "adjustment" : "earning",
+    net: net || gross - fees,
+    currency: (p.currency || "usd").toUpperCase(),
+    receivedOn: p.received_on || null,
+    month: monthKey(p.received_on),
+    period: p.period || null,
+    provenance: p.provenance || null,
+    notes: p.notes || null,
+    // Aggregated rows (a whole-period Upwork export) have no single date, so
+    // they can total correctly but cannot sit in a month. Flagged, not dropped.
+    undated: !p.received_on,
   };
 }
 
@@ -77,7 +116,7 @@ export function normalizeVendorTransaction(tx) {
 }
 
 // Pure. State in, P&L out -- no I/O, so it is unit-testable without GHL.
-export function computePL({ expenses, subscriptions, transactions }) {
+export function computePL({ expenses, subscriptions, transactions, revenue = [] }) {
   // Only money that actually moved counts as revenue. A pending or failed charge
   // is not income, and counting it is how a P&L starts lying.
   const collected = transactions.filter((t) => t.liveMode && /succeeded|paid|completed/i.test(t.status || ""));
@@ -139,16 +178,57 @@ export function computePL({ expenses, subscriptions, transactions }) {
   const touch = (m) => (months[m] = months[m] || { month: m, revenue: 0, expense: 0, net: 0 });
   for (const e of expenses) if (e.month) { touch(e.month).expense += e.amount; }
   for (const t of collected) if (t.month) { touch(t.month).revenue += t.amount; }
-  for (const m of Object.values(months)) m.net = m.revenue - m.expense;
-  const timeline = Object.values(months).sort((a, b) => a.month.localeCompare(b.month));
+  // net is computed once, after recorded revenue is folded in below.
 
   const totalExpense = expenses.reduce((s, e) => s + e.amount, 0);
   const totalRevenue = collected.reduce((s, t) => s + t.amount, 0);
+
+  // Recorded revenue: everything earned outside GHL. Kept separate from GHL's own
+  // collected figure so it is always visible which half came from where.
+  const recordedGross = revenue.reduce((s, r) => s + r.gross, 0);
+  const recordedFees = revenue.reduce((s, r) => s + r.fees, 0);
+  const recordedNet = revenue.reduce((s, r) => s + r.net, 0);
+
+  const grossRevenue = totalRevenue + recordedGross;
+  const netRevenue = totalRevenue + recordedNet;
+
+  const bySource = {};
+  for (const r of revenue) {
+    if (!bySource[r.source]) bySource[r.source] = { gross: 0, fees: 0, net: 0, count: 0 };
+    bySource[r.source].gross += r.gross;
+    bySource[r.source].fees += r.fees;
+    bySource[r.source].net += r.net;
+    bySource[r.source].count += 1;
+  }
+  if (totalRevenue) bySource.ghl = { gross: totalRevenue, fees: 0, net: totalRevenue, count: collected.length };
+
+  const byPayer = {};
+  for (const r of revenue) {
+    const k = r.payer || "(unknown)";
+    if (!byPayer[k]) byPayer[k] = { gross: 0, net: 0, count: 0 };
+    byPayer[k].gross += r.gross;
+    byPayer[k].net += r.net;
+    byPayer[k].count += 1;
+  }
+
+  // Dated revenue only -- undated aggregate rows would otherwise dump a whole
+  // period's earnings into one arbitrary month.
+  for (const r of revenue) if (r.month) touch(r.month).revenue += r.net;
+  for (const m of Object.values(months)) m.net = m.revenue - m.expense;
+  const timeline = Object.values(months).sort((a, b) => a.month.localeCompare(b.month));
 
   return {
     revenue: {
       mrr,
       totalCollected: totalRevenue,
+      recordedGross,
+      recordedFees,
+      recordedNet,
+      grossRevenue,
+      netRevenue,
+      bySource,
+      byPayer,
+      undatedRevenue: revenue.filter((r) => r.undated).map((r) => ({ id: r.id, name: r.name, payer: r.payer, net: r.net, period: r.period })),
       activeSubscriptions: activeSubs.length,
       payingClients: new Set(activeSubs.map((s) => s.contactEmail).filter(Boolean)).size,
     },
@@ -193,10 +273,11 @@ async function settle(label, promise) {
 }
 
 export async function handleVendorData(pit, locationId) {
-  const [expensesRes, subsRes, txsRes] = await Promise.all([
+  const [expensesRes, subsRes, txsRes, revRes] = await Promise.all([
     settle("expenses", fetchAllObjectRecords(pit, locationId, EXPENSE_OBJECT)),
     settle("subscriptions", fetchSubscriptions(pit, locationId)),
     settle("transactions", fetchTransactions(pit, locationId)),
+    settle("revenue", fetchAllObjectRecords(pit, locationId, REVENUE_OBJECT)),
   ]);
 
   // Expenses are the one source with no fallback -- without them there is no P&L.
@@ -209,9 +290,17 @@ export async function handleVendorData(pit, locationId) {
   const expenses = expensesRes.value.map(normalizeVendorExpense);
   const subscriptions = subsRes.value.map(normalizeSubscription);
   const transactions = txsRes.value.map(normalizeVendorTransaction);
+  const revenue = revRes.value.map(normalizeRevenueEntry);
 
-  const warnings = [subsRes, txsRes]
+  // A 404 on the revenue object means this account simply doesn't track recorded
+  // revenue (HOMS takes its income through GHL payments; only DTCS books Upwork
+  // and partner earnings). That is a genuine zero, not a failed read, so it must
+  // not raise a warning. Any other failure on it still does.
+  const revenueNotConfigured = !revRes.ok && revRes.status === 404;
+
+  const warnings = [subsRes, txsRes, revRes]
     .filter((r) => !r.ok)
+    .filter((r) => !(r.label === "revenue" && revenueNotConfigured))
     .map((r) => ({
       source: r.label,
       status: r.status,
@@ -219,7 +308,9 @@ export async function handleVendorData(pit, locationId) {
       impact:
         r.label === "subscriptions"
           ? "MRR and paying-client count are unavailable, not zero."
-          : "Collected revenue is unavailable, not zero.",
+          : r.label === "revenue"
+            ? "Recorded revenue (Upwork, partner earnings) is unavailable, not zero. This account may not have the revenue object."
+            : "GHL-collected revenue is unavailable, not zero.",
     }));
 
   return {
@@ -227,8 +318,10 @@ export async function handleVendorData(pit, locationId) {
     locationId,
     kind: "vendor",
     warnings,
-    pl: computePL({ expenses, subscriptions, transactions }),
+    revenueTracked: !revenueNotConfigured,
+    pl: computePL({ expenses, subscriptions, transactions, revenue }),
     expenses,
+    revenue,
     subscriptions,
     transactions,
   };

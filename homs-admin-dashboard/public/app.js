@@ -219,8 +219,10 @@ async function loadData() {
     DATA = json;
     applyBranding(json.branding);
     $("#fetchedAt").textContent = "Updated " + new Date(json.fetchedAt).toLocaleTimeString();
-    const label = $(".brand-sub");
-    if (label && json.tenantLabel) label.firstChild.textContent = json.tenantLabel + " ";
+    // The header used to carry a hardcoded "DEMO" pill from when this only ran
+    // against DEMO-HOMS -- it showed on every tenant regardless of account.
+    const label = $("#tenantLabel");
+    if (label) label.textContent = json.tenantLabel || "Admin Dashboard";
     renderAll();
   } catch (err) {
     $("#error").hidden = false;
@@ -250,10 +252,13 @@ function renderAll() {
   renderStatement();
 }
 
-// ---------- Vendor P&L (HOMS's own book) ----------
-// Separate render path, not a variant of the client dashboard. Leads with burn
-// and breakeven because at zero revenue that is the only honest headline -- an
-// averaged "cost per client" would divide by zero and hide it.
+// ---------- Vendor P&L (own book) ----------
+// Separate render path, not a variant of the client dashboard. Serves both HOMS
+// (the product) and DTCS (the entity); which one is loaded is stated on the page.
+//
+// Revenue has two sources and they are always shown separately: what GHL
+// processed, and what was recorded from outside GHL (Upwork, partner earnings).
+// Reading GHL alone reported $0 for a year that actually earned ~$20k.
 
 const CATEGORY_LABELS = {
   platform: "Platform",
@@ -269,78 +274,329 @@ const CATEGORY_LABELS = {
 
 const RECURRENCE_LABELS = { one_off: "One-off", monthly: "Monthly", annual: "Annual" };
 
+const SOURCE_LABELS = {
+  upwork: "Upwork",
+  fableforge: "FableForge (partner)",
+  ghl: "GHL payments",
+  direct: "Direct / bank transfer",
+  other: "Other",
+};
+
+// money() prints "$-76.06"; financial statements want "-$76.06".
+function usd(n) {
+  const v = Number(n) || 0;
+  return `${v < 0 ? "-" : ""}$${Math.abs(v).toFixed(2)}`;
+}
+
 function signedMoney(n) {
   const v = Number(n) || 0;
   const cls = v < 0 ? "bad" : v > 0 ? "good" : "neutral";
-  return `<span class="badge ${cls}">${v < 0 ? "-" : ""}$${Math.abs(v).toFixed(2)}</span>`;
+  return `<span class="badge ${cls}">${usd(v)}</span>`;
+}
+
+const GHL_COLLECTED = (t) => t.liveMode && /succeeded|paid|completed/i.test(t.status || "");
+
+// Income statement for one calendar year. Pure: reads DATA, returns numbers.
+// Cash basis -- an expense counts in the year it was PAID, revenue in the year it
+// was RECEIVED. Anything without a date can't be placed in a year and is reported
+// as excluded rather than quietly dropped into the wrong one.
+//
+// Platform fees are shown as a deduction from gross revenue (gross -> net), not
+// buried in operating expenses: they are the cost of the channel, and Yari chose
+// gross-with-fees-broken-out specifically so this line stays visible.
+function plStatementFor(year) {
+  const y = String(year);
+  const inYear = (d) => d && String(d).slice(0, 4) === y;
+
+  const expensesInYear = (DATA.expenses || []).filter((e) => inYear(e.paidOn));
+  const ghlInYear = (DATA.transactions || []).filter((t) => GHL_COLLECTED(t) && inYear(t.paidAt));
+  const recordedInYear = (DATA.revenue || []).filter((r) => inYear(r.receivedOn));
+
+  const bySource = {};
+  for (const r of recordedInYear) {
+    if (!bySource[r.source]) bySource[r.source] = { gross: 0, fees: 0, net: 0, count: 0 };
+    bySource[r.source].gross += r.gross;
+    bySource[r.source].fees += r.fees;
+    bySource[r.source].net += r.net;
+    bySource[r.source].count += 1;
+  }
+  const ghlTotal = ghlInYear.reduce((s, t) => s + t.amount, 0);
+  if (ghlTotal) bySource.ghl = { gross: ghlTotal, fees: 0, net: ghlTotal, count: ghlInYear.length };
+
+  const grossRevenue = Object.values(bySource).reduce((s, v) => s + v.gross, 0);
+  const platformFees = Object.values(bySource).reduce((s, v) => s + v.fees, 0);
+  const netRevenue = grossRevenue - platformFees;
+
+  const byCategory = {};
+  for (const e of expensesInYear) byCategory[e.category] = (byCategory[e.category] || 0) + e.amount;
+  const totalExpense = expensesInYear.reduce((s, e) => s + e.amount, 0);
+
+  return {
+    year: y,
+    bySource,
+    grossRevenue,
+    platformFees,
+    netRevenue,
+    byCategory,
+    totalExpense,
+    net: netRevenue - totalExpense,
+    expenseCount: expensesInYear.length,
+    revenueCount: recordedInYear.length + ghlInYear.length,
+    excludedExpenses: (DATA.expenses || []).filter((e) => !e.paidOn || !e.amount),
+    undatedRevenue: (DATA.revenue || []).filter((r) => !r.receivedOn),
+  };
+}
+
+function statementYears() {
+  const ys = new Set();
+  for (const e of DATA.expenses || []) if (e.paidOn) ys.add(String(e.paidOn).slice(0, 4));
+  for (const t of DATA.transactions || []) if (t.paidAt && GHL_COLLECTED(t)) ys.add(String(t.paidAt).slice(0, 4));
+  for (const r of DATA.revenue || []) if (r.receivedOn) ys.add(String(r.receivedOn).slice(0, 4));
+  ys.add(String(new Date().getFullYear()));
+  return [...ys].sort().reverse();
+}
+
+function statementCsv(st) {
+  const q = (v) => `"${String(v).replace(/"/g, '""')}"`;
+  const n = (v) => (Number(v) || 0).toFixed(2);
+  const rows = [
+    [q(DATA.tenantLabel || "Account"), "", ""],
+    [q("Profit & Loss - cash basis"), "", ""],
+    [q(`For the year ended December 31, ${st.year}`), "", ""],
+    [q(`Prepared ${new Date().toISOString().slice(0, 10)}`), "", ""],
+    [],
+    [q("REVENUE"), "", ""],
+    ...Object.entries(st.bySource)
+      .sort((a, b) => b[1].gross - a[1].gross)
+      .map(([k, v]) => [q(SOURCE_LABELS[k] || k), n(v.gross), q(`${v.count} entr${v.count === 1 ? "y" : "ies"}`)]),
+    [q("Gross revenue"), n(st.grossRevenue), ""],
+    [q("Less platform fees"), n(-st.platformFees), ""],
+    [q("Net revenue"), n(st.netRevenue), ""],
+    [],
+    [q("OPERATING EXPENSES"), "", ""],
+    ...Object.entries(st.byCategory)
+      .sort((a, b) => b[1] - a[1])
+      .map(([k, v]) => [q(CATEGORY_LABELS[k] || k), n(v), ""]),
+    [q("Total operating expenses"), n(st.totalExpense), q(`${st.expenseCount} record(s)`)],
+    [],
+    [q(st.net < 0 ? "NET LOSS" : "NET INCOME"), n(st.net), ""],
+  ];
+  if (st.excludedExpenses.length || st.undatedRevenue.length) {
+    rows.push([], [q("EXCLUDED - no date, so not counted in any year"), "", ""]);
+    for (const e of st.excludedExpenses) rows.push([q(`Expense: ${e.name}`), n(e.amount), q("no paid date")]);
+    for (const r of st.undatedRevenue) rows.push([q(`Revenue: ${r.name}`), n(r.net), q("no received date")]);
+  }
+  return rows.map((r) => r.join(",")).join("\r\n");
+}
+
+function downloadCsvText(filename, csv) {
+  // BOM so Excel opens UTF-8 correctly rather than mangling it.
+  const blob = new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+function renderStatementSection(year) {
+  const st = plStatementFor(year);
+  const years = statementYears();
+
+  const sourceRows =
+    Object.entries(st.bySource)
+      .sort((a, b) => b[1].gross - a[1].gross)
+      .map(([k, v]) => `<tr><td>${esc(SOURCE_LABELS[k] || k)}</td><td>${usd(v.gross)}</td></tr>`)
+      .join("") || `<tr><td colspan="2" class="muted">No revenue dated in ${esc(st.year)}</td></tr>`;
+
+  const catRows =
+    Object.entries(st.byCategory)
+      .sort((a, b) => b[1] - a[1])
+      .map(([k, v]) => `<tr><td>${esc(CATEGORY_LABELS[k] || k)}</td><td>${usd(v)}</td></tr>`)
+      .join("") || `<tr><td colspan="2" class="muted">No expenses dated in ${esc(st.year)}</td></tr>`;
+
+  const excludedCount = st.excludedExpenses.length + st.undatedRevenue.length;
+  const excludedNote = excludedCount
+    ? `<p class="note error"><strong>${excludedCount} record${excludedCount === 1 ? "" : "s"} excluded</strong> — no date, so ${
+        excludedCount === 1 ? "it belongs" : "they belong"
+      } to no year: ${[...st.excludedExpenses, ...st.undatedRevenue].map((e) => esc(e.name)).join(", ")}</p>`
+    : "";
+
+  return `
+    <div class="stmt-controls">
+      <label>Year
+        <select id="stmtYear" class="filter-select">
+          ${years.map((y) => `<option value="${y}" ${y === st.year ? "selected" : ""}>${y}</option>`).join("")}
+        </select>
+      </label>
+      <button id="stmtCsv" class="btn">Download CSV</button>
+      <button id="stmtPrint" class="btn">Print / Save as PDF</button>
+    </div>
+    <div id="stmtDoc" class="stmt-doc">
+      <h2>${esc(DATA.tenantLabel || "Account")}</h2>
+      <p><strong>Profit &amp; Loss</strong> — cash basis<br>
+         For the year ended December 31, ${esc(st.year)}<br>
+         <small class="muted">Prepared ${new Date().toLocaleDateString()}</small></p>
+      <h4>Revenue</h4>
+      <table><tbody>
+        ${sourceRows}
+        <tr class="stmt-total"><td>Gross revenue</td><td>${usd(st.grossRevenue)}</td></tr>
+        <tr><td>Less platform fees</td><td>${usd(-st.platformFees)}</td></tr>
+        <tr class="stmt-total"><td><strong>Net revenue</strong></td><td><strong>${usd(st.netRevenue)}</strong></td></tr>
+      </tbody></table>
+      <h4>Operating expenses</h4>
+      <table><tbody>
+        ${catRows}
+        <tr class="stmt-total"><td><strong>Total operating expenses</strong></td><td><strong>${usd(st.totalExpense)}</strong></td></tr>
+      </tbody></table>
+      <table><tbody>
+        <tr class="stmt-net"><td><strong>${st.net < 0 ? "Net loss" : "Net income"}</strong></td><td><strong>${signedMoney(st.net)}</strong></td></tr>
+      </tbody></table>
+      ${excludedNote}
+      <p class="note"><small>Cash basis: an expense counts in the year it was paid, revenue in the year it was received. Platform fees are deducted from gross revenue rather than listed as an operating expense.</small></p>
+    </div>`;
+}
+
+function wireStatement() {
+  const yearSel = $("#stmtYear");
+  if (!yearSel) return;
+  const host = $("#stmtSection");
+  yearSel.addEventListener("change", (e) => {
+    host.innerHTML = renderStatementSection(e.target.value);
+    wireStatement();
+  });
+  $("#stmtCsv").addEventListener("click", () => {
+    const y = $("#stmtYear").value;
+    const who = (DATA.tenantLabel || "Account").replace(/[^A-Za-z0-9]+/g, "-");
+    downloadCsvText(`${who}-P&L-${y}.csv`, statementCsv(plStatementFor(y)));
+  });
+  $("#stmtPrint").addEventListener("click", () => window.print());
 }
 
 function renderVendor() {
   const { pl, expenses, transactions, subscriptions, warnings = [] } = DATA;
+  const revenue = DATA.revenue || [];
+
+  // Remove the client tab buttons outright rather than hiding them. Hidden
+  // buttons are still in the DOM and their click handler calls showTab(), which
+  // un-hides client panels on an account that has no client data.
   const tabs = $("#tabs");
-  if (tabs) tabs.hidden = true;
+  if (tabs) {
+    tabs.innerHTML = "";
+    tabs.hidden = true;
+  }
   document.querySelectorAll(".panel").forEach((p) => (p.hidden = true));
+  $("#searchResults").hidden = true;
+  const search = $("#search");
+  if (search) search.placeholder = "Search expenses and revenue by name, vendor, payer or category…";
   const host = $("#panel-overview");
   host.hidden = false;
 
-  const netPerMonth = pl.revenue.mrr - pl.cost.monthlyBurn;
+  // Current-year figures lead. All-time totals mix years and hide trend; the
+  // statement section below covers any other year.
+  const thisYear = String(new Date().getFullYear());
+  const fy = plStatementFor(thisYear);
+
+  // Which account this is, stated on the page. getLocationId() falls back to
+  // localStorage, so a bare URL silently shows whichever account was opened last.
+  const whoami = `<p class="note banner"><strong>${esc(DATA.tenantLabel || "Account")}</strong> — own book.
+    Location <code>${esc(DATA.locationId)}</code>.
+    ${DATA.revenueTracked === false ? "Revenue here comes from GHL payments only." : "Revenue combines GHL payments with recorded entries (Upwork, partner earnings)."}</p>`;
 
   // "Unavailable" and "zero" must not look the same. A failed read is stated.
   const warnHtml = warnings.length
-    ? `<div class="state-msg error">${warnings
-        .map((w) => `<strong>${esc(w.source)}</strong> could not be read (${esc(String(w.status))}). ${esc(w.impact)}`)
-        .join("<br>")}</div>`
+    ? warnings
+        .map((w) => `<p class="note error"><strong>${esc(w.source)}</strong> could not be read (${esc(String(w.status))}). ${esc(w.impact)}</p>`)
+        .join("")
     : "";
 
   const kpis = `
     <div class="card-grid">
-      <div class="stat-card"><div class="num">$${pl.cost.monthlyBurn.toFixed(2)}</div><div class="label">Fixed monthly burn</div></div>
-      <div class="stat-card"><div class="num">$${pl.revenue.mrr.toFixed(2)}</div><div class="label">MRR</div></div>
-      <div class="stat-card"><div class="num">${netPerMonth < 0 ? "-" : ""}$${Math.abs(netPerMonth).toFixed(2)}</div><div class="label">Net per month</div></div>
-      <div class="stat-card"><div class="num">$${pl.breakeven.monthlyRevenueNeeded.toFixed(2)}</div><div class="label">Revenue needed to break even</div></div>
-      <div class="stat-card"><div class="num">${pl.revenue.payingClients}</div><div class="label">Paying clients</div></div>
+      <div class="stat-card"><div class="num">${usd(fy.netRevenue)}</div><div class="label">Net revenue ${thisYear}</div></div>
+      <div class="stat-card"><div class="num">${usd(fy.totalExpense)}</div><div class="label">Expenses ${thisYear}</div></div>
+      <div class="stat-card"><div class="num">${usd(fy.net)}</div><div class="label">${fy.net < 0 ? "Net loss" : "Net income"} ${thisYear}</div></div>
+      <div class="stat-card"><div class="num">${usd(pl.cost.monthlyBurn)}</div><div class="label">Fixed monthly burn</div></div>
+      <div class="stat-card"><div class="num">${usd(pl.revenue.mrr)}</div><div class="label">MRR (GHL subscriptions)</div></div>
     </div>`;
 
-  const burnRows =
-    pl.cost.burnLines
-      .map(
-        (l) => `<tr>
-          <td>${esc(l.name)}</td>
-          <td>${dash(l.vendor)}</td>
-          <td>${esc(CATEGORY_LABELS[l.category] || l.category)}</td>
-          <td>${esc(RECURRENCE_LABELS[l.recurrence] || l.recurrence)}</td>
-          <td>${dateFmt(l.asOf)}</td>
-          <td>${money(l.monthly)}</td>
-        </tr>`
-      )
-      .join("") || emptyRow(6, "No recurring lines recorded");
+  const incompleteNote = pl.incompleteRecords.length
+    ? `<p class="note error"><strong>${pl.incompleteRecords.length} expense${
+        pl.incompleteRecords.length === 1 ? "" : "s"
+      } missing an amount or paid date</strong> — excluded from monthly figures: ${pl.incompleteRecords.map((r) => esc(r.name)).join(", ")}</p>`
+    : "";
 
-  const catRows =
-    Object.entries(pl.byCategory)
-      .sort((a, b) => b[1].total - a[1].total)
-      .map(
-        ([k, v]) => `<tr>
-          <td>${esc(CATEGORY_LABELS[k] || k)}</td>
-          <td>${v.count}</td>
-          <td>${money(v.monthly)}</td>
-          <td>${money(v.total)}</td>
-        </tr>`
-      )
-      .join("") || emptyRow(4, "No expenses recorded");
+  // ---- Revenue ----
+  const R = pl.revenue;
+  const payerRows =
+    Object.entries(R.byPayer || {})
+      .sort((a, b) => b[1].net - a[1].net)
+      .map(([k, v]) => `<tr><td>${esc(k)}</td><td>${v.count}</td><td>${usd(v.gross)}</td><td>${usd(v.net)}</td></tr>`)
+      .join("") || emptyRow(4, "No recorded revenue");
+
+  const sourceEntries = Object.entries(R.bySource || {});
+  const sourceRows =
+    sourceEntries
+      .sort((a, b) => b[1].gross - a[1].gross)
+      .map(([k, v]) => `<tr><td>${esc(SOURCE_LABELS[k] || k)}</td><td>${usd(v.gross)}</td><td>${usd(-v.fees)}</td><td>${usd(v.net)}</td></tr>`)
+      .join("") || emptyRow(4, "No revenue yet");
+
+  const revenueSection = `
+    <h3>Revenue — all time</h3>
+    <p class="note">Gross ${usd(R.grossRevenue)} · platform fees ${usd(-R.recordedFees)} · net ${usd(R.netRevenue)}.
+      GHL-processed ${usd(R.totalCollected)}, recorded outside GHL ${usd(R.recordedGross)} gross.</p>
+    <div class="rev-split">
+      <div>
+        <h4>By source</h4>
+        ${table(["Source", "Gross", "Fees", "Net"], sourceRows, sourceEntries.length)}
+      </div>
+      <div>
+        <h4>By payer</h4>
+        ${table(["Payer", "Entries", "Gross", "Net"], payerRows, Object.keys(R.byPayer || {}).length)}
+      </div>
+    </div>`;
 
   const monthRows =
     pl.timeline
       .slice()
       .reverse()
+      .map((m) => `<tr><td>${esc(m.month)}</td><td>${usd(m.revenue)}</td><td>${usd(m.expense)}</td><td>${signedMoney(m.net)}</td></tr>`)
+      .join("") || emptyRow(4, "No dated activity yet");
+
+  const burnRows =
+    pl.cost.burnLines
       .map(
-        (m) => `<tr>
-          <td>${esc(m.month)}</td>
-          <td>${money(m.revenue)}</td>
-          <td>${money(m.expense)}</td>
-          <td>${signedMoney(m.net)}</td>
+        (l) => `<tr>
+          <td>${esc(l.name)}</td><td>${dash(l.vendor)}</td>
+          <td>${esc(CATEGORY_LABELS[l.category] || l.category)}</td>
+          <td>${esc(RECURRENCE_LABELS[l.recurrence] || l.recurrence)}</td>
+          <td>${dateFmt(l.asOf)}</td><td>${usd(l.monthly)}</td>
         </tr>`
       )
-      .join("") || emptyRow(4, "No dated activity yet");
+      .join("") || emptyRow(6, "No recurring costs recorded");
+
+  const catRows =
+    Object.entries(pl.byCategory)
+      .sort((a, b) => b[1].total - a[1].total)
+      .map(([k, v]) => `<tr><td>${esc(CATEGORY_LABELS[k] || k)}</td><td>${v.count}</td><td>${usd(v.monthly)}</td><td>${usd(v.total)}</td></tr>`)
+      .join("") || emptyRow(4, "No expenses recorded");
+
+  const revenueRows =
+    revenue
+      .slice()
+      .sort((a, b) => String(b.receivedOn || "").localeCompare(String(a.receivedOn || "")))
+      .map(
+        (r) => `<tr>
+          <td>${esc(r.name)}${r.entryType === "adjustment" ? ' <span class="badge bad">adjustment</span>' : ""}</td>
+          <td>${dash(r.payer)}</td>
+          <td>${esc(SOURCE_LABELS[r.source] || r.source)}</td>
+          <td>${dateFmt(r.receivedOn)}</td>
+          <td>${usd(r.gross)}</td><td>${usd(r.net)}</td>
+        </tr>`
+      )
+      .join("") || emptyRow(6, "No recorded revenue");
 
   const expenseRows =
     expenses
@@ -352,59 +608,42 @@ function renderVendor() {
           <td>${dash(e.vendor)}</td>
           <td>${esc(CATEGORY_LABELS[e.category] || e.category)}</td>
           <td>${esc(RECURRENCE_LABELS[e.recurrence] || e.recurrence)}</td>
-          <td>${dateFmt(e.paidOn)}</td>
-          <td>${money(e.amount)}</td>
+          <td>${dateFmt(e.paidOn)}</td><td>${usd(e.amount)}</td>
         </tr>`
       )
       .join("") || emptyRow(6, "No expenses yet");
 
-  const txRows =
+  const ghlRows =
     transactions
-      .map(
-        (t) => `<tr>
-          <td>${dash(t.contactName)}</td>
-          <td>${dash(t.source)}</td>
-          <td>${paymentBadge(t.status)}</td>
-          <td>${t.liveMode ? "" : '<span class="badge warn">test</span>'}</td>
-          <td>${dateFmt(t.paidAt)}</td>
-          <td>${money(t.amount)}</td>
-        </tr>`
-      )
-      .join("") || emptyRow(6, "No transactions yet");
-
-  const subNote = subscriptions.length
-    ? ""
-    : `<p class="state-msg">No active subscriptions. ${
-        warnings.some((w) => w.source === "subscriptions")
-          ? "(This could not be verified — see the warning above.)"
-          : "Verified against GHL, not inferred."
-      }</p>`;
-
-  const incompleteNote = pl.incompleteRecords.length
-    ? `<div class="state-msg error"><strong>${pl.incompleteRecords.length} record${
-        pl.incompleteRecords.length === 1 ? "" : "s"
-      } missing an amount or a paid date</strong>, so ${
-        pl.incompleteRecords.length === 1 ? "it is" : "they are"
-      } excluded from the monthly timeline: ${pl.incompleteRecords.map((r) => esc(r.name)).join(", ")}</div>`
-    : "";
+      .filter(GHL_COLLECTED)
+      .map((t) => `<tr><td>${dash(t.contactName)}</td><td>${dash(t.source)}</td><td>${dateFmt(t.paidAt)}</td><td>${usd(t.amount)}</td></tr>`)
+      .join("") || emptyRow(4, "No collected GHL payments");
 
   host.innerHTML = `
+    ${whoami}
     ${warnHtml}
     ${kpis}
     ${incompleteNote}
-    <h3>Fixed monthly burn</h3>
-    <p class="state-msg">One line per subscription, valued at its most recent charge — not the sum of every recorded month.</p>
-    ${table(["Line", "Vendor", "Category", "Recurrence", "As of", "Per month"], burnRows, pl.cost.burnLines.length)}
-    <h3>By category</h3>
-    ${table(["Category", "Records", "Per month", "Total recorded"], catRows, Object.keys(pl.byCategory).length)}
+    ${revenueSection}
     <h3>Month by month</h3>
+    <p class="note">Net revenue in, expenses out, by the month money actually moved.</p>
     ${table(["Month", "Revenue", "Expense", "Net"], monthRows, pl.timeline.length)}
-    <h3>Revenue</h3>
-    ${subNote}
-    ${table(["Contact", "Source", "Status", "Mode", "Date", "Amount"], txRows, transactions.length)}
+    <h3>Fixed monthly burn</h3>
+    <p class="note">One line per subscription, valued at its most recent charge — not the sum of every recorded month.</p>
+    ${table(["Line", "Vendor", "Category", "Recurrence", "As of", "Per month"], burnRows, pl.cost.burnLines.length)}
+    <h3>Expenses by category</h3>
+    ${table(["Category", "Records", "Per month", "Total recorded"], catRows, Object.keys(pl.byCategory).length)}
+    <h3>Year-end P&amp;L statement</h3>
+    <div id="stmtSection">${renderStatementSection(thisYear)}</div>
+    <h3>Recorded revenue</h3>
+    ${table(["Entry", "Payer", "Source", "Received", "Gross", "Net"], revenueRows, revenue.length)}
+    <h3>GHL payments collected</h3>
+    ${table(["Contact", "Source", "Date", "Amount"], ghlRows, transactions.filter(GHL_COLLECTED).length)}
     <h3>All expenses</h3>
     ${table(["Expense", "Vendor", "Category", "Recurrence", "Paid on", "Amount"], expenseRows, expenses.length)}
   `;
+
+  wireStatement();
 }
 
 // ---------- Overview ----------
@@ -942,24 +1181,38 @@ function runSearch(query) {
   // A vendor tenant has none of the client collections below -- searching them
   // would throw on undefined. Search what it actually has.
   if (DATA.kind === "vendor") {
-    const hits = (DATA.expenses || []).filter((e) =>
+    const expHits = (DATA.expenses || []).filter((e) =>
       [e.name, e.vendor, e.category, e.notes].filter(Boolean).join(" ").toLowerCase().includes(q)
     );
-    $("#searchResults").innerHTML = hits.length
-      ? `<h3>Expenses (${hits.length})</h3>` +
-        table(
-          ["Expense", "Vendor", "Category", "Paid on", "Amount"],
-          hits
-            .map(
-              (e) =>
-                `<tr><td>${esc(e.name)}</td><td>${dash(e.vendor)}</td><td>${esc(
-                  CATEGORY_LABELS[e.category] || e.category
-                )}</td><td>${dateFmt(e.paidOn)}</td><td>${money(e.amount)}</td></tr>`
-            )
-            .join(""),
-          hits.length
-        )
-      : `<p class="state-msg">No expenses match "${esc(query)}".</p>`;
+    const revHits = (DATA.revenue || []).filter((r) =>
+      [r.name, r.payer, r.source, r.period, r.notes].filter(Boolean).join(" ").toLowerCase().includes(q)
+    );
+    const revNet = revHits.reduce((s, r) => s + r.net, 0);
+    const expTotal = expHits.reduce((s, e) => s + e.amount, 0);
+
+    $("#searchResults").innerHTML =
+      expHits.length || revHits.length
+        ? (revHits.length
+            ? `<h3>Revenue (${revHits.length}) — net ${usd(revNet)}</h3>` +
+              table(
+                ["Entry", "Payer", "Received", "Gross", "Net"],
+                revHits
+                  .map((r) => `<tr><td>${esc(r.name)}</td><td>${dash(r.payer)}</td><td>${dateFmt(r.receivedOn)}</td><td>${usd(r.gross)}</td><td>${usd(r.net)}</td></tr>`)
+                  .join(""),
+                revHits.length
+              )
+            : "") +
+          (expHits.length
+            ? `<h3>Expenses (${expHits.length}) — ${usd(expTotal)}</h3>` +
+              table(
+                ["Expense", "Vendor", "Category", "Paid on", "Amount"],
+                expHits
+                  .map((e) => `<tr><td>${esc(e.name)}</td><td>${dash(e.vendor)}</td><td>${esc(CATEGORY_LABELS[e.category] || e.category)}</td><td>${dateFmt(e.paidOn)}</td><td>${usd(e.amount)}</td></tr>`)
+                  .join(""),
+                expHits.length
+              )
+            : "")
+        : `<p class="note">Nothing matches "${esc(query)}".</p>`;
     return;
   }
 
@@ -1089,6 +1342,10 @@ function downloadCsv(filename, rows) {
 
 // ---------- Tabs ----------
 function showTab(tab) {
+  // A vendor tenant has no client panels. Without this guard, any tab click or a
+  // cleared search box re-shows Properties/OTA/Checklists/Inventory on an account
+  // that has none of those things.
+  if (DATA && DATA.kind === "vendor") return renderVendor();
   activeTab = tab;
   document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t.dataset.tab === tab));
   document.querySelectorAll(".panel").forEach((p) => (p.hidden = true));
