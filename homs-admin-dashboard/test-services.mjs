@@ -189,6 +189,8 @@ const payload = { vendorLocationId: VENDOR, serviceRequestId: "sr1" };
   assert.equal(res.status, 200, JSON.stringify(out));
   const est = ghl.db.estimates[out.estimateId];
   assert.equal(est.currency, "DOP");
+  assert.match(est.expiryDate, /^\d{4}-\d{2}-\d{2}$/, "GHL 422s without a date-only expiryDate");
+  assert.equal(est.expiryDate, new Date(Date.parse(est.issueDate) + 7 * 86400000).toISOString().slice(0, 10), "valid 7 days by default");
   assert.equal(est.items.length, 1);
   assert.equal(est.items[0].amount, 3500);
   assert.ok(!("taxes" in est.items[0]) && !est.automaticTaxesEnabled, "no ITBIS: no tax fields on the line");

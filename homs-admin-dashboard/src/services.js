@@ -24,7 +24,7 @@
 //
 // Vendor config is a DASHBOARD_TENANTS entry with kind "service_vendor":
 //   { label, kind: "service_vendor", ghlPitSecretName, currency, dispatchUserId,
-//     sendAction?, liveMode?, estimateTerms? }
+//     sendAction?, liveMode?, estimateTerms?, estimateValidDays? (default 7) }
 //
 // No tax is added. Not every client of the vendor wants a fiscal receipt
 // (comprobante fiscal), so ITBIS stays off until a per-client rule exists.
@@ -110,6 +110,12 @@ export function toE164(phone) {
   return `+${digits}`;
 }
 
+export function addDays(date, days) {
+  const d = new Date(`${date}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
 export function buildEstimateBody({ vendor, vendorLocationId, location, record, contact, today }) {
   const business = location?.business || {};
   const serviceItem = prop(record, "service_item");
@@ -121,6 +127,9 @@ export function buildEstimateBody({ vendor, vendorLocationId, location, record, 
     currency: vendor.currency,
     liveMode: vendor.liveMode ?? true,
     issueDate: today,
+    // Required at runtime despite the schema marking it optional (live 422:
+    // "expiryDate must be in YYYY-MM-DD format").
+    expiryDate: addDays(today, vendor.estimateValidDays || 7),
     businessDetails: {
       name: business.name || location?.name,
       logoUrl: business.logoUrl || location?.logoUrl,
