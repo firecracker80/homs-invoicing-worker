@@ -123,9 +123,10 @@ export function handleLogout() {
   });
 }
 
-// Services flow webhooks: bearer only, SERVICES_WEBHOOK_KEY only. Called by a
-// vendor's GHL workflows (custom webhook action with an Authorization header),
-// never by a browser -- so neither ADMIN_KEY nor the cookie is accepted.
+// Services flow webhooks: SERVICES_WEBHOOK_KEY only, never ADMIN_KEY or the cookie.
+// Accepted as a bearer token or in X-Services-Key. The custom header exists
+// because GHL's Custom Webhook in a Service Request workflow did not deliver an
+// Authorization header, typed or via its Bearer option (live 401s, 2026-09-15).
 export async function requireServices(request, env) {
   if (!env.SERVICES_WEBHOOK_KEY) {
     return Response.json(
@@ -133,8 +134,8 @@ export async function requireServices(request, env) {
       { status: 500 }
     );
   }
-  const supplied = bearerFrom(request);
-  if (!supplied) return unauthorized("Bearer token required");
+  const supplied = bearerFrom(request) || (request.headers.get("X-Services-Key") || "").trim() || null;
+  if (!supplied) return unauthorized("Bearer token or X-Services-Key required");
   if (!(await secureEquals(supplied, env.SERVICES_WEBHOOK_KEY))) return unauthorized("Invalid credentials");
   return null;
 }
