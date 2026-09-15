@@ -238,3 +238,15 @@ export async function sendInvoice(pit, locationId, invoiceId, { userId, action, 
     liveMode,
   });
 }
+
+// Contact task, assigned to a user. Tasks can only be assigned to users, not contacts.
+export async function createContactTask(pit, contactId, { title, body, dueDate, assignedTo }) {
+  const res = await ghlRequest(pit, "POST", `/contacts/${contactId}/tasks`, {
+    title,
+    body,
+    dueDate,
+    completed: false,
+    assignedTo,
+  });
+  return res.task || res;
+}

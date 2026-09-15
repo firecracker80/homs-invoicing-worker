@@ -9,10 +9,19 @@
 //   POST /api/services/invoice   { vendorLocationId, serviceRequestId }
 //     Invoice from the accepted estimate, plus one line for any additional
 //     services added on site, then send it.
+//   POST /api/services/accepted  { vendorLocationId, estimateId | contactId }
+//     Estimate accepted: status aceptado, task to the vendor's dispatch user.
+//   POST /api/services/paid      { vendorLocationId, invoiceId | contactId }
+//     Invoice paid: status pagado.
 //   POST /api/services/sync      { vendorLocationId, serviceRequestId }
 //     For requests that came from a HOMS client: create or update the mirror
 //     record in the client's own account, and add an Expense on their property
 //     once the invoice is paid.
+//
+// Every stage also runs the client sync itself, so a workflow needs one webhook.
+// A stage can name its record by serviceRequestId, estimateId, invoiceId, or --
+// when a trigger exposes none of those -- contactId, which picks that contact's
+// newest request in the status the stage expects.
 //
 // Currency (decided 2026-09-15). A DR client books stays in USD/EUR but pays
 // services in DOP, and their DR accountant reconciles both. So the original
@@ -41,6 +50,7 @@ import {
   sendEstimate,
   createInvoiceFromEstimate,
   listContactInvoices,
+  createContactTask,
   getInvoice,
   updateInvoice,
   sendInvoice,
@@ -322,16 +332,16 @@ function errorResponse(err) {
   return fail(err.message || "Unknown error", status, err.body ? { ghl: err.body } : {});
 }
 
-async function loadVendorContext(request, env) {
+async function loadVendorContext(request, env, contactStatuses = null) {
   let body;
   try {
     body = await request.json();
   } catch {
     return { error: fail("Expected JSON body") };
   }
-  const { vendorLocationId, serviceRequestId } = body || {};
-  if (!vendorLocationId || !serviceRequestId) {
-    return { error: fail("vendorLocationId and serviceRequestId are required") };
+  const { vendorLocationId, serviceRequestId, estimateId, invoiceId, contactId } = body || {};
+  if (!vendorLocationId || !(serviceRequestId || estimateId || invoiceId || contactId)) {
+    return { error: fail("vendorLocationId and one of serviceRequestId, estimateId, invoiceId, contactId are required") };
   }
   const vendor = await getTenant(env, vendorLocationId);
   if (!vendor || vendor.kind !== "service_vendor") {
@@ -340,9 +350,41 @@ async function loadVendorContext(request, env) {
   const pit = resolvePit(env, vendor);
   if (!pit) return { error: fail(`Vendor ${vendorLocationId} has no usable ghlPitSecretName`, 500) };
   if (!vendor.currency) return { error: fail(`Vendor ${vendorLocationId} has no currency configured`, 500) };
-  const record = await getObjectRecord(pit, vendorLocationId, SERVICE_REQUEST_KEY, serviceRequestId);
-  if (!record) return { error: fail(`Service request ${serviceRequestId} not found`, 404) };
+  const record = await resolveServiceRequest(pit, vendorLocationId, body, contactStatuses);
+  if (!record) {
+    const by = serviceRequestId ? `id ${serviceRequestId}` : estimateId ? `estimate ${estimateId}` : invoiceId ? `invoice ${invoiceId}` : `contact ${contactId}`;
+    return { error: fail(`No service request found for ${by}`, 404) };
+  }
   return { vendor, vendorLocationId, pit, record, body };
+}
+
+// contactStatuses: which statuses a contact-only lookup may pick, newest first.
+async function resolveServiceRequest(pit, vendorLocationId, { serviceRequestId, estimateId, invoiceId, contactId }, contactStatuses) {
+  if (serviceRequestId) return getObjectRecord(pit, vendorLocationId, SERVICE_REQUEST_KEY, serviceRequestId);
+  if (estimateId || invoiceId) {
+    const all = await fetchAllObjectRecords(pit, vendorLocationId, SERVICE_REQUEST_KEY);
+    return all.find((r) => (estimateId && prop(r, "estimate_id") === estimateId) || (invoiceId && prop(r, "invoice_id") === invoiceId)) || null;
+  }
+  const [associations, relations] = await Promise.all([
+    fetchAssociations(pit, vendorLocationId),
+    fetchRecordRelations(pit, vendorLocationId, contactId),
+  ]);
+  const assoc = findAssociationId(associations, SERVICE_REQUEST_KEY, "contact");
+  if (!assoc) return null;
+  const ids = relations
+    .filter((r) => r.associationId === assoc.id)
+    .map((r) => (r.firstRecordId === contactId ? r.secondRecordId : r.firstRecordId));
+  const records = (await Promise.all(ids.map((id) => getObjectRecord(pit, vendorLocationId, SERVICE_REQUEST_KEY, id).catch(() => null)))).filter(Boolean);
+  const eligible = records
+    .filter((r) => !contactStatuses || contactStatuses.includes(prop(r, "request_status")))
+    .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
+  return eligible[0] || null;
+}
+
+async function withSync(env, ctx, stageBody) {
+  const fresh = await getObjectRecord(ctx.pit, ctx.vendorLocationId, SERVICE_REQUEST_KEY, ctx.record.id);
+  const res = await runSync(env, { ...ctx, record: fresh || ctx.record });
+  return Response.json({ ...stageBody, serviceRequestId: ctx.record.id, sync: await res.json() });
 }
 
 async function customerContactId(pit, vendorLocationId, recordId) {
@@ -361,7 +403,7 @@ async function customerContactId(pit, vendorLocationId, recordId) {
 
 export async function handleServiceEstimate(request, env) {
   try {
-    const ctx = await loadVendorContext(request, env);
+    const ctx = await loadVendorContext(request, env, ["solicitado"]);
     if (ctx.error) return ctx.error;
     const { vendor, vendorLocationId, pit, record } = ctx;
 
@@ -398,7 +440,7 @@ export async function handleServiceEstimate(request, env) {
     });
     await updateObjectRecord(pit, vendorLocationId, SERVICE_REQUEST_KEY, record.id, { request_status: "cotizado" });
 
-    return Response.json({ ok: true, estimateId, total: money(prop(record, "quoted_amount")), currency: vendor.currency });
+    return withSync(env, ctx, { ok: true, estimateId, total: money(prop(record, "quoted_amount")), currency: vendor.currency });
   } catch (err) {
     return errorResponse(err);
   }
@@ -406,7 +448,7 @@ export async function handleServiceEstimate(request, env) {
 
 export async function handleServiceInvoice(request, env) {
   try {
-    const ctx = await loadVendorContext(request, env);
+    const ctx = await loadVendorContext(request, env, ["aceptado", "programado", "en_proceso", "completado"]);
     if (ctx.error) return ctx.error;
     const { vendor, vendorLocationId, pit, record } = ctx;
 
@@ -449,7 +491,7 @@ export async function handleServiceInvoice(request, env) {
     await updateObjectRecord(pit, vendorLocationId, SERVICE_REQUEST_KEY, record.id, { request_status: "facturado" });
 
     const total = finalItems.reduce((s, i) => s + money(i.amount) * (Number(i.qty) || 1), 0);
-    return Response.json({ ok: true, invoiceId, total, currency: vendor.currency, lines: finalItems.length, reusedExisting });
+    return withSync(env, ctx, { ok: true, invoiceId, total, currency: vendor.currency, lines: finalItems.length, reusedExisting });
   } catch (err) {
     return errorResponse(err);
   }
@@ -459,6 +501,71 @@ export async function handleServiceSync(request, env) {
   try {
     const ctx = await loadVendorContext(request, env);
     if (ctx.error) return ctx.error;
+    return runSync(env, ctx);
+  } catch (err) {
+    return errorResponse(err);
+  }
+}
+
+// --- accepted / paid stages ----------------------------------------------------
+
+export async function handleServiceAccepted(request, env) {
+  try {
+    const ctx = await loadVendorContext(request, env, ["cotizado"]);
+    if (ctx.error) return ctx.error;
+    const { vendor, vendorLocationId, pit, record } = ctx;
+    if (!prop(record, "estimate_id")) return fail("Service request has no estimate -- nothing was accepted", 422);
+    // A late or repeated acceptance webhook must never pull a job that has moved on back to aceptado.
+    const status = prop(record, "request_status");
+    if (!["cotizado", "aceptado"].includes(status)) {
+      return Response.json({ ok: true, skipped: "not_awaiting_acceptance", status, serviceRequestId: record.id });
+    }
+
+    const existingTask = prop(record, "task_id");
+    if (existingTask) return withSync(env, ctx, { ok: true, skipped: "task_already_created", taskId: existingTask });
+    if (!vendor.dispatchUserId) return fail("Vendor has no dispatchUserId (tasks can only go to a user)", 500);
+
+    const contactId = await customerContactId(pit, vendorLocationId, record.id);
+    if (!contactId) return fail("Service request is not linked to a customer contact", 422);
+
+    const title = `Servicio: ${prop(record, "service_item")}`;
+    const body = [
+      prop(record, "job_address") && `Dirección: ${prop(record, "job_address")}`,
+      prop(record, "urgency") && `Urgencia: ${prop(record, "urgency")}`,
+      prop(record, "job_description"),
+      `Solicitud ${record.id}`,
+    ].filter(Boolean).join("\n");
+    // Scheduled date if set, else next day; 13:00 UTC is 9:00 in Santo Domingo.
+    const day = dateOnly(prop(record, "scheduled_date")) || addDays(dateOnly(new Date().toISOString()), 1);
+    const task = await createContactTask(pit, contactId, { title, body, dueDate: `${day}T13:00:00Z`, assignedTo: vendor.dispatchUserId });
+    const taskId = task?.id || task?._id;
+    await updateObjectRecord(pit, vendorLocationId, SERVICE_REQUEST_KEY, record.id, {
+      request_status: "aceptado",
+      ...(taskId ? { task_id: taskId } : {}),
+    });
+    return withSync(env, ctx, { ok: true, taskId, dueDate: day });
+  } catch (err) {
+    return errorResponse(err);
+  }
+}
+
+export async function handleServicePaid(request, env) {
+  try {
+    const ctx = await loadVendorContext(request, env, ["facturado"]);
+    if (ctx.error) return ctx.error;
+    const { vendorLocationId, pit, record } = ctx;
+    if (!prop(record, "invoice_id")) return fail("Service request has no invoice -- nothing was paid", 422);
+    if (prop(record, "request_status") !== "pagado") {
+      await updateObjectRecord(pit, vendorLocationId, SERVICE_REQUEST_KEY, record.id, { request_status: "pagado" });
+    }
+    return withSync(env, ctx, { ok: true, status: "pagado" });
+  } catch (err) {
+    return errorResponse(err);
+  }
+}
+
+async function runSync(env, ctx) {
+  try {
     const { vendor, vendorLocationId, pit, record } = ctx;
 
     if (prop(record, "request_source") !== "cliente_homs") {
@@ -487,7 +594,6 @@ export async function handleServiceSync(request, env) {
     const properties = buildClientProperties({ record, vendorLabel: vendor.label, currency: vendorCurrency, invoiceTotal });
     const mirrors = await fetchAllObjectRecords(clientPit, clientLocationId, SERVICE_REQUEST_KEY);
     const mirror = mirrors.find((m) => m.properties?.vendor_request_id === record.id);
-    const previousStatus = mirror?.properties?.request_status || null;
 
     let mirrorId;
     const links = {};
@@ -515,11 +621,19 @@ export async function handleServiceSync(request, env) {
       }
     }
 
-    // Expense and conversion only on the transition into paid, so repeated
+    // Expense and conversion happen once per paid request, so repeated
     // syncs never duplicate the Expense or re-rate it on a later day.
     let expense = { created: false };
     let conversion = { applied: false, mode: settings.mode };
-    if (properties.request_status === "paid" && previousStatus !== "paid") {
+    // Keyed on the Expense itself, not on a status change: a request whose
+    // status bounces (paid -> requested -> paid) must still never get two.
+    let existingExpense = null;
+    if (properties.request_status === "paid") {
+      const expenses = await fetchAllObjectRecords(clientPit, clientLocationId, EXPENSE_KEY);
+      existingExpense = expenses.find((e) => e.properties?.line_item_description === `Service request ${record.id}`) || null;
+      if (existingExpense) expense = { created: false, reason: "already recorded", id: existingExpense.id };
+    }
+    if (properties.request_status === "paid" && !existingExpense) {
       const paidDate = paidOn || dateOnly(new Date().toISOString());
       let converted = null;
       if (settings.mode === "convert") {
