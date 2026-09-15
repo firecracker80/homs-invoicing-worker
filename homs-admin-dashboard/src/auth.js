@@ -122,3 +122,19 @@ export function handleLogout() {
     },
   });
 }
+
+// Services flow webhooks: bearer only, SERVICES_WEBHOOK_KEY only. Called by a
+// vendor's GHL workflows (custom webhook action with an Authorization header),
+// never by a browser -- so neither ADMIN_KEY nor the cookie is accepted.
+export async function requireServices(request, env) {
+  if (!env.SERVICES_WEBHOOK_KEY) {
+    return Response.json(
+      { error: "Server misconfigured: SERVICES_WEBHOOK_KEY secret is not set" },
+      { status: 500 }
+    );
+  }
+  const supplied = bearerFrom(request);
+  if (!supplied) return unauthorized("Bearer token required");
+  if (!(await secureEquals(supplied, env.SERVICES_WEBHOOK_KEY))) return unauthorized("Invalid credentials");
+  return null;
+}

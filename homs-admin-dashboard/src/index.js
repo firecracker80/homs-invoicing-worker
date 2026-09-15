@@ -10,9 +10,10 @@ import {
   resolveJoins,
 } from "./normalize.js";
 import { getTenant, resolvePit } from "./tenants.js";
-import { requireAdmin, requireProvision, handleLogin, handleLogout } from "./auth.js";
+import { requireAdmin, requireProvision, requireServices, handleLogin, handleLogout } from "./auth.js";
 import { provision } from "./provision.js";
 import { handleVendorData } from "./vendor.js";
+import { handleServiceEstimate, handleServiceInvoice, handleServiceSync } from "./services.js";
 
 // Yari's own default accent color -- used whenever a tenant's KV entry has no
 // `branding.primary` set. Sampled directly from the HOMS logo's keyhole ("O"),
@@ -186,6 +187,18 @@ export default {
       const denied = await requireProvision(request, env);
       if (denied) return denied;
       return handleProvision(request, env);
+    }
+
+    // Services flow: called by a vendor's GHL workflows, gated by SERVICES_WEBHOOK_KEY.
+    const serviceRoutes = {
+      "/api/services/estimate": handleServiceEstimate,
+      "/api/services/invoice": handleServiceInvoice,
+      "/api/services/sync": handleServiceSync,
+    };
+    if (serviceRoutes[url.pathname] && request.method === "POST") {
+      const denied = await requireServices(request, env);
+      if (denied) return denied;
+      return serviceRoutes[url.pathname](request, env);
     }
 
     // Every remaining /api/* route requires dashboard auth. Default-deny: a new
