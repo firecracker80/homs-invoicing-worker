@@ -19,6 +19,10 @@
 //     once the invoice is paid.
 //
 // Every stage also runs the client sync itself, so a workflow needs one webhook.
+// Service Request-based workflows expose no record ID merge tag (checked in RL
+// Santana 2026-09-15), so estimate and invoice also accept { pending: true }:
+// process every request waiting at that stage, touched in the last
+// vendor.sweepDays (default 14). Each request is still handled at most once.
 // A stage can name its record by serviceRequestId, estimateId, invoiceId, or --
 // when a trigger exposes none of those -- contactId, which picks that contact's
 // newest request in the status the stage expects.
@@ -340,8 +344,9 @@ async function loadVendorContext(request, env, contactStatuses = null) {
     return { error: fail("Expected JSON body") };
   }
   const { vendorLocationId, serviceRequestId, estimateId, invoiceId, contactId } = body || {};
-  if (!vendorLocationId || !(serviceRequestId || estimateId || invoiceId || contactId)) {
-    return { error: fail("vendorLocationId and one of serviceRequestId, estimateId, invoiceId, contactId are required") };
+  const pending = body?.pending === true && !(serviceRequestId || estimateId || invoiceId || contactId);
+  if (!vendorLocationId || !(serviceRequestId || estimateId || invoiceId || contactId || pending)) {
+    return { error: fail("vendorLocationId and one of serviceRequestId, estimateId, invoiceId, contactId, pending are required") };
   }
   const vendor = await getTenant(env, vendorLocationId);
   if (!vendor || vendor.kind !== "service_vendor") {
@@ -350,6 +355,7 @@ async function loadVendorContext(request, env, contactStatuses = null) {
   const pit = resolvePit(env, vendor);
   if (!pit) return { error: fail(`Vendor ${vendorLocationId} has no usable ghlPitSecretName`, 500) };
   if (!vendor.currency) return { error: fail(`Vendor ${vendorLocationId} has no currency configured`, 500) };
+  if (pending) return { vendor, vendorLocationId, pit, record: null, body, pending: true };
   const record = await resolveServiceRequest(pit, vendorLocationId, body, contactStatuses);
   if (!record) {
     const by = serviceRequestId ? `id ${serviceRequestId}` : estimateId ? `estimate ${estimateId}` : invoiceId ? `invoice ${invoiceId}` : `contact ${contactId}`;
@@ -381,6 +387,27 @@ async function resolveServiceRequest(pit, vendorLocationId, { serviceRequestId, 
   return eligible[0] || null;
 }
 
+export const isAwaitingEstimate = (r) =>
+  prop(r, "request_status") === "solicitado" && !prop(r, "estimate_id") && money(prop(r, "quoted_amount")) > 0;
+export const isAwaitingInvoice = (r) =>
+  prop(r, "request_status") === "completado" && prop(r, "estimate_id") && !prop(r, "invoice_id");
+
+async function sweep(env, ctx, isWaiting, one) {
+  const days = Number(ctx.vendor.sweepDays) || 14;
+  const since = Date.now() - days * 86400000;
+  const all = await fetchAllObjectRecords(ctx.pit, ctx.vendorLocationId, SERVICE_REQUEST_KEY);
+  const waiting = all.filter((r) => {
+    const touched = Date.parse(r.updatedAt || r.createdAt || "");
+    return isWaiting(r) && (Number.isNaN(touched) || touched >= since);
+  });
+  const results = [];
+  for (const record of waiting) {
+    const res = await one(env, { ...ctx, record, pending: false });
+    results.push({ serviceRequestId: record.id, status: res.status, ...(await res.json()) });
+  }
+  return Response.json({ ok: results.every((r) => r.ok !== false), pending: true, processed: results.length, results });
+}
+
 async function withSync(env, ctx, stageBody) {
   const fresh = await getObjectRecord(ctx.pit, ctx.vendorLocationId, SERVICE_REQUEST_KEY, ctx.record.id);
   const res = await runSync(env, { ...ctx, record: fresh || ctx.record });
@@ -405,6 +432,15 @@ export async function handleServiceEstimate(request, env) {
   try {
     const ctx = await loadVendorContext(request, env, ["solicitado"]);
     if (ctx.error) return ctx.error;
+    if (ctx.pending) return sweep(env, ctx, isAwaitingEstimate, estimateOne);
+    return estimateOne(env, ctx);
+  } catch (err) {
+    return errorResponse(err);
+  }
+}
+
+async function estimateOne(env, ctx) {
+  try {
     const { vendor, vendorLocationId, pit, record } = ctx;
 
     const existing = prop(record, "estimate_id");
@@ -450,6 +486,15 @@ export async function handleServiceInvoice(request, env) {
   try {
     const ctx = await loadVendorContext(request, env, ["aceptado", "programado", "en_proceso", "completado"]);
     if (ctx.error) return ctx.error;
+    if (ctx.pending) return sweep(env, ctx, isAwaitingInvoice, invoiceOne);
+    return invoiceOne(env, ctx);
+  } catch (err) {
+    return errorResponse(err);
+  }
+}
+
+async function invoiceOne(env, ctx) {
+  try {
     const { vendor, vendorLocationId, pit, record } = ctx;
 
     const existing = prop(record, "invoice_id");

@@ -498,6 +498,42 @@ const expensesOf = () => Object.values(ghl.db.records[`${CLIENT}|custom_objects.
   console.log("13) Contact fallback only picks a request in the stage's status; unknown estimate -> 404; no identifier -> 400");
 }
 
+// ---- 14. pending sweeps: no record ID needed ----
+{
+  ghl = makeGhl();
+  const env = baseEnv(null);
+  setClient("USD", "DOP only");
+  const now = new Date().toISOString();
+  const old = new Date(Date.now() - 30 * 86400000).toISOString();
+  const add = (id, props, createdAt = now) => {
+    ghl.db.records[`${VENDOR}|${SR}`][id] = { id, createdAt, updatedAt: createdAt, properties: props };
+    ghl.db.relations.push({ associationId: "a-sr-contact", firstRecordId: "contact9", secondRecordId: id });
+  };
+  add("ready", homsReq());
+  add("noPrice", homsReq({ quoted_amount: null }));
+  add("quoted", homsReq({ request_status: "cotizado", estimate_id: "e-x" }));
+  add("stale", homsReq(), old);
+  const sweep = async () => (await call(env, "/api/services/estimate", { vendorLocationId: VENDOR, pending: true })).json();
+  const out = await sweep();
+  assert.equal(out.processed, 1, JSON.stringify(out));
+  assert.equal(out.results[0].serviceRequestId, "ready", "only a fresh, priced, unquoted solicitado request is estimated");
+  assert.equal(Object.keys(ghl.db.estimates).length, 1);
+  assert.equal((await sweep()).processed, 0, "second sweep finds nothing left to do");
+  assert.equal(Object.keys(ghl.db.estimates).length, 1);
+
+  const recs = ghl.db.records[`${VENDOR}|${SR}`];
+  recs.ready.properties.request_status = "completado";
+  recs.ready.properties.additional_amount = { value: 25, currency: "default" };
+  const inv = await (await call(env, "/api/services/invoice", { vendorLocationId: VENDOR, pending: true })).json();
+  assert.equal(inv.processed, 1, JSON.stringify(inv));
+  assert.equal(inv.results[0].total, 3525);
+  const inv2 = await (await call(env, "/api/services/invoice", { vendorLocationId: VENDOR, pending: true })).json();
+  assert.equal(inv2.processed, 0);
+  assert.equal(Object.keys(ghl.db.invoices).length, 1);
+  assert.equal((await call(env, "/api/services/estimate", { vendorLocationId: VENDOR, pending: "yes" })).status, 400, "pending must be exactly true");
+  console.log("14) Pending sweeps: estimate picks only fresh priced solicitado requests, invoice only completado ones; repeat sweeps do nothing");
+}
+
 // ---- 10. existing dashboard routes still gated --------------------------------------
 {
   const res = await worker.fetch(new Request("https://w.dev/api/data?locationId=x"), baseEnv("DOP"));
