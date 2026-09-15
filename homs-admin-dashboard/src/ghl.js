@@ -142,3 +142,99 @@ export async function fetchTransactions(pit, locationId, { limit = 100 } = {}) {
   const res = await ghlRequest(pit, "GET", `/payments/transactions?${qs}`);
   return res.data || [];
 }
+
+// --- Services flow (src/services.js) -----------------------------------------
+// Record/contact/estimate/invoice calls against a service vendor's own account
+// (RL Santana first). Shapes checked against describe_operation 2026-09-14.
+
+export async function getObjectRecord(pit, locationId, objectKey, recordId) {
+  const res = await ghlRequest(
+    pit,
+    "GET",
+    `/objects/${objectKey}/records/${recordId}?locationId=${encodeURIComponent(locationId)}`
+  );
+  return res.record || null;
+}
+
+// Update bodies reject locationId (422 "property locationId should not exist"),
+// so it travels in the query string instead.
+export async function updateObjectRecord(pit, locationId, objectKey, recordId, properties) {
+  const res = await ghlRequest(
+    pit,
+    "PUT",
+    `/objects/${objectKey}/records/${recordId}?locationId=${encodeURIComponent(locationId)}`,
+    { properties }
+  );
+  return res.record || null;
+}
+
+export async function fetchRecordRelations(pit, locationId, recordId) {
+  const qs = new URLSearchParams({ locationId, limit: "100", skip: "0" });
+  const res = await ghlRequest(pit, "GET", `/associations/relations/${recordId}?${qs}`);
+  return res.relations || [];
+}
+
+export async function getContact(pit, contactId) {
+  const res = await ghlRequest(pit, "GET", `/contacts/${contactId}`);
+  return res.contact || null;
+}
+
+export async function getLocation(pit, locationId) {
+  const res = await ghlRequest(pit, "GET", `/locations/${locationId}`);
+  return res.location || null;
+}
+
+export async function createEstimate(pit, body) {
+  return ghlRequest(pit, "POST", "/invoices/estimate", body);
+}
+
+export async function sendEstimate(pit, locationId, estimateId, { userId, action, liveMode }) {
+  return ghlRequest(pit, "POST", `/invoices/estimate/${estimateId}/send`, {
+    altId: locationId,
+    altType: "location",
+    userId,
+    action,
+    liveMode,
+  });
+}
+
+export async function createInvoiceFromEstimate(pit, locationId, estimateId) {
+  const res = await ghlRequest(pit, "POST", `/invoices/estimate/${estimateId}/invoice`, {
+    altId: locationId,
+    altType: "location",
+    markAsInvoiced: true,
+  });
+  // Live, the response carried no `invoice` key even though the invoice was
+  // created (2026-09-15) -- return the raw body; callers find the invoice by
+  // its sourceId instead of trusting this shape.
+  return res;
+}
+
+// Invoices for one contact, newest first as GHL returns them. Used to find the
+// invoice an estimate produced: it carries source "estimate" + sourceId.
+export async function listContactInvoices(pit, locationId, contactId, { limit = 50 } = {}) {
+  const qs = new URLSearchParams({ altId: locationId, altType: "location", contactId, limit: String(limit), offset: "0" });
+  const res = await ghlRequest(pit, "GET", `/invoices/?${qs}`);
+  return res.invoices || [];
+}
+
+// altId is required at runtime on every invoices/* call even where the schema
+// omits it -- a missing altId comes back as a misleading 401.
+export async function getInvoice(pit, locationId, invoiceId) {
+  const qs = new URLSearchParams({ altId: locationId, altType: "location" });
+  return ghlRequest(pit, "GET", `/invoices/${invoiceId}?${qs}`);
+}
+
+export async function updateInvoice(pit, invoiceId, body) {
+  return ghlRequest(pit, "PUT", `/invoices/${invoiceId}`, body);
+}
+
+export async function sendInvoice(pit, locationId, invoiceId, { userId, action, liveMode }) {
+  return ghlRequest(pit, "POST", `/invoices/${invoiceId}/send`, {
+    altId: locationId,
+    altType: "location",
+    userId,
+    action,
+    liveMode,
+  });
+}
