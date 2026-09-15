@@ -88,6 +88,12 @@ function makeGhl() {
     if ((m = path.match(/^\/locations\/([^/]+)\/customValues$/))) {
       return json(200, { customValues: db.customValues[m[1]] || [] });
     }
+    if ((m = path.match(/^\/contacts\/([^/]+)\/tasks$/)) && method === "POST") {
+      const tid = id("task");
+      db.tasks = db.tasks || [];
+      db.tasks.push({ id: tid, contactId: m[1], ...body });
+      return json(201, { task: { id: tid, ...body } });
+    }
     if ((m = path.match(/^\/contacts\/([^/]+)$/))) {
       return json(200, { contact: { id: m[1], firstName: "Ana", lastName: "Reyes", phone: "8095551234", email: "ana@example.com" } });
     }
@@ -418,6 +424,114 @@ const expensesOf = () => Object.values(ghl.db.records[`${CLIENT}|custom_objects.
   assert.match(same.conversion.reason, /same currency/);
   assert.equal(same.links.property, null, "no confident property match -> unlinked, not guessed");
   console.log("9) Convert client edge cases: rate unavailable, WCurrency unset, same currency -> DOP Expense still recorded, reason reported; unmatched property left unlinked");
+}
+
+// ---- 12. stages by estimateId / invoiceId / contactId, each with its own sync ----
+{
+  ghl = makeGhl();
+  const env = baseEnv(null);
+  setClient("USD", "DOP only");
+  seedRequest(homsReq());
+
+  const est = await (await call(env, "/api/services/estimate", payload)).json();
+  assert.equal(est.ok, true);
+  assert.equal(est.sync.action, "created", "estimate stage syncs the client copy itself");
+
+  const estimateId = vendorRec().properties.estimate_id;
+  const acc = await (await call(env, "/api/services/accepted", { vendorLocationId: VENDOR, estimateId })).json();
+  assert.equal(acc.ok, true, JSON.stringify(acc));
+  assert.equal(acc.serviceRequestId, "sr1", "record found from the estimate id");
+  assert.equal(vendorRec().properties.request_status, "aceptado");
+  assert.equal(ghl.db.tasks.length, 1);
+  const task = ghl.db.tasks[0];
+  assert.equal(task.contactId, "contact9");
+  assert.equal(task.assignedTo, "vo55Cl20aQZy7Blgr6xd", "task goes to the vendor's dispatch user");
+  assert.match(task.title, /Mantenimiento A\/C/);
+  assert.match(task.body, /Villa Marisol/);
+  assert.match(task.dueDate, /T13:00:00Z$/);
+  assert.equal(vendorRec().properties.task_id, task.id);
+  const acc2 = await (await call(env, "/api/services/accepted", { vendorLocationId: VENDOR, estimateId })).json();
+  assert.equal(acc2.skipped, "task_already_created");
+  assert.equal(ghl.db.tasks.length, 1, "accepted twice -> still one task");
+
+  vendorRec().properties.request_status = "completado";
+  const inv = await (await call(env, "/api/services/invoice", { vendorLocationId: VENDOR, contactId: "contact9" })).json();
+  assert.equal(inv.ok, true, JSON.stringify(inv));
+  assert.equal(inv.serviceRequestId, "sr1", "contact fallback picks the job in progress");
+
+  const invoiceId = vendorRec().properties.invoice_id;
+  const paid = await (await call(env, "/api/services/paid", { vendorLocationId: VENDOR, invoiceId })).json();
+  assert.equal(paid.ok, true, JSON.stringify(paid));
+  assert.equal(vendorRec().properties.request_status, "pagado");
+  assert.equal(paid.sync.status, "paid");
+  assert.equal(paid.sync.expense.created, true, "paid stage creates the client expense through its own sync");
+  const paid2 = await (await call(env, "/api/services/paid", { vendorLocationId: VENDOR, invoiceId })).json();
+  assert.equal(paid2.sync.expense.created, false);
+  assert.equal(expensesOf().length, 1);
+  // Status bounce (seen live 2026-09-15): mirror pulled back to requested, then paid again.
+  Object.values(ghl.db.records[`${CLIENT}|${SR}`])[0].properties.request_status = "requested";
+  const bounced = await (await call(env, "/api/services/sync", { vendorLocationId: VENDOR, serviceRequestId: "sr1" })).json();
+  assert.equal(bounced.expense.created, false, JSON.stringify(bounced.expense));
+  assert.equal(bounced.expense.reason, "already recorded");
+  assert.equal(expensesOf().length, 1, "a paid -> requested -> paid bounce never creates a second Expense");
+  console.log("12) Stages: estimate syncs; accepted by estimateId -> aceptado + one task to Rogelio (idempotent); invoice by contactId; paid by invoiceId -> pagado + one Expense");
+}
+
+// ---- 13. contact fallback respects the stage's status, and unknown ids 404 ----
+{
+  ghl = makeGhl();
+  const env = baseEnv(null);
+  seedRequest(homsReq({ request_status: "pagado", estimate_id: "old-est", invoice_id: "old-inv" }));
+  const newer = { id: "sr2", createdAt: "2026-09-16T12:00:00.000Z", properties: homsReq({ request_status: "cotizado", estimate_id: "new-est" }) };
+  ghl.db.records[`${VENDOR}|${SR}`].sr2 = newer;
+  ghl.db.relations.push({ associationId: "a-sr-contact", firstRecordId: "contact9", secondRecordId: "sr2" });
+
+  const acc = await (await call(env, "/api/services/accepted", { vendorLocationId: VENDOR, contactId: "contact9" })).json();
+  assert.equal(acc.serviceRequestId, "sr2", "a paid job is never picked for an acceptance");
+  const none = await call(env, "/api/services/paid", { vendorLocationId: VENDOR, contactId: "contact9" });
+  assert.equal(none.status, 404, "no facturado request for this contact -> 404, nothing touched");
+  assert.equal((await call(env, "/api/services/accepted", { vendorLocationId: VENDOR, estimateId: "nope" })).status, 404);
+  const late = await (await call(env, "/api/services/accepted", { vendorLocationId: VENDOR, estimateId: "old-est" })).json();
+  assert.equal(late.skipped, "not_awaiting_acceptance", "an acceptance for a paid job changes nothing");
+  assert.equal(ghl.db.records[`${VENDOR}|${SR}`].sr1.properties.request_status, "pagado");
+  assert.equal((await call(env, "/api/services/accepted", { vendorLocationId: VENDOR })).status, 400);
+  console.log("13) Contact fallback only picks a request in the stage's status; unknown estimate -> 404; no identifier -> 400");
+}
+
+// ---- 14. pending sweeps: no record ID needed ----
+{
+  ghl = makeGhl();
+  const env = baseEnv(null);
+  setClient("USD", "DOP only");
+  const now = new Date().toISOString();
+  const old = new Date(Date.now() - 30 * 86400000).toISOString();
+  const add = (id, props, createdAt = now) => {
+    ghl.db.records[`${VENDOR}|${SR}`][id] = { id, createdAt, updatedAt: createdAt, properties: props };
+    ghl.db.relations.push({ associationId: "a-sr-contact", firstRecordId: "contact9", secondRecordId: id });
+  };
+  add("ready", homsReq());
+  add("noPrice", homsReq({ quoted_amount: null }));
+  add("quoted", homsReq({ request_status: "cotizado", estimate_id: "e-x" }));
+  add("stale", homsReq(), old);
+  const sweep = async () => (await call(env, "/api/services/estimate", { vendorLocationId: VENDOR, pending: true })).json();
+  const out = await sweep();
+  assert.equal(out.processed, 1, JSON.stringify(out));
+  assert.equal(out.results[0].serviceRequestId, "ready", "only a fresh, priced, unquoted solicitado request is estimated");
+  assert.equal(Object.keys(ghl.db.estimates).length, 1);
+  assert.equal((await sweep()).processed, 0, "second sweep finds nothing left to do");
+  assert.equal(Object.keys(ghl.db.estimates).length, 1);
+
+  const recs = ghl.db.records[`${VENDOR}|${SR}`];
+  recs.ready.properties.request_status = "completado";
+  recs.ready.properties.additional_amount = { value: 25, currency: "default" };
+  const inv = await (await call(env, "/api/services/invoice", { vendorLocationId: VENDOR, pending: true })).json();
+  assert.equal(inv.processed, 1, JSON.stringify(inv));
+  assert.equal(inv.results[0].total, 3525);
+  const inv2 = await (await call(env, "/api/services/invoice", { vendorLocationId: VENDOR, pending: true })).json();
+  assert.equal(inv2.processed, 0);
+  assert.equal(Object.keys(ghl.db.invoices).length, 1);
+  assert.equal((await call(env, "/api/services/estimate", { vendorLocationId: VENDOR, pending: "yes" })).status, 400, "pending must be exactly true");
+  console.log("14) Pending sweeps: estimate picks only fresh priced solicitado requests, invoice only completado ones; repeat sweeps do nothing");
 }
 
 // ---- 10. existing dashboard routes still gated --------------------------------------

@@ -13,7 +13,7 @@ import { getTenant, resolvePit } from "./tenants.js";
 import { requireAdmin, requireProvision, requireServices, handleLogin, handleLogout } from "./auth.js";
 import { provision } from "./provision.js";
 import { handleVendorData } from "./vendor.js";
-import { handleServiceEstimate, handleServiceInvoice, handleServiceSync, readClientCurrencySettings } from "./services.js";
+import { handleServiceEstimate, handleServiceInvoice, handleServiceSync, handleServiceAccepted, handleServicePaid, readClientCurrencySettings } from "./services.js";
 
 // Yari's own default accent color -- used whenever a tenant's KV entry has no
 // `branding.primary` set. Sampled directly from the HOMS logo's keyhole ("O"),
@@ -197,7 +197,9 @@ export default {
     // Services flow: called by a vendor's GHL workflows, gated by SERVICES_WEBHOOK_KEY.
     const serviceRoutes = {
       "/api/services/estimate": handleServiceEstimate,
+      "/api/services/accepted": handleServiceAccepted,
       "/api/services/invoice": handleServiceInvoice,
+      "/api/services/paid": handleServicePaid,
       "/api/services/sync": handleServiceSync,
     };
     if (serviceRoutes[url.pathname] && request.method === "POST") {
