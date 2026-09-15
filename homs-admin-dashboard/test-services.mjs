@@ -190,6 +190,10 @@ const payload = { vendorLocationId: VENDOR, serviceRequestId: "sr1" };
   const env = baseEnv("DOP");
   assert.equal((await call(env, "/api/services/estimate", payload, null)).status, 401);
   assert.equal((await call(env, "/api/services/estimate", payload, "admin")).status, 401, "ADMIN_KEY must not open service webhooks");
+  const viaHeader = (key) => worker.fetch(new Request("https://w.dev/api/services/estimate", { method: "POST", headers: { "Content-Type": "application/json", "X-Services-Key": key }, body: JSON.stringify({ vendorLocationId: VENDOR, pending: true }) }), env);
+  assert.equal((await viaHeader("svc-key")).status, 200, "X-Services-Key header is accepted");
+  assert.equal((await viaHeader(" svc-key ")).status, 200, "surrounding whitespace from a pasted value is tolerated");
+  assert.equal((await viaHeader("admin")).status, 401, "X-Services-Key still rejects any other key");
   assert.equal((await call({ ...env, SERVICES_WEBHOOK_KEY: undefined }, "/api/services/estimate", payload)).status, 500, "fails closed without the secret");
   console.log("1) Service webhooks: no key / admin key -> 401, unset secret -> 500");
 }
