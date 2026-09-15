@@ -29,6 +29,14 @@ function makeGhl() {
     estimates: {},
     invoices: {},
     calls: [],
+    customValues: {
+      [CLIENT]: [
+        { fieldKey: "{{ custom_values.wcurrency }}", value: "USD" },
+        { fieldKey: "{{ custom_values.wservice_cost_currency }}", value: "DOP only" },
+      ],
+    },
+    rates: { dop: { usd: 0.016925833, eur: 0.014631939 } },
+    rateFail: false,
     seq: 0,
   };
   const id = (p) => `${p}${++db.seq}`;
@@ -36,6 +44,12 @@ function makeGhl() {
 
   const handler = async (url, init = {}) => {
     const u = new URL(url);
+    if (u.hostname === "cdn.jsdelivr.net" || u.hostname.endsWith("currency-api.pages.dev")) {
+      db.calls.push({ method: "GET", path: "rate:" + url });
+      const m2 = u.pathname.match(/currencies\/([a-z]+)\.json$/);
+      if (db.rateFail || !m2 || !db.rates[m2[1]]) return { ok: false, status: 404, json: async () => ({}) };
+      return { ok: true, status: 200, json: async () => ({ [m2[1]]: db.rates[m2[1]] }) };
+    }
     const method = init.method || "GET";
     const body = init.body ? JSON.parse(init.body) : null;
     const path = u.pathname;
@@ -68,6 +82,11 @@ function makeGhl() {
     if (path === "/associations/relations" && method === "POST") {
       db.relations.push(body);
       return json(201, body);
+    }
+    if (path === "/contacts/search" && method === "POST") return json(200, { contacts: [] });
+    if (db.customValuesFail && path.endsWith("/customValues")) return json(500, { message: "boom" });
+    if ((m = path.match(/^\/locations\/([^/]+)\/customValues$/))) {
+      return json(200, { customValues: db.customValues[m[1]] || [] });
     }
     if ((m = path.match(/^\/contacts\/([^/]+)$/))) {
       return json(200, { contact: { id: m[1], firstName: "Ana", lastName: "Reyes", phone: "8095551234", email: "ana@example.com" } });
@@ -252,11 +271,23 @@ const payload = { vendorLocationId: VENDOR, serviceRequestId: "sr1" };
   console.log("6) Sync ignores the vendor's own (direct) customers");
 }
 
-// ---- 7. sync lifecycle, same currency: create -> update -> paid (expense once) ----
+// helper: run a HOMS-client request through estimate -> invoice -> paid
+async function throughToPaid(env, { paidAt = "2026-09-14T15:30:00.000Z" } = {}) {
+  await call(env, "/api/services/estimate", payload);
+  await call(env, "/api/services/invoice", payload);
+  ghl.db.invoices[vendorRec().properties.invoice_id].lastPaidAt = paidAt;
+  vendorRec().properties.request_status = "pagado";
+}
+const homsReq = (extra = {}) => ({ service_item: "Mantenimiento A/C", quoted_amount: { value: 3500, currency: "default" }, request_status: "solicitado", request_source: "cliente_homs", homs_client: CLIENT, job_address: "Villa Marisol, Las Terrenas", category: "aire_acondicionado", job_description: "Sala", ...extra });
+const setClient = (currency, mode) => { ghl.db.customValues[CLIENT] = [{ fieldKey: "{{ custom_values.wcurrency }}", value: currency }, { fieldKey: "{{ custom_values.wservice_cost_currency }}", value: mode }]; };
+const expensesOf = () => Object.values(ghl.db.records[`${CLIENT}|custom_objects.expenses`]);
+
+// ---- 7. sync lifecycle, DOP-only client: create -> update -> paid (one DOP expense) ----
 {
   ghl = makeGhl();
-  const env = baseEnv("DOP");
-  seedRequest({ service_item: "Mantenimiento A/C", quoted_amount: { value: 3500, currency: "default" }, request_status: "solicitado", request_source: "cliente_homs", homs_client: CLIENT, job_address: "Villa Marisol, Las Terrenas", category: "aire_acondicionado", job_description: "Sala" });
+  const env = baseEnv(null);
+  setClient("USD", "DOP only");
+  seedRequest(homsReq());
   const first = await (await call(env, "/api/services/sync", payload)).json();
   assert.equal(first.action, "created");
   const mirrors = ghl.db.records[`${CLIENT}|${SR}`];
@@ -264,52 +295,114 @@ const payload = { vendorLocationId: VENDOR, serviceRequestId: "sr1" };
   assert.equal(mirror.properties.vendor_request_id, "sr1");
   assert.equal(mirror.properties.category, "air_conditioning");
   assert.equal(mirror.properties.request_status, "requested");
-  assert.equal(mirror.properties.quoted_amount.value, 3500);
+  assert.equal(mirror.properties.currency, "dop", "original currency is recorded on the mirror");
+  assert.equal(mirror.properties.quoted_amount.value, 3500, "original amount always crosses, even into a USD account");
   assert.equal(first.links.property, "prop1");
   assert.ok(ghl.db.relations.some((r) => r.associationId === "a-sr-prop" && r.firstRecordId === "prop1" && r.secondRecordId === first.mirrorId), "relation respects the association's stored direction");
 
-  await call(env, "/api/services/estimate", payload);
-  await call(env, "/api/services/invoice", payload);
-  vendorRec().properties.request_status = "pagado";
+  await throughToPaid(env);
   const paid = await (await call(env, "/api/services/sync", payload)).json();
   assert.equal(paid.action, "updated");
   assert.equal(Object.keys(mirrors).length, 1, "never a second mirror");
   assert.equal(mirrors[first.mirrorId].properties.request_status, "paid");
   assert.equal(mirrors[first.mirrorId].properties.invoice_total.value, 3500);
   assert.equal(paid.expense.created, true);
-  const expenses = Object.values(ghl.db.records[`${CLIENT}|custom_objects.expenses`]);
-  assert.equal(expenses.length, 1);
-  assert.equal(expenses[0].properties.amount.value, 3500);
-  assert.equal(expenses[0].properties.category, "maintenance_repairs");
-  assert.equal(expenses[0].properties.review_status, "needs_review");
+  const exp = expensesOf();
+  assert.equal(exp.length, 1);
+  assert.equal(exp[0].properties.amount.value, 3500);
+  assert.equal(exp[0].properties.currency, "dop");
+  assert.equal(exp[0].properties.paid_on, "2026-09-14", "paid date comes from the invoice, not the sync day");
+  assert.ok(!("converted_amount" in exp[0].properties), "DOP-only client: no conversion stored");
+  assert.equal(paid.conversion.applied, false);
+  assert.ok(!ghl.db.calls.some((c) => c.path.startsWith("rate:")), "no rate lookup when the client chose DOP only");
   assert.equal(paid.expense.property, "prop1");
 
   const again = await (await call(env, "/api/services/sync", payload)).json();
   assert.equal(again.expense.created, false);
-  assert.equal(Object.values(ghl.db.records[`${CLIENT}|custom_objects.expenses`]).length, 1, "expense only on the transition into paid");
-  console.log("7) Sync, same currency: mirror created + linked to the matching property, updated in place, one Expense on paid, none on re-sync");
+  assert.equal(expensesOf().length, 1, "expense only on the transition into paid");
+  console.log("7) DOP-only client (USD account): mirror + property link, amounts kept in DOP, one DOP Expense dated from the invoice, no rate lookup, none on re-sync");
 }
 
-// ---- 8. sync, currency mismatch: no amounts, no expense ---------------------------
+// ---- 8. convert client: original kept + converted at the paid-date rate ----------
 {
   ghl = makeGhl();
-  const env = baseEnv(null); // DEMO-HOMS today: no currency set
-  seedRequest({ service_item: "Mantenimiento A/C", quoted_amount: { value: 3500, currency: "default" }, request_status: "pagado", request_source: "cliente_homs", homs_client: CLIENT, job_address: "somewhere unknown" });
+  const env = baseEnv(null);
+  setClient("USD", "Convert");
+  seedRequest(homsReq());
+  await call(env, "/api/services/sync", payload);
+  await throughToPaid(env);
   const out = await (await call(env, "/api/services/sync", payload)).json();
-  const mirror = ghl.db.records[`${CLIENT}|${SR}`][out.mirrorId];
-  assert.equal(out.amountsCopied, false);
-  assert.ok(!("quoted_amount" in mirror.properties), "DOP must not be written into an account of another or unknown currency");
-  assert.equal(out.expense.created, false);
-  assert.match(out.expense.reason, /currency mismatch/);
-  assert.equal(out.links.property, null, "no confident property match -> unlinked, not guessed");
-  console.log("8) Sync, currency mismatch/unset: status mirrored, amounts withheld, no Expense, reason reported; unmatched property left unlinked");
+  assert.equal(out.conversion.applied, true, JSON.stringify(out.conversion));
+  const exp = expensesOf()[0].properties;
+  assert.equal(exp.amount.value, 3500, "original amount kept");
+  assert.equal(exp.currency, "dop");
+  assert.equal(exp.converted_amount.value, 59.24, "3500 x 0.016925833 = 59.24");
+  assert.equal(exp.exchange_rate, 0.016925833);
+  assert.equal(exp.rate_date, "2026-09-14");
+  assert.match(exp.rate_source, /1 USD = 59\.0813 DOP on 2026-09-14/);
+  assert.ok(ghl.db.calls.some((c) => c.path.includes("currency-api@2026-09-14/v1/currencies/dop.json")), "rate is looked up for the paid date");
+  const mirror = Object.values(ghl.db.records[`${CLIENT}|${SR}`])[0].properties;
+  assert.equal(mirror.converted_total.value, 59.24);
+  assert.equal(mirror.quoted_amount.value, 3500);
+  const rateCalls = ghl.db.calls.filter((c) => c.path.startsWith("rate:")).length;
+  await call(env, "/api/services/sync", payload);
+  assert.equal(ghl.db.calls.filter((c) => c.path.startsWith("rate:")).length, rateCalls, "re-sync never re-rates");
+  assert.equal(expensesOf().length, 1);
+  console.log("8) Convert client: DOP 3,500 kept, converted USD 59.24 at the 2026-09-14 rate with rate, date and source; re-sync neither re-rates nor duplicates");
 }
 
-// ---- 9. existing dashboard routes still gated --------------------------------------
+// ---- 9. convert client, rate unavailable / account currency unset -----------------
+{
+  ghl = makeGhl();
+  const env = baseEnv(null);
+  setClient("USD", "convert");
+  ghl.db.rateFail = true;
+  seedRequest(homsReq());
+  await throughToPaid(env);
+  const out = await (await call(env, "/api/services/sync", payload)).json();
+  assert.equal(out.expense.created, true, "no rate never blocks recording the DOP cost");
+  assert.equal(out.conversion.applied, false);
+  assert.match(out.conversion.reason, /no DOP->USD rate/);
+  assert.ok(!("converted_amount" in expensesOf()[0].properties));
+  assert.equal(ghl.db.calls.filter((c) => c.path.startsWith("rate:")).length, 8, "4 days x 2 mirrors tried before giving up");
+
+  ghl = makeGhl();
+  ghl.db.customValues[CLIENT] = [{ fieldKey: "{{ custom_values.wservice_cost_currency }}", value: "Convert" }];
+  seedRequest(homsReq());
+  await throughToPaid(env);
+  const unset = await (await call(env, "/api/services/sync", payload)).json();
+  assert.equal(unset.expense.created, true);
+  assert.match(unset.conversion.reason, /WCurrency/);
+
+  ghl = makeGhl();
+  setClient("DOP", "Convert");
+  seedRequest(homsReq({ job_address: "somewhere unknown" }));
+  await throughToPaid(env);
+  const same = await (await call(env, "/api/services/sync", payload)).json();
+  assert.match(same.conversion.reason, /same currency/);
+  assert.equal(same.links.property, null, "no confident property match -> unlinked, not guessed");
+  console.log("9) Convert client edge cases: rate unavailable, WCurrency unset, same currency -> DOP Expense still recorded, reason reported; unmatched property left unlinked");
+}
+
+// ---- 10. existing dashboard routes still gated --------------------------------------
 {
   const res = await worker.fetch(new Request("https://w.dev/api/data?locationId=x"), baseEnv("DOP"));
   assert.equal(res.status, 401, "adding service routes must not open /api/data");
-  console.log("9) /api/data still requires dashboard auth");
+  console.log("10) /api/data still requires dashboard auth");
+}
+
+// ---- 11. /api/data tells the UI the account currency, and survives a custom-values failure ----
+{
+  ghl = makeGhl();
+  const env = baseEnv(null);
+  const get = () => worker.fetch(new Request(`https://w.dev/api/data?locationId=${CLIENT}`, { headers: { Authorization: "Bearer admin" } }), env);
+  const ok = await (await get()).json();
+  assert.equal(ok.accountCurrency, "USD", JSON.stringify(ok).slice(0, 200));
+  ghl.db.customValuesFail = true;
+  const res = await get();
+  assert.equal(res.status, 200, "a custom-values read failure must not break the dashboard");
+  assert.equal((await res.json()).accountCurrency, null);
+  console.log("11) /api/data returns accountCurrency from WCurrency; custom-values failure degrades to null, not an error");
 }
 
 console.log("\nPASS — services flow: estimate, invoice with additions, client mirror + expense, auth gate.");

@@ -154,6 +154,14 @@ export function normalizeExpense(record) {
     category: categoryKey ? EXPENSE_CATEGORY_LABELS[categoryKey] || categoryKey : null,
     lineItemDescription: prop(record, "line_item_description"),
     amount: moneyProp(record, "amount"),
+    // Original currency as recorded (service costs arrive in DOP even in a USD
+    // account); null means the account's own currency. Converted figures exist
+    // only when the client opted to convert.
+    currency: prop(record, "currency") ? String(prop(record, "currency")).toUpperCase() : null,
+    convertedAmount: moneyProp(record, "converted_amount"),
+    exchangeRate: prop(record, "exchange_rate"),
+    rateDate: prop(record, "rate_date"),
+    rateSource: prop(record, "rate_source"),
     canReimburse: moneyProp(record, "can_reimburse"),
     alreadyReimbursed: moneyProp(record, "already_reimbursed"),
     reimbursingNow: moneyProp(record, "reimbursing_now"),

@@ -1,4 +1,4 @@
-import { fetchAllObjectRecords, fetchContacts, createObjectRecord, fetchAssociations, createRelation } from "./ghl.js";
+import { fetchAllObjectRecords, fetchContacts, createObjectRecord, fetchAssociations, createRelation, fetchCustomValues } from "./ghl.js";
 import {
   normalizeProperty,
   normalizeOtaChannel,
@@ -13,7 +13,7 @@ import { getTenant, resolvePit } from "./tenants.js";
 import { requireAdmin, requireProvision, requireServices, handleLogin, handleLogout } from "./auth.js";
 import { provision } from "./provision.js";
 import { handleVendorData } from "./vendor.js";
-import { handleServiceEstimate, handleServiceInvoice, handleServiceSync } from "./services.js";
+import { handleServiceEstimate, handleServiceInvoice, handleServiceSync, readClientCurrencySettings } from "./services.js";
 
 // Yari's own default accent color -- used whenever a tenant's KV entry has no
 // `branding.primary` set. Sampled directly from the HOMS logo's keyhole ("O"),
@@ -22,7 +22,7 @@ import { handleServiceEstimate, handleServiceInvoice, handleServiceSync } from "
 const DEFAULT_BRANDING = { primary: "#028476" };
 
 async function handleData(pit, locationId) {
-  const [propertyRecords, otaRecords, transactionRecords, checklistRecords, expenseRecords, inventoryRecords, contactRecords] =
+  const [propertyRecords, otaRecords, transactionRecords, checklistRecords, expenseRecords, inventoryRecords, contactRecords, customValues] =
     await Promise.all([
       fetchAllObjectRecords(pit, locationId, "custom_objects.properties"),
       fetchAllObjectRecords(pit, locationId, "custom_objects.ota_channels"),
@@ -31,6 +31,8 @@ async function handleData(pit, locationId) {
       fetchAllObjectRecords(pit, locationId, "custom_objects.expenses"),
       fetchAllObjectRecords(pit, locationId, "custom_objects.property_inventory"),
       fetchContacts(pit, locationId),
+      // Only for WCurrency. A read failure must not take the dashboard down.
+      fetchCustomValues(pit, locationId).catch(() => []),
     ]);
 
   const properties = propertyRecords.map(normalizeProperty);
@@ -46,6 +48,9 @@ async function handleData(pit, locationId) {
   return {
     fetchedAt: new Date().toISOString(),
     locationId,
+    // Expenses can carry another currency (DOP service costs in a USD account);
+    // the UI only nets amounts that are in this currency or converted into it.
+    accountCurrency: readClientCurrencySettings(customValues).accountCurrency,
     properties,
     otaChannels,
     transactions,

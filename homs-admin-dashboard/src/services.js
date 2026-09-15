@@ -14,6 +14,14 @@
 //     record in the client's own account, and add an Expense on their property
 //     once the invoice is paid.
 //
+// Currency (decided 2026-09-15). A DR client books stays in USD/EUR but pays
+// services in DOP, and their DR accountant reconciles both. So the original
+// amount and currency are always kept exactly as invoiced. Conversion is the
+// client's choice, read from their own custom value "WService Cost Currency":
+// anything containing "convert" also stores the amount in the account currency
+// (custom value "WCurrency") at the market rate for the day the invoice was paid,
+// with the rate, its date and its source. Anything else keeps the original only.
+//
 // Vendor config is a DASHBOARD_TENANTS entry with kind "service_vendor":
 //   { label, kind: "service_vendor", ghlPitSecretName, currency, dispatchUserId,
 //     sendAction?, liveMode?, estimateTerms? }
@@ -38,8 +46,10 @@ import {
   fetchAllObjectRecords,
   createObjectRecord,
   createRelation,
+  fetchCustomValues,
 } from "./ghl.js";
 import { getTenant, resolvePit } from "./tenants.js";
+import { slugFromFieldKey } from "./blueprint.js";
 
 export const SERVICE_REQUEST_KEY = "custom_objects.service_requests";
 const EXPENSE_KEY = "custom_objects.expenses";
@@ -193,7 +203,74 @@ export function matchProperty(propertyRecords, jobAddress) {
   return hits.length === 1 ? hits[0] : null;
 }
 
-export function buildClientProperties({ record, vendorLabel, sameCurrency, invoiceTotal }) {
+const CURRENCY_OPTIONS = new Set(["dop", "usd", "eur"]);
+
+// Option key for the client's Currency dropdown, or null for anything outside it.
+export function currencyKey(code) {
+  const k = String(code || "").trim().toLowerCase();
+  return CURRENCY_OPTIONS.has(k) ? k : null;
+}
+
+export function readClientCurrencySettings(customValues) {
+  const bySlug = {};
+  for (const cv of customValues || []) {
+    const slug = slugFromFieldKey(cv.fieldKey);
+    if (slug) bySlug[slug] = cv.value;
+  }
+  const accountCurrency = String(bySlug.wcurrency || "").trim().toUpperCase() || null;
+  const mode = /convert/i.test(String(bySlug.wservice_cost_currency || "")) ? "convert" : "original";
+  return { accountCurrency, mode };
+}
+
+export function round2(n) {
+  return Math.round((Number(n) + Number.EPSILON) * 100) / 100;
+}
+
+// Daily market rates, no key: fawazahmed0/currency-api, published per date on
+// jsdelivr with a pages.dev mirror. Verified 2026-09-15 for DOP/USD/EUR back to
+// January 2026. The Banco Central RD API needs registered credentials, so it
+// isn't used; the record names its source so an accountant can check it.
+const RATE_SOURCE = "fawazahmed0/currency-api (daily market rate)";
+const rateUrls = (date, from) => [
+  `https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@${date}/v1/currencies/${from}.json`,
+  `https://${date}.currency-api.pages.dev/v1/currencies/${from}.json`,
+];
+
+function shiftDate(date, days) {
+  const d = new Date(`${date}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+// Rate for 1 unit of `from` in `to` on `date`. A day's file may not be
+// published yet, so it walks back up to 3 days and reports the date it used.
+export async function fetchRate(from, to, date) {
+  const f = from.toLowerCase();
+  const t = to.toLowerCase();
+  for (let back = 0; back <= 3; back++) {
+    const day = shiftDate(date, -back);
+    for (const url of rateUrls(day, f)) {
+      try {
+        const res = await fetch(url);
+        if (!res.ok) continue;
+        const j = await res.json();
+        const rate = Number(j?.[f]?.[t]);
+        if (rate > 0) return { rate, rateDate: day, source: RATE_SOURCE };
+      } catch {
+        // try the mirror, then the previous day
+      }
+    }
+  }
+  return null;
+}
+
+// Readable for an accountant, whichever way round the pair is: 1 USD = 59.08 DOP.
+export function describeRate(from, to, rate, rateDate) {
+  const [big, small, value] = rate >= 1 ? [from, to, rate] : [to, from, 1 / rate];
+  return `1 ${big} = ${value.toFixed(4)} ${small} on ${rateDate} (${RATE_SOURCE})`;
+}
+
+export function buildClientProperties({ record, vendorLabel, currency, invoiceTotal }) {
   const out = {
     service_item: prop(record, "service_item"),
     vendor: vendorLabel,
@@ -210,15 +287,15 @@ export function buildClientProperties({ record, vendorLabel, sameCurrency, invoi
   if (completed) out.completed_date = completed;
   const description = prop(record, "job_description");
   if (description) out.request_notes = description;
-  // Amounts only cross when both accounts use the same currency. A DOP price
-  // written into a USD account would read as dollars.
-  if (sameCurrency) {
-    const quoted = money(prop(record, "quoted_amount"));
-    const extra = money(prop(record, "additional_amount"));
-    if (quoted) out.quoted_amount = { value: quoted, currency: "default" };
-    if (extra) out.additional_amount = { value: extra, currency: "default" };
-    if (invoiceTotal) out.invoice_total = { value: invoiceTotal, currency: "default" };
-  }
+  // Always the original amounts, tagged with their currency. GHL's money fields
+  // display in the account's own symbol, so the Currency field is what says RD$.
+  const curKey = currencyKey(currency);
+  if (curKey) out.currency = curKey;
+  const quoted = money(prop(record, "quoted_amount"));
+  const extra = money(prop(record, "additional_amount"));
+  if (quoted) out.quoted_amount = { value: quoted, currency: "default" };
+  if (extra) out.additional_amount = { value: extra, currency: "default" };
+  if (invoiceTotal) out.invoice_total = { value: invoiceTotal, currency: "default" };
   return out;
 }
 
@@ -371,15 +448,20 @@ export async function handleServiceSync(request, env) {
     const clientPit = resolvePit(env, client);
     if (!clientPit) return fail(`HOMS client ${clientLocationId} has no usable ghlPitSecretName`, 500);
 
-    const sameCurrency = Boolean(client.currency) && client.currency === vendor.currency;
+    const vendorCurrency = String(vendor.currency).toUpperCase();
+    const settings = readClientCurrencySettings(await fetchCustomValues(clientPit, clientLocationId));
+    const accountCurrency = settings.accountCurrency || (client.currency ? String(client.currency).toUpperCase() : null);
+
     const invoiceId = prop(record, "invoice_id");
     let invoiceTotal = 0;
+    let paidOn = null;
     if (invoiceId) {
       const inv = await getInvoice(pit, vendorLocationId, invoiceId);
       invoiceTotal = money(inv.total ?? inv.invoiceTotal);
+      paidOn = dateOnly(inv.lastPaidAt);
     }
 
-    const properties = buildClientProperties({ record, vendorLabel: vendor.label, sameCurrency, invoiceTotal });
+    const properties = buildClientProperties({ record, vendorLabel: vendor.label, currency: vendorCurrency, invoiceTotal });
     const mirrors = await fetchAllObjectRecords(clientPit, clientLocationId, SERVICE_REQUEST_KEY);
     const mirror = mirrors.find((m) => m.properties?.vendor_request_id === record.id);
     const previousStatus = mirror?.properties?.request_status || null;
@@ -410,23 +492,63 @@ export async function handleServiceSync(request, env) {
       }
     }
 
-    // Expense only on the transition into paid, so repeated syncs never duplicate it.
+    // Expense and conversion only on the transition into paid, so repeated
+    // syncs never duplicate the Expense or re-rate it on a later day.
     let expense = { created: false };
+    let conversion = { applied: false, mode: settings.mode };
     if (properties.request_status === "paid" && previousStatus !== "paid") {
-      if (!sameCurrency) {
-        expense = { created: false, reason: `currency mismatch: vendor ${vendor.currency}, client ${client.currency || "unset"}` };
-      } else if (!invoiceTotal) {
+      const paidDate = paidOn || dateOnly(new Date().toISOString());
+      let converted = null;
+      if (settings.mode === "convert") {
+        if (!accountCurrency) {
+          conversion.reason = "client account currency (WCurrency) is not set";
+        } else if (accountCurrency === vendorCurrency) {
+          conversion.reason = "same currency, nothing to convert";
+        } else if (!invoiceTotal) {
+          conversion.reason = "no invoice total";
+        } else {
+          const fx = await fetchRate(vendorCurrency, accountCurrency, paidDate);
+          if (!fx) {
+            conversion.reason = `no ${vendorCurrency}->${accountCurrency} rate found for ${paidDate}`;
+          } else {
+            converted = {
+              value: round2(invoiceTotal * fx.rate),
+              rate: fx.rate,
+              rateDate: fx.rateDate,
+              source: describeRate(vendorCurrency, accountCurrency, fx.rate, fx.rateDate),
+            };
+            conversion = { applied: true, mode: settings.mode, from: vendorCurrency, to: accountCurrency, ...converted };
+            await updateObjectRecord(clientPit, clientLocationId, SERVICE_REQUEST_KEY, mirrorId, {
+              converted_total: { value: converted.value, currency: "default" },
+              exchange_rate: converted.rate,
+              rate_date: converted.rateDate,
+              rate_source: converted.source,
+            });
+          }
+        }
+      }
+
+      if (!invoiceTotal) {
         expense = { created: false, reason: "no invoice total" };
       } else {
-        const exp = await createObjectRecord(clientPit, clientLocationId, EXPENSE_KEY, {
+        const expenseProps = {
           expense_name: `${vendor.label}: ${properties.service_item}`,
           category: "maintenance_repairs",
           amount: { value: invoiceTotal, currency: "default" },
-          paid_on: dateOnly(new Date().toISOString()),
+          paid_on: paidDate,
           review_status: "needs_review",
           line_item_description: `Service request ${record.id}`,
-        });
-        expense = { created: true, id: exp.id };
+        };
+        const curKey = currencyKey(vendorCurrency);
+        if (curKey) expenseProps.currency = curKey;
+        if (converted) {
+          expenseProps.converted_amount = { value: converted.value, currency: "default" };
+          expenseProps.exchange_rate = converted.rate;
+          expenseProps.rate_date = converted.rateDate;
+          expenseProps.rate_source = converted.source;
+        }
+        const exp = await createObjectRecord(clientPit, clientLocationId, EXPENSE_KEY, expenseProps);
+        expense = { created: true, id: exp.id, amount: invoiceTotal, currency: vendorCurrency };
         const propertyId = links.property || (await linkedPropertyId(clientPit, clientLocationId, mirrorId));
         if (propertyId) {
           const associations = await fetchAssociations(clientPit, clientLocationId);
@@ -447,9 +569,11 @@ export async function handleServiceSync(request, env) {
       mirrorId,
       action: mirror ? "updated" : "created",
       status: properties.request_status,
-      amountsCopied: sameCurrency,
+      currency: vendorCurrency,
+      accountCurrency,
       links,
       expense,
+      conversion,
     });
   } catch (err) {
     return errorResponse(err);

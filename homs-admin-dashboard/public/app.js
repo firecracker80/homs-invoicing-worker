@@ -5,6 +5,22 @@ const $ = (sel) => document.querySelector(sel);
 const esc = (s) =>
   String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const money = (n) => (n === null || n === undefined || n === "" ? "—" : `$${Number(n).toFixed(2)}`);
+const CURRENCY_SYMBOLS = { DOP: "RD$", USD: "US$", EUR: "€" };
+// An amount in a stated currency. No currency = the account's own, shown as before.
+// The amount of an expense in the account's own currency, or null when it is in
+// another currency and was not converted -- those are listed, never netted.
+const inAccountCurrency = (x) => {
+  // Untagged expenses predate currency tracking and are in the account's currency.
+  // A tagged one is only netted when WCurrency confirms it matches -- an unknown
+  // account currency never lets RD$ be subtracted from dollars.
+  if (!x.currency || x.currency === DATA.accountCurrency) return Number(x.amount) || 0;
+  return x.convertedAmount ? Number(x.convertedAmount) : null;
+};
+const moneyIn = (n, cur) => {
+  if (n === null || n === undefined || n === "") return "—";
+  if (!cur) return money(n);
+  return `${CURRENCY_SYMBOLS[cur] || cur + " "}${Number(n).toFixed(2)}`;
+};
 const dash = (v) => (v === null || v === undefined || v === "" ? "—" : esc(v));
 const dateFmt = (v) => (v ? new Date(v).toLocaleDateString() : "—");
 
@@ -875,8 +891,8 @@ function renderExpenses() {
       { key: "ownerContactId", label: "Owner", options: distinctPairs(DATA.expenses, "ownerContactId", "ownerContactName") },
     ],
     dateField: "paidOn",
-    headers: ["Expense", "Paid On", "Category", "Property", "Owner", "Amount", "Review Status"],
-    colspan: 7, emptyLabel: "expenses",
+    headers: ["Expense", "Paid On", "Category", "Property", "Owner", "Amount", "Converted", "Review Status"],
+    colspan: 8, emptyLabel: "expenses",
     extraToolbarHtml: `<div class="toolbar" style="margin-bottom:12px"><button class="btn btn-primary" id="openAddExpense">+ Add Expense</button></div>`,
     rowFn: (e) => `
     <tr data-kind="expense" data-id="${e.id}">
@@ -885,7 +901,8 @@ function renderExpenses() {
       <td>${dash(e.category)}</td>
       <td>${dash(e.propertyName)}</td>
       <td>${dash(e.ownerContactName)}</td>
-      <td>${money(e.amount)}</td>
+      <td>${moneyIn(e.amount, e.currency)}</td>
+      <td${e.rateSource ? ` title="${esc(e.rateSource)}"` : ""}>${e.convertedAmount ? money(e.convertedAmount) : "—"}</td>
       <td>${reviewBadge(e.reviewStatus)}</td>
     </tr>`,
   });
@@ -987,6 +1004,7 @@ const STATEMENT_I18N = {
     statementFor: "Statement for", owner: "Owner", noOwnerOnFile: "(no owner on file)",
     grossIncome: "Gross Income", managementCommission: "Management Commission",
     otherExpenses: "Other Owner Expenses", netIncome: "Net Income",
+    notNetted: "Paid in another currency, not included in the totals above",
     reservations: "Reservations", resName: "Reservation", guest: "Guest",
     checkIn: "Check-in", checkOut: "Check-out", nights: "Nights", grossRent: "Gross Rent",
     total: "Total", expensesTitle: "Owner Expenses", paidOn: "Paid On", category: "Category",
@@ -999,6 +1017,7 @@ const STATEMENT_I18N = {
     statementFor: "Estado de cuenta de", owner: "Propietario", noOwnerOnFile: "(sin propietario registrado)",
     grossIncome: "Ingreso Bruto", managementCommission: "Comisión de Administración",
     otherExpenses: "Otros Gastos del Propietario", netIncome: "Ingreso Neto",
+    notNetted: "Pagado en otra moneda, no incluido en los totales anteriores",
     reservations: "Reservaciones", resName: "Reservación", guest: "Huésped",
     checkIn: "Entrada", checkOut: "Salida", nights: "Noches", grossRent: "Renta Bruta",
     total: "Total", expensesTitle: "Gastos del Propietario", paidOn: "Fecha de Pago", category: "Categoría",
@@ -1075,8 +1094,13 @@ function renderStatement() {
   const grossIncome = monthTx.reduce((sum, x) => sum + (Number(x.bookingTotal) || 0), 0);
   const managementEx = monthEx.filter((x) => x.categoryKey === "management_fee");
   const otherEx = monthEx.filter((x) => x.categoryKey !== "management_fee");
-  const managementCommission = managementEx.reduce((sum, x) => sum + (Number(x.amount) || 0), 0);
-  const otherExpensesTotal = otherEx.reduce((sum, x) => sum + (Number(x.amount) || 0), 0);
+  const managementCommission = managementEx.reduce((sum, x) => sum + (inAccountCurrency(x) || 0), 0);
+  const otherExpensesTotal = otherEx.reduce((sum, x) => sum + (inAccountCurrency(x) || 0), 0);
+  // Per-currency subtotals of what could not be netted (e.g. RD$ costs, no conversion).
+  const notNetted = {};
+  for (const x of monthEx) {
+    if (inAccountCurrency(x) === null) notNetted[x.currency] = (notNetted[x.currency] || 0) + (Number(x.amount) || 0);
+  }
   const netIncome = grossIncome - managementCommission - otherExpensesTotal;
 
   const nightsBetween = (a, b) => {
@@ -1122,6 +1146,9 @@ function renderStatement() {
           <tr class="statement-net"><td>${esc(t("netIncome"))}</td><td>${money(netIncome)}</td></tr>
         </tbody>
       </table>
+      ${Object.keys(notNetted).length
+        ? `<p class="note">${esc(t("notNetted"))}: ${Object.entries(notNetted).map(([c, v]) => esc(moneyIn(v, c))).join(" · ")}</p>`
+        : ""}
 
       <h3>${esc(t("reservations"))}</h3>
       ${table(
@@ -1134,7 +1161,7 @@ function renderStatement() {
       <h3>${esc(t("expensesTitle"))}</h3>
       ${table(
         [t("paidOn"), t("category"), t("description"), t("amount")],
-        monthEx.map((x) => `<tr><td>${dateFmt(x.paidOn)}</td><td>${dash(categoryLabel(x.categoryKey, x.category))}</td><td>${dash(x.lineItemDescription)}</td><td>(${money(x.amount)})</td></tr>`).join("")
+        monthEx.map((x) => `<tr><td>${dateFmt(x.paidOn)}</td><td>${dash(categoryLabel(x.categoryKey, x.category))}</td><td>${dash(x.lineItemDescription)}</td><td>(${moneyIn(x.amount, x.currency)}${x.convertedAmount && x.currency !== DATA.accountCurrency ? ` = ${money(x.convertedAmount)}` : ""})</td></tr>`).join("")
           || emptyRow(4, t("noExpenses")),
         null
       )}
@@ -1143,7 +1170,7 @@ function renderStatement() {
 
   panel.dataset.exportRows = JSON.stringify(
     monthTx.map((x) => ({ type: "reservation", name: x.name, guest: x.guestName, checkIn: x.checkinDate, checkOut: x.checkoutDate, grossRent: x.bookingTotal }))
-      .concat(monthEx.map((x) => ({ type: "expense", paidOn: x.paidOn, category: categoryLabel(x.categoryKey, x.category), description: x.lineItemDescription, amount: x.amount })))
+      .concat(monthEx.map((x) => ({ type: "expense", paidOn: x.paidOn, category: categoryLabel(x.categoryKey, x.category), description: x.lineItemDescription, amount: x.amount, currency: x.currency || DATA.accountCurrency || "", convertedAmount: x.convertedAmount ?? "", exchangeRate: x.exchangeRate ?? "", rateDate: x.rateDate ?? "" })))
   );
 }
 
@@ -1294,7 +1321,8 @@ function openDetail(kind, id) {
     rows = [
       ["Property", record.propertyName], ["Owner", record.ownerContactName],
       ["Paid On", dateFmt(record.paidOn)], ["Category", record.category],
-      ["Description", record.lineItemDescription], ["Amount", money(record.amount)],
+      ["Description", record.lineItemDescription], ["Amount", moneyIn(record.amount, record.currency)],
+      ["Converted", record.convertedAmount ? money(record.convertedAmount) : null], ["Exchange Rate", record.rateSource],
       ["Can Reimburse", money(record.canReimburse)], ["Already Reimbursed", money(record.alreadyReimbursed)],
       ["Reimbursing Now", money(record.reimbursingNow)], ["Review Status", record.reviewStatus],
     ];
