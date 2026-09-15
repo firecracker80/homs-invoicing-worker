@@ -110,9 +110,17 @@ function makeGhl() {
         _id: iid, name: est.name, title: "FACTURA", currency: est.currency, invoiceNumber: "000105",
         contactDetails: { ...est.contactDetails, phoneNo: "8095551234" },
         invoiceItems: est.items.map((i) => ({ ...i })), issueDate: "2026-09-15T04:00:00.000Z", dueDate: "2026-09-22T03:59:59.999Z",
-        businessDetails: est.businessDetails, status: "draft",
+        businessDetails: est.businessDetails, status: "draft", source: "estimate", sourceId: m[1],
+        contactId: est.contactDetails.id, createdAt: new Date().toISOString(),
       };
+      est.status = "invoiced";
+      // Live GHL (2026-09-15) created the invoice but returned no `invoice` key.
+      if (db.bareInvoiceResponse) return json(200, { traceId: "t" });
       return json(200, { estimate: est, invoice: db.invoices[iid] });
+    }
+    if (path === "/invoices/" && method === "GET") {
+      const cid = u.searchParams.get("contactId");
+      return json(200, { invoices: Object.values(db.invoices).filter((i) => !cid || i.contactId === cid).reverse() });
     }
     if ((m = path.match(/^\/invoices\/([^/]+)\/send$/))) {
       db.invoices[m[1]].status = "sent";
@@ -262,6 +270,32 @@ const payload = { vendorLocationId: VENDOR, serviceRequestId: "sr1" };
   ghl = noEst;
   seedRequest({ service_item: "X", quoted_amount: 100, request_source: "directo" });
   assert.equal((await call(env, "/api/services/invoice", payload)).status, 422, "no estimate -> nothing to invoice");
+}
+
+// ---- 5b. invoice: bare create response, and recovery after a failed record write ----
+{
+  ghl = makeGhl();
+  ghl.db.bareInvoiceResponse = true;
+  const env = baseEnv("DOP");
+  seedRequest({ service_item: "Mantenimiento", quoted_amount: { value: 100, currency: "default" }, additional_amount: { value: 50, currency: "default" }, request_source: "directo" });
+  await call(env, "/api/services/estimate", payload);
+  const out = await (await call(env, "/api/services/invoice", payload)).json();
+  assert.equal(out.ok, true, JSON.stringify(out));
+  assert.equal(out.total, 150);
+  assert.equal(vendorRec().properties.invoice_id, out.invoiceId, "invoice found by sourceId when the create response has no invoice");
+
+  // Simulate today's live failure: invoice exists, record never got invoice_id.
+  delete vendorRec().properties.invoice_id;
+  const creates = () => ghl.db.calls.filter((c) => c.path.endsWith("/invoice") && c.method === "POST").length;
+  const before = creates();
+  const retry = await (await call(env, "/api/services/invoice", payload)).json();
+  assert.equal(retry.reusedExisting, true);
+  assert.equal(retry.invoiceId, out.invoiceId);
+  assert.equal(creates(), before, "retry reuses the estimate's invoice, never creates a second");
+  assert.equal(Object.keys(ghl.db.invoices).length, 1);
+  assert.equal(retry.total, 150, "retry does not append the additional line twice");
+  assert.equal(Object.values(ghl.db.invoices)[0].invoiceItems.length, 2);
+  console.log("5b) Invoice: bare create response handled via sourceId lookup; retry after a lost invoice_id reuses the same invoice");
 }
 
 // ---- 6. sync: direct customers are not mirrored -----------------------------------

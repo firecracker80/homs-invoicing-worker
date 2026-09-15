@@ -204,7 +204,18 @@ export async function createInvoiceFromEstimate(pit, locationId, estimateId) {
     altType: "location",
     markAsInvoiced: true,
   });
-  return res.invoice || null;
+  // Live, the response carried no `invoice` key even though the invoice was
+  // created (2026-09-15) -- return the raw body; callers find the invoice by
+  // its sourceId instead of trusting this shape.
+  return res;
+}
+
+// Invoices for one contact, newest first as GHL returns them. Used to find the
+// invoice an estimate produced: it carries source "estimate" + sourceId.
+export async function listContactInvoices(pit, locationId, contactId, { limit = 50 } = {}) {
+  const qs = new URLSearchParams({ altId: locationId, altType: "location", contactId, limit: String(limit), offset: "0" });
+  const res = await ghlRequest(pit, "GET", `/invoices/?${qs}`);
+  return res.invoices || [];
 }
 
 // altId is required at runtime on every invoices/* call even where the schema

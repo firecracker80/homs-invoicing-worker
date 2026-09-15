@@ -40,6 +40,7 @@ import {
   createEstimate,
   sendEstimate,
   createInvoiceFromEstimate,
+  listContactInvoices,
   getInvoice,
   updateInvoice,
   sendInvoice,
@@ -122,7 +123,8 @@ export function buildEstimateBody({ vendor, vendorLocationId, location, record, 
   return {
     altId: vendorLocationId,
     altType: "location",
-    name: `Cotización - ${serviceItem}`,
+    // Neutral name: GHL copies it onto the invoice made from this estimate.
+    name: `Servicio - ${serviceItem}`,
     title: "COTIZACIÓN",
     currency: vendor.currency,
     liveMode: vendor.liveMode ?? true,
@@ -172,7 +174,8 @@ export function buildEstimateBody({ vendor, vendorLocationId, location, record, 
 export function buildInvoiceUpdateBody({ vendorLocationId, invoice, record, currency }) {
   const extra = money(prop(record, "additional_amount"));
   const items = [...(invoice.invoiceItems || [])];
-  if (extra > 0) {
+  // Idempotent: a retry against an invoice that already carries the line must not add it twice.
+  if (extra > 0 && !items.some((i) => i.name === "Servicios adicionales")) {
     items.push({
       name: "Servicios adicionales",
       description: prop(record, "additional_services") || "",
@@ -414,7 +417,18 @@ export async function handleServiceInvoice(request, env) {
     if (!estimateId) return fail("Service request has no estimate_id -- nothing to invoice from", 422);
     if (!vendor.dispatchUserId) return fail("Vendor has no dispatchUserId (required to send)", 500);
 
-    const invoice = await createInvoiceFromEstimate(pit, vendorLocationId, estimateId);
+    // An estimate yields at most one invoice. Look for it first, so a retry after
+    // a failure between creating and recording it never creates a second one.
+    const contactId = await customerContactId(pit, vendorLocationId, record.id);
+    if (!contactId) return fail("Service request is not linked to a customer contact", 422);
+    const fromEstimate = (list) => list.find((i) => i.sourceId === estimateId && i.status !== "void");
+    let invoice = fromEstimate(await listContactInvoices(pit, vendorLocationId, contactId));
+    let reusedExisting = Boolean(invoice);
+    if (!invoice) {
+      const created = await createInvoiceFromEstimate(pit, vendorLocationId, estimateId);
+      invoice = created?.invoice?._id ? created.invoice : null;
+      if (!invoice) invoice = fromEstimate(await listContactInvoices(pit, vendorLocationId, contactId));
+    }
     const invoiceId = invoice?._id || invoice?.id;
     if (!invoiceId) return fail("GHL did not return an invoice for this estimate", 502);
     await updateObjectRecord(pit, vendorLocationId, SERVICE_REQUEST_KEY, record.id, { invoice_id: invoiceId });
@@ -423,7 +437,7 @@ export async function handleServiceInvoice(request, env) {
     if (money(prop(record, "additional_amount")) > 0) {
       const full = await getInvoice(pit, vendorLocationId, invoiceId);
       const update = buildInvoiceUpdateBody({ vendorLocationId, invoice: full, record, currency: vendor.currency });
-      await updateInvoice(pit, invoiceId, update);
+      if (update.invoiceItems.length !== (full.invoiceItems || []).length) await updateInvoice(pit, invoiceId, update);
       finalItems = update.invoiceItems;
     }
 
@@ -435,7 +449,7 @@ export async function handleServiceInvoice(request, env) {
     await updateObjectRecord(pit, vendorLocationId, SERVICE_REQUEST_KEY, record.id, { request_status: "facturado" });
 
     const total = finalItems.reduce((s, i) => s + money(i.amount) * (Number(i.qty) || 1), 0);
-    return Response.json({ ok: true, invoiceId, total, currency: vendor.currency, lines: finalItems.length });
+    return Response.json({ ok: true, invoiceId, total, currency: vendor.currency, lines: finalItems.length, reusedExisting });
   } catch (err) {
     return errorResponse(err);
   }
