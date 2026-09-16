@@ -125,6 +125,17 @@ export function toE164(phone) {
   return `+${digits}`;
 }
 
+// The estimate's issue date must be "today" where the vendor is, not in UTC:
+// GHL rejects a future issue date (live 400 "Issue date cannot be in the
+// future" at 20:20 Santo Domingo, already the 16th in UTC).
+export function todayInZone(timezone, now = new Date()) {
+  try {
+    return new Intl.DateTimeFormat("en-CA", { timeZone: timezone || "UTC", year: "numeric", month: "2-digit", day: "2-digit" }).format(now);
+  } catch {
+    return now.toISOString().slice(0, 10);
+  }
+}
+
 export function addDays(date, days) {
   const d = new Date(`${date}T00:00:00Z`);
   d.setUTCDate(d.getUTCDate() + days);
@@ -461,7 +472,7 @@ async function estimateOne(env, ctx) {
       location,
       record,
       contact,
-      today: dateOnly(new Date().toISOString()),
+      today: todayInZone(vendor.timezone || location?.timezone),
     });
     const created = await createEstimate(pit, body);
     const estimateId = created._id || created.id;
