@@ -578,6 +578,44 @@ const expensesOf = () => Object.values(ghl.db.records[`${CLIENT}|custom_objects.
   console.log("15) Estimate/invoice NUMBER resolves to the right request; unknown number falls back to contactId, or 404s on its own");
 }
 
+// ---- 16. declined estimate: rechazado, noted, requotable ----
+{
+  ghl = makeGhl();
+  const env = baseEnv(null);
+  setClient("USD", "DOP only");
+  seedRequest(homsReq({ job_notes: "Nota previa" }));
+  await call(env, "/api/services/estimate", payload);
+  const estimateId = vendorRec().properties.estimate_id;
+
+  const out = await (await call(env, "/api/services/declined", { vendorLocationId: VENDOR, estimateId })).json();
+  assert.equal(out.ok, true, JSON.stringify(out));
+  assert.equal(out.declinedEstimate, estimateId);
+  const p = () => vendorRec().properties;
+  assert.equal(p().request_status, "rechazado");
+  assert.equal(p().estimate_id, "", "estimate link cleared so a corrected quote can go out");
+  assert.match(p().job_notes, /Nota previa/, "previous notes are kept");
+  assert.match(p().job_notes, /rechazada por el cliente/);
+  assert.equal(out.sync.status, "cancelled", "the client's copy shows it as cancelled");
+
+  assert.equal((await (await call(env, "/api/services/declined", { vendorLocationId: VENDOR, contactId: "contact9" })).json()).skipped, undefined);
+
+  // Re-quote path: price corrected, back to Solicitado -> the sweep quotes it again.
+  vendorRec().properties.request_status = "solicitado";
+  vendorRec().properties.quoted_amount = { value: 2800, currency: "default" };
+  const again = await (await call(env, "/api/services/estimate", { vendorLocationId: VENDOR, pending: true })).json();
+  assert.equal(again.processed, 1, JSON.stringify(again));
+  assert.equal(again.results[0].total, 2800);
+  assert.notEqual(vendorRec().properties.estimate_id, estimateId, "a second, corrected estimate");
+
+  // A decline arriving for a job already accepted changes nothing.
+  ghl = makeGhl();
+  seedRequest(homsReq({ request_status: "pagado", estimate_id: "e-old" }));
+  const late = await (await call(env, "/api/services/declined", { vendorLocationId: VENDOR, estimateId: "e-old" })).json();
+  assert.equal(late.skipped, "not_awaiting_a_decision");
+  assert.equal(vendorRec().properties.request_status, "pagado");
+  console.log("16) Declined estimate: rechazado + noted + estimate cleared, client copy cancelled, re-quote works, late decline ignored");
+}
+
 // ---- 10. existing dashboard routes still gated --------------------------------------
 {
   const res = await worker.fetch(new Request("https://w.dev/api/data?locationId=x"), baseEnv("DOP"));
