@@ -158,7 +158,7 @@ function makeKv(entries) {
   return { async get(k, o) { const v = entries[k]; return v == null ? null : o?.type === "json" ? v : JSON.stringify(v); } };
 }
 
-const vendorEntry = { label: "RL Santana Refrigeración", kind: "service_vendor", ghlPitSecretName: "GHL_PIT_RL_SANTANA", currency: "DOP", dispatchUserId: "vo55Cl20aQZy7Blgr6xd" };
+const vendorEntry = { sweepRetryDelayMs: 0, label: "RL Santana Refrigeración", kind: "service_vendor", ghlPitSecretName: "GHL_PIT_RL_SANTANA", currency: "DOP", dispatchUserId: "vo55Cl20aQZy7Blgr6xd" };
 const baseEnv = (clientCurrency) => ({
   SERVICES_WEBHOOK_KEY: "svc-key",
   ADMIN_KEY: "admin",
@@ -614,6 +614,56 @@ const expensesOf = () => Object.values(ghl.db.records[`${CLIENT}|custom_objects.
   assert.equal(late.skipped, "not_awaiting_a_decision");
   assert.equal(vendorRec().properties.request_status, "pagado");
   console.log("16) Declined estimate: rechazado + noted + estimate cleared, client copy cancelled, re-quote works, late decline ignored");
+}
+
+// ---- 17. taskId picks the right job; an empty sweep looks again ----
+{
+  ghl = makeGhl();
+  const env = baseEnv(null);
+  const now = new Date().toISOString();
+  const add = (id, props) => {
+    ghl.db.records[`${VENDOR}|${SR}`][id] = { id, createdAt: now, updatedAt: now, properties: props };
+    ghl.db.relations.push({ associationId: "a-sr-contact", firstRecordId: "contact9", secondRecordId: id });
+  };
+  // Two accepted jobs for the same customer; the OLDER one's task was completed.
+  add("older", homsReq({ request_source: "directo", request_status: "aceptado", estimate_id: "e1", task_id: "t-older" }));
+  ghl.db.estimates.e1 = { _id: "e1", name: "x", currency: "DOP", items: [{ name: "x", amount: 100, qty: 1 }], contactDetails: { id: "contact9" }, status: "accepted" };
+  const later = new Date(Date.now() + 1000).toISOString();
+  ghl.db.records[`${VENDOR}|${SR}`].newer = { id: "newer", createdAt: later, updatedAt: later, properties: homsReq({ request_source: "directo", request_status: "aceptado", estimate_id: "e2", task_id: "t-newer" }) };
+  ghl.db.relations.push({ associationId: "a-sr-contact", firstRecordId: "contact9", secondRecordId: "newer" });
+
+  const out = await (await call(env, "/api/services/invoice", { vendorLocationId: VENDOR, taskId: "t-older", contactId: "contact9" })).json();
+  assert.equal(out.ok, true, JSON.stringify(out));
+  assert.equal(out.serviceRequestId, "older", "the completed task's own job is invoiced, not the newest one");
+  ghl.db.estimates.e2 = { _id: "e2", name: "y", currency: "DOP", items: [{ name: "y", amount: 200, qty: 1 }], contactDetails: { id: "contact9" }, status: "accepted" };
+  const byContact = await (await call(env, "/api/services/invoice", { vendorLocationId: VENDOR, taskId: "t-unknown", contactId: "contact9" })).json();
+  assert.equal(byContact.serviceRequestId, "newer", "unknown taskId + contactId falls back to the contact (newest job in progress)");
+
+  // Sweep: first search misses the just-created record, a later search finds it.
+  ghl = makeGhl();
+  add("fresh", homsReq({ request_source: "directo" }));
+  const hidden = ghl.db.records[`${VENDOR}|${SR}`];
+  let searches = 0;
+  const realHandler = ghl.handler;
+  ghl.handler = async (url, init) => {
+    if (String(url).endsWith(`/objects/${SR}/records/search`) && ++searches === 1) {
+      const saved = { ...hidden };
+      for (const k of Object.keys(hidden)) delete hidden[k];
+      const res = await realHandler(url, init);
+      Object.assign(hidden, saved);
+      return res;
+    }
+    return realHandler(url, init);
+  };
+  const swept = await (await call(env, "/api/services/estimate", { vendorLocationId: VENDOR, pending: true })).json();
+  assert.equal(swept.processed, 1, JSON.stringify(swept));
+  assert.equal(swept.attempts, 2, "found on the second look");
+  ghl.handler = realHandler;
+  ghl = makeGhl();
+  const none = await (await call(env, "/api/services/estimate", { vendorLocationId: VENDOR, pending: true })).json();
+  assert.equal(none.processed, 0);
+  assert.equal(none.attempts, 3, "gives up after two extra looks");
+  console.log("17) taskId invoices the completed task's own job; an empty sweep looks again (found on 2nd look, gives up after 3)");
 }
 
 // ---- 10. existing dashboard routes still gated --------------------------------------
