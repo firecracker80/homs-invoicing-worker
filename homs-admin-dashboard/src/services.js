@@ -360,10 +360,10 @@ async function loadVendorContext(request, env, contactStatuses = null) {
   } catch {
     return { error: fail("Expected JSON body") };
   }
-  const { vendorLocationId, serviceRequestId, estimateId, invoiceId, contactId } = body || {};
-  const pending = body?.pending === true && !(serviceRequestId || estimateId || invoiceId || contactId);
-  if (!vendorLocationId || !(serviceRequestId || estimateId || invoiceId || contactId || pending)) {
-    return { error: fail("vendorLocationId and one of serviceRequestId, estimateId, invoiceId, contactId, pending are required") };
+  const { vendorLocationId, serviceRequestId, taskId, estimateId, invoiceId, contactId } = body || {};
+  const pending = body?.pending === true && !(serviceRequestId || taskId || estimateId || invoiceId || contactId);
+  if (!vendorLocationId || !(serviceRequestId || taskId || estimateId || invoiceId || contactId || pending)) {
+    return { error: fail("vendorLocationId and one of serviceRequestId, taskId, estimateId, invoiceId, contactId, pending are required") };
   }
   const vendor = await getTenant(env, vendorLocationId);
   if (!vendor || vendor.kind !== "service_vendor") {
@@ -375,7 +375,7 @@ async function loadVendorContext(request, env, contactStatuses = null) {
   if (pending) return { vendor, vendorLocationId, pit, record: null, body, pending: true };
   const record = await resolveServiceRequest(pit, vendorLocationId, body, contactStatuses);
   if (!record) {
-    const by = serviceRequestId ? `id ${serviceRequestId}` : estimateId ? `estimate ${estimateId}` : invoiceId ? `invoice ${invoiceId}` : `contact ${contactId}`;
+    const by = serviceRequestId ? `id ${serviceRequestId}` : taskId ? `task ${taskId}` : estimateId ? `estimate ${estimateId}` : invoiceId ? `invoice ${invoiceId}` : `contact ${contactId}`;
     return { error: fail(`No service request found for ${by}`, 404) };
   }
   return { vendor, vendorLocationId, pit, record, body };
@@ -400,8 +400,15 @@ async function resolveByNumber(pit, vendorLocationId, { estimateId, invoiceId },
 }
 
 // contactStatuses: which statuses a contact-only lookup may pick, newest first.
-async function resolveServiceRequest(pit, vendorLocationId, { serviceRequestId, estimateId, invoiceId, contactId }, contactStatuses) {
+async function resolveServiceRequest(pit, vendorLocationId, { serviceRequestId, taskId, estimateId, invoiceId, contactId }, contactStatuses) {
   if (serviceRequestId) return getObjectRecord(pit, vendorLocationId, SERVICE_REQUEST_KEY, serviceRequestId);
+  // A completed task names exactly one job (its id is stored as task_id), which
+  // the contact fallback can't do when a customer has two jobs in progress.
+  if (taskId) {
+    const all = await fetchAllObjectRecords(pit, vendorLocationId, SERVICE_REQUEST_KEY);
+    const byTask = all.find((r) => prop(r, "task_id") === taskId);
+    if (byTask || !contactId) return byTask || null;
+  }
   if (estimateId || invoiceId) {
     const all = await fetchAllObjectRecords(pit, vendorLocationId, SERVICE_REQUEST_KEY);
     const byId = all.find((r) => (estimateId && prop(r, "estimate_id") === estimateId) || (invoiceId && prop(r, "invoice_id") === invoiceId));
@@ -430,20 +437,33 @@ export const isAwaitingEstimate = (r) =>
 export const isAwaitingInvoice = (r) =>
   prop(r, "request_status") === "completado" && prop(r, "estimate_id") && !prop(r, "invoice_id");
 
+// GHL fires "Solicitud de Servicio Created" before the new record is searchable
+// (live 2026-09-16: the sweep found nothing; the same sweep a minute later found
+// it). An empty sweep therefore looks again a couple of times before giving up.
+const SWEEP_RETRIES = 2;
+
 async function sweep(env, ctx, isWaiting, one) {
   const days = Number(ctx.vendor.sweepDays) || 14;
   const since = Date.now() - days * 86400000;
-  const all = await fetchAllObjectRecords(ctx.pit, ctx.vendorLocationId, SERVICE_REQUEST_KEY);
-  const waiting = all.filter((r) => {
-    const touched = Date.parse(r.updatedAt || r.createdAt || "");
-    return isWaiting(r) && (Number.isNaN(touched) || touched >= since);
-  });
+  const retryDelay = ctx.vendor.sweepRetryDelayMs ?? 4000;
+  let waiting = [];
+  let attempts = 0;
+  for (;;) {
+    attempts++;
+    const all = await fetchAllObjectRecords(ctx.pit, ctx.vendorLocationId, SERVICE_REQUEST_KEY);
+    waiting = all.filter((r) => {
+      const touched = Date.parse(r.updatedAt || r.createdAt || "");
+      return isWaiting(r) && (Number.isNaN(touched) || touched >= since);
+    });
+    if (waiting.length || attempts > SWEEP_RETRIES) break;
+    await new Promise((r) => setTimeout(r, retryDelay));
+  }
   const results = [];
   for (const record of waiting) {
     const res = await one(env, { ...ctx, record, pending: false });
     results.push({ serviceRequestId: record.id, status: res.status, ...(await res.json()) });
   }
-  return Response.json({ ok: results.every((r) => r.ok !== false), pending: true, processed: results.length, results });
+  return Response.json({ ok: results.every((r) => r.ok !== false), pending: true, processed: results.length, attempts, results });
 }
 
 async function withSync(env, ctx, stageBody) {
