@@ -98,7 +98,7 @@ function makeGhl() {
       return json(200, { contact: { id: m[1], firstName: "Ana", lastName: "Reyes", phone: "8095551234", email: "ana@example.com" } });
     }
     if ((m = path.match(/^\/locations\/([^/]+)$/))) {
-      return json(200, { location: { id: m[1], name: "RL Santana Refrigeración", phone: "+18298779574", business: { name: "RL Santana Refrigeración", address: "Primera, Manzana 16", city: "Santo Domingo Este", country: "DO" } } });
+      return json(200, { location: { id: m[1], name: "RL Santana Refrigeración", phone: "+18298779574", timezone: "America/Santo_Domingo", business: { name: "RL Santana Refrigeración", address: "Primera, Manzana 16", city: "Santo Domingo Este", country: "DO" } } });
     }
     if (path === "/invoices/estimate" && method === "POST") {
       const eid = id("est");
@@ -169,6 +169,7 @@ let ghl = makeGhl();
 globalThis.fetch = (url, init) => ghl.handler(url, init);
 
 const { default: worker } = await import("./src/index.js");
+const svc = await import("./src/services.js");
 const call = (env, path, body, key = "svc-key") =>
   worker.fetch(new Request(`https://w.dev${path}`, {
     method: "POST",
@@ -207,6 +208,11 @@ const payload = { vendorLocationId: VENDOR, serviceRequestId: "sr1" };
   assert.equal(res.status, 200, JSON.stringify(out));
   const est = ghl.db.estimates[out.estimateId];
   assert.equal(est.currency, "DOP");
+  // Live 400 "Issue date cannot be in the future": the mock location is in
+  // America/Santo_Domingo, so after 20:00 there UTC is already tomorrow.
+  assert.equal(est.issueDate, svc.todayInZone("America/Santo_Domingo"), "issue date is today where the vendor is, not UTC");
+  assert.equal(svc.todayInZone("America/Santo_Domingo", new Date("2026-09-16T02:00:00Z")), "2026-09-15");
+  assert.equal(svc.todayInZone("Not/AZone", new Date("2026-09-16T02:00:00Z")), "2026-09-16", "an unknown timezone falls back to UTC rather than throwing");
   assert.match(est.expiryDate, /^\d{4}-\d{2}-\d{2}$/, "GHL 422s without a date-only expiryDate");
   assert.equal(est.expiryDate, new Date(Date.parse(est.issueDate) + 7 * 86400000).toISOString().slice(0, 10), "valid 7 days by default");
   assert.equal(est.items.length, 1);
