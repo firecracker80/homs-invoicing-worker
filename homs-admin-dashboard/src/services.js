@@ -55,6 +55,7 @@ import {
   createInvoiceFromEstimate,
   listContactInvoices,
   createContactTask,
+  listEstimates,
   getInvoice,
   updateInvoice,
   sendInvoice,
@@ -375,12 +376,33 @@ async function loadVendorContext(request, env, contactStatuses = null) {
   return { vendor, vendorLocationId, pit, record, body };
 }
 
+// GHL's estimate/invoice merge tags hand over the NUMBER ("22", "000117"), not
+// the id we stored (live 2026-09-15: "No service request found for estimate 22").
+// So a value that doesn't match a stored id is looked up as a number, and a
+// contactId in the same body is still used as a last resort.
+async function resolveByNumber(pit, vendorLocationId, { estimateId, invoiceId }, records) {
+  const wanted = String(estimateId || invoiceId).trim();
+  if (!wanted) return null;
+  const docs = estimateId
+    ? await listEstimates(pit, vendorLocationId)
+    : await listContactInvoices(pit, vendorLocationId, null).catch(() => []);
+  const sameNumber = (n) => String(n ?? "").trim() === wanted || String(Number(n)) === String(Number(wanted));
+  const doc = docs.find((d) => sameNumber(d.estimateNumber ?? d.invoiceNumber));
+  if (!doc) return null;
+  const id = doc._id || doc.id;
+  const field = estimateId ? "estimate_id" : "invoice_id";
+  return records.find((r) => prop(r, field) === id) || null;
+}
+
 // contactStatuses: which statuses a contact-only lookup may pick, newest first.
 async function resolveServiceRequest(pit, vendorLocationId, { serviceRequestId, estimateId, invoiceId, contactId }, contactStatuses) {
   if (serviceRequestId) return getObjectRecord(pit, vendorLocationId, SERVICE_REQUEST_KEY, serviceRequestId);
   if (estimateId || invoiceId) {
     const all = await fetchAllObjectRecords(pit, vendorLocationId, SERVICE_REQUEST_KEY);
-    return all.find((r) => (estimateId && prop(r, "estimate_id") === estimateId) || (invoiceId && prop(r, "invoice_id") === invoiceId)) || null;
+    const byId = all.find((r) => (estimateId && prop(r, "estimate_id") === estimateId) || (invoiceId && prop(r, "invoice_id") === invoiceId));
+    if (byId) return byId;
+    const byNumber = await resolveByNumber(pit, vendorLocationId, { estimateId, invoiceId }, all);
+    if (byNumber || !contactId) return byNumber;
   }
   const [associations, relations] = await Promise.all([
     fetchAssociations(pit, vendorLocationId),
