@@ -27,6 +27,7 @@ function makeGhl() {
     },
     relations: [],
     estimates: {},
+    estimateNumbers: {},
     invoices: {},
     calls: [],
     customValues: {
@@ -102,6 +103,7 @@ function makeGhl() {
     }
     if (path === "/invoices/estimate" && method === "POST") {
       const eid = id("est");
+      db.estimateNumbers[eid] = 20 + Object.keys(db.estimates).length + 2;
       db.estimates[eid] = { _id: eid, ...body, status: "draft" };
       return json(201, db.estimates[eid]);
     }
@@ -123,6 +125,9 @@ function makeGhl() {
       // Live GHL (2026-09-15) created the invoice but returned no `invoice` key.
       if (db.bareInvoiceResponse) return json(200, { traceId: "t" });
       return json(200, { estimate: est, invoice: db.invoices[iid] });
+    }
+    if (path === "/invoices/estimate/list" && method === "GET") {
+      return json(200, { estimates: Object.values(db.estimates).map((e) => ({ ...e, estimateNumber: db.estimateNumbers[e._id] })) });
     }
     if (path === "/invoices/" && method === "GET") {
       const cid = u.searchParams.get("contactId");
@@ -542,6 +547,35 @@ const expensesOf = () => Object.values(ghl.db.records[`${CLIENT}|custom_objects.
   assert.equal(Object.keys(ghl.db.invoices).length, 1);
   assert.equal((await call(env, "/api/services/estimate", { vendorLocationId: VENDOR, pending: "yes" })).status, 400, "pending must be exactly true");
   console.log("14) Pending sweeps: estimate picks only fresh priced solicitado requests, invoice only completado ones; repeat sweeps do nothing");
+}
+
+// ---- 15. an estimate/invoice NUMBER works as well as an id ----
+{
+  ghl = makeGhl();
+  const env = baseEnv(null);
+  seedRequest(homsReq({ request_source: "directo" }));
+  await call(env, "/api/services/estimate", payload);
+  const estimateId = vendorRec().properties.estimate_id;
+  const number = ghl.db.estimateNumbers[estimateId];
+  assert.ok(number, "fixture gives the estimate a number");
+
+  const byNumber = await (await call(env, "/api/services/accepted", { vendorLocationId: VENDOR, estimateId: String(number) })).json();
+  assert.equal(byNumber.ok, true, JSON.stringify(byNumber));
+  assert.equal(byNumber.serviceRequestId, "sr1", "GHL's merge tag gives the number, not the id");
+  assert.equal(vendorRec().properties.request_status, "aceptado");
+
+  // An unknown number with a contactId in the same body still falls back to the contact.
+  ghl = makeGhl();
+  seedRequest(homsReq({ request_source: "directo" }));
+  await call(env, "/api/services/estimate", payload);
+  const mixed = await (await call(env, "/api/services/accepted", { vendorLocationId: VENDOR, estimateId: "999", contactId: "contact9" })).json();
+  assert.equal(mixed.serviceRequestId, "sr1", "unknown number + contactId -> contact fallback");
+  // An unknown number on its own is still a clean 404.
+  ghl = makeGhl();
+  seedRequest(homsReq({ request_source: "directo" }));
+  await call(env, "/api/services/estimate", payload);
+  assert.equal((await call(env, "/api/services/accepted", { vendorLocationId: VENDOR, estimateId: "999" })).status, 404);
+  console.log("15) Estimate/invoice NUMBER resolves to the right request; unknown number falls back to contactId, or 404s on its own");
 }
 
 // ---- 10. existing dashboard routes still gated --------------------------------------

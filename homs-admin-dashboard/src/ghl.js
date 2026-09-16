@@ -239,6 +239,14 @@ export async function sendInvoice(pit, locationId, invoiceId, { userId, action, 
   });
 }
 
+// Estimates for this location, newest first as GHL returns them. Used to turn an
+// estimate NUMBER (what GHL's merge tag gives) into its id.
+export async function listEstimates(pit, locationId, { limit = 50 } = {}) {
+  const qs = new URLSearchParams({ altId: locationId, altType: "location", limit: String(limit), offset: "0" });
+  const res = await ghlRequest(pit, "GET", `/invoices/estimate/list?${qs}`);
+  return res.estimates || [];
+}
+
 // Contact task, assigned to a user. Tasks can only be assigned to users, not contacts.
 export async function createContactTask(pit, contactId, { title, body, dueDate, assignedTo }) {
   const res = await ghlRequest(pit, "POST", `/contacts/${contactId}/tasks`, {
