@@ -11,6 +11,10 @@
 //     services added on site, then send it.
 //   POST /api/services/accepted  { vendorLocationId, estimateId | contactId }
 //     Estimate accepted: status aceptado, task to the vendor's dispatch user.
+//   POST /api/services/declined  { vendorLocationId, estimateId | contactId }
+//     Estimate declined: status rechazado, the declined estimate noted, and the
+//     estimate link cleared so a corrected quote can be sent later. The client
+//     conversation itself belongs in the GHL workflow, not here.
 //   POST /api/services/paid      { vendorLocationId, invoiceId | contactId }
 //     Invoice paid: status pagado.
 //   POST /api/services/sync      { vendorLocationId, serviceRequestId }
@@ -85,6 +89,7 @@ export const STATUS_TO_CLIENT = {
   completado: "completed",
   facturado: "invoiced",
   pagado: "paid",
+  rechazado: "cancelled",
   cancelado: "cancelled",
 };
 
@@ -622,6 +627,37 @@ export async function handleServiceAccepted(request, env) {
       ...(taskId ? { task_id: taskId } : {}),
     });
     return withSync(env, ctx, { ok: true, taskId, dueDate: day });
+  } catch (err) {
+    return errorResponse(err);
+  }
+}
+
+export async function handleServiceDeclined(request, env) {
+  try {
+    const ctx = await loadVendorContext(request, env, ["cotizado"]);
+    if (ctx.error) return ctx.error;
+    const { vendorLocationId, pit, record } = ctx;
+
+    const status = prop(record, "request_status");
+    if (!["cotizado", "rechazado"].includes(status)) {
+      return Response.json({ ok: true, skipped: "not_awaiting_a_decision", status, serviceRequestId: record.id });
+    }
+    if (status === "rechazado") {
+      return Response.json({ ok: true, skipped: "already_declined", serviceRequestId: record.id });
+    }
+
+    const declinedEstimate = prop(record, "estimate_id");
+    const note = [prop(record, "job_notes"), "Cotización rechazada por el cliente (" + dateOnly(new Date().toISOString()) + "). Estimate " + (declinedEstimate || "?") + "."]
+      .filter(Boolean)
+      .join("\n");
+    // estimate_id is cleared on purpose: once the price is corrected and the
+    // request goes back to Solicitado, the pending sweep can quote it again.
+    await updateObjectRecord(pit, vendorLocationId, SERVICE_REQUEST_KEY, record.id, {
+      request_status: "rechazado",
+      estimate_id: "",
+      job_notes: note,
+    });
+    return withSync(env, ctx, { ok: true, status: "rechazado", declinedEstimate });
   } catch (err) {
     return errorResponse(err);
   }
