@@ -698,9 +698,49 @@ export async function handleServicePaid(request, env) {
   }
 }
 
+// The HOMS marketplace link carries the client:
+//   ?utm_source=homs-marketplace&utm_campaign=<client locationId>
+// GHL keeps those on the new contact's attribution. A request with no
+// homs_client yet is tagged from its customer's attribution, but only when the
+// source is the marketplace and the campaign is a HOMS client in
+// DASHBOARD_TENANTS (never a vendor). Guest links (homs-guest) are not tagged:
+// guest requests aren't mirrored.
+export const MARKETPLACE_SOURCE = "homs-marketplace";
+
+export function readMarketplaceTag(contact) {
+  const found = [];
+  for (const a of [contact?.attributionSource, contact?.lastAttributionSource]) {
+    if (!a || typeof a !== "object") continue;
+    const params = {};
+    for (const u of [a.url, a.referrer]) {
+      try { if (u) for (const [k, v] of new URL(u).searchParams) params[k.toLowerCase()] = v; } catch { /* not a URL */ }
+    }
+    const source = a.utmSource ?? a.utm_source ?? params.utm_source;
+    const campaign = a.utmCampaign ?? a.utm_campaign ?? a.campaign ?? params.utm_campaign;
+    if (String(source || "").trim().toLowerCase() === MARKETPLACE_SOURCE && campaign) found.push(String(campaign).trim());
+  }
+  return found;
+}
+
+async function tagFromAttribution(env, ctx, record) {
+  if (prop(record, "homs_client")) return record;
+  const contactId = await customerContactId(ctx.pit, ctx.vendorLocationId, record.id);
+  if (!contactId) return record;
+  const contact = await getContact(ctx.pit, contactId);
+  for (const clientLocationId of readMarketplaceTag(contact)) {
+    const tenant = await getTenant(env, clientLocationId);
+    if (!tenant || tenant.kind === "service_vendor" || tenant.disabled) continue;
+    const tag = { request_source: "cliente_homs", homs_client: clientLocationId };
+    await updateObjectRecord(ctx.pit, ctx.vendorLocationId, SERVICE_REQUEST_KEY, record.id, tag);
+    return { ...record, properties: { ...record.properties, ...tag } };
+  }
+  return record;
+}
+
 async function runSync(env, ctx) {
   try {
-    const { vendor, vendorLocationId, pit, record } = ctx;
+    const { vendor, vendorLocationId, pit } = ctx;
+    const record = await tagFromAttribution(env, ctx, ctx.record);
 
     if (prop(record, "request_source") !== "cliente_homs") {
       return Response.json({ ok: true, skipped: "not_a_homs_client_request" });
