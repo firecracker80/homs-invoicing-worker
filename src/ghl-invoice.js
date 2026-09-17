@@ -64,7 +64,7 @@
 // as contactId/locationId already do. Keeps onboarding a new client to
 // zero static per-tenant GHL-user config -- it scales across every user in
 // every account without a KV entry per person.
-import { yesNo } from "./policy.js";
+import { yesNo, isPetFeeName } from "./policy.js";
 
 const GHL_BASE = "https://services.leadconnectorhq.com";
 const GHL_VERSION = "2021-07-28";
@@ -178,9 +178,8 @@ export async function resolveDraftInvoiceId(
 // GHL's native Additional Fees can't be conditional, so a Pet Fee lands on
 // every booking. The booking form asks (required) whether the guest brings a
 // pet; on "No" that line is dropped before the invoice is sent. Payment at
-// booking is off, so nothing has been paid on it yet. Matched by exact name.
-export const PET_FEE_NAME = "pet fee";
-const isPetFee = item => String(item?.name || "").trim().toLowerCase() === PET_FEE_NAME;
+// booking is off, so nothing has been paid on it yet. Matched by name, in
+// English or Spanish (policy.js isPetFeeName).
 const isCleaningFee = item => /clean|limpieza/i.test(String(item?.name || ""));
 
 export async function enrichAndSendInvoice(
@@ -198,7 +197,7 @@ export async function enrichAndSendInvoice(
 
   const appendItems = buildAppendItems(snapshot, tenant);
   const noPets = yesNo(hasPets) === false;
-  const nativeItems = (existing.invoiceItems || []).filter(i => !(noPets && isPetFee(i)));
+  const nativeItems = (existing.invoiceItems || []).filter(i => !(noPets && isPetFeeName(i?.name, tenant)));
   const removedItems = (existing.invoiceItems || []).length - nativeItems.length;
   const invoiceItems = [...nativeItems, ...appendItems];
 

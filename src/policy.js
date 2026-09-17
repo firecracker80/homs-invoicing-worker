@@ -75,3 +75,25 @@ export function parseCancellationPolicy(text) {
   tiers.sort((a, b) => a.underHours - b.underHours);
   return { tiers, checkedInChargePct, unparsed };
 }
+
+// The Pet Fee line GHL adds, by name. Clients start in the DR, so Spanish
+// names count too. A bilingual name ("Pet Fee / Tarifa por mascota") matches
+// on either half. A client with its own wording sets tenant.petFeeName.
+// Deliberately exact (after trimming case and accents): "Limpieza de mascota"
+// or "Pet cleaning" are not the pet fee and are never removed.
+const PET_FEE_NAMES = new Set([
+  "pet fee", "pet fees", "pet", "pets",
+  "mascota", "mascotas",
+  "tarifa por mascota", "tarifa de mascota", "tarifa mascota", "tarifa por mascotas", "tarifa de mascotas",
+  "cargo por mascota", "cargo de mascota", "cargo mascota", "cargo por mascotas", "cargo de mascotas",
+  "cuota por mascota", "cuota de mascota", "fee de mascota", "fee por mascota"
+]);
+
+const normName = s => String(s ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+  .toLowerCase().replace(/\s+/g, " ").trim();
+
+export function isPetFeeName(name, tenant) {
+  const names = new Set(PET_FEE_NAMES);
+  for (const extra of [].concat(tenant?.petFeeName || [])) names.add(normName(extra));
+  return String(name ?? "").split(/\s*[\/|]\s*|\s+-\s+/).some(part => names.has(normName(part)));
+}

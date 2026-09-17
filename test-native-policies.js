@@ -5,7 +5,7 @@ import assert from "node:assert";
 import { composeBooking } from "./src/booking-composer.js";
 import { cancellationTier, calcCancellation } from "./src/cancellation.js";
 import { enrichAndSendInvoice } from "./src/ghl-invoice.js";
-import { yesNo, depositConfigFor, parseCancellationPolicy } from "./src/policy.js";
+import { yesNo, depositConfigFor, parseCancellationPolicy, isPetFeeName } from "./src/policy.js";
 
 const base = { currency: "USD", ownerPct: 0.85, processingFeePct: 0.06, ghlPit: "pit", defaultCleaningFee: 69, deposit: { rule: "tiered" } };
 const native = { ...base };
@@ -99,10 +99,22 @@ async function enrich(hasPets, items) {
     assert.equal(r.out.removedItems, 0);
   }
   const renamed = await enrich("no", [{ name: "Estadía", amount: 100, qty: 2 }, { name: "Pet cleaning", amount: 25, qty: 1 }]);
-  assert.ok(renamed.names.includes("Pet cleaning"), "only the exact 'Pet Fee' name is dropped");
+  assert.ok(renamed.names.includes("Pet cleaning"), "a different fee that mentions pets is kept");
+
+  const spanish = await enrich("No", [{ name: "Estadía", amount: 100, qty: 2 }, { name: "Tarifa por Mascota", amount: 25, qty: 1 }]);
+  assert.deepEqual(spanish.names, ["Estadía", "Cargo por procesamiento / Processing fee"], "Spanish pet fee dropped on No");
+
+  for (const n of ["Pet Fee", " PET FEE ", "Tarifa por mascota", "Cargo por Mascotas", "Mascota", "Pet Fee / Tarifa por mascota", "Cargo de mascota - Pet fee", "Tarifa de mascóta"])
+    assert.ok(isPetFeeName(n), `"${n}" is the pet fee`);
+  for (const n of ["Limpieza de mascota", "Pet cleaning", "Limpieza / Cleaning fee", "Estadía", "", null, "Depósito por mascota"])
+    assert.ok(!isPetFeeName(n), `"${n}" is not the pet fee`);
+  assert.ok(isPetFeeName("Depósito por mascota", { petFeeName: "Deposito por mascota" }), "tenant petFeeName adds a client's own wording");
+  assert.ok(isPetFeeName("Animal fee", { petFeeName: ["x", "animal fee"] }), "petFeeName may be a list");
 
   assert.equal(yesNo("NO"), false);
   assert.equal(yesNo(" Si "), true);
+  assert.equal(yesNo("Sí"), true);
+  assert.equal(yesNo("NO."), null, "punctuation makes it unknown -- the fee stays");
   assert.equal(yesNo("maybe"), null);
   console.log("3) invoice: Pet Fee dropped only on a clear No; native cleaning recorded, never appended");
 }
