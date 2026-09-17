@@ -3,7 +3,11 @@
 //   POST /cancel          { bookingId, override?, reason? }   header: X-Admin-Secret
 //   POST /deposit/refund  { bookingId, claimAmount?, reason? } header: X-Admin-Secret
 //
-// Policy (confirmed 2026-07-18, already-checked-in tier added 2026-08-07):
+// Rent retained on cancellation depends on the tenant (policy.js, 2026-09-16):
+//   default            → the tenant's own cancellationPolicy; none = full refund
+//   "tiered_legacy"    → Luminara's ladder below, unchanged
+//
+// Legacy policy (confirmed 2026-07-18, already-checked-in tier added 2026-08-07):
 //   Charge basis: RENT ONLY. Tiers by time before check-in (3PM local, configurable):
 //     already checked in → 100% (common practice: those nights can't be resold)
 //     < 24 hrs           → 50%
@@ -20,6 +24,7 @@
 import { getAccessToken } from "./paypal.js";
 import { writeAndSyncRows } from "./ledger.js";
 import { updateObjectRecord } from "./ghl.js";
+import { isLegacyPolicy, nativeCancellationPolicy } from "./policy.js";
 
 const round2 = n => Math.round(n * 100) / 100;
 const json = (data, status = 200) =>
@@ -54,12 +59,24 @@ export function cancellationTier(checkInDateStr, nowMs, tenant, override) {
   const isException = ["full_refund", "yes", "si", "sí", "true", "1", "on", "excepcion", "excepción"]
     .includes(String(override || "").trim().toLowerCase());
 
+  if (isException) return { tier: "exception_full_refund", chargePct: 0, hoursUntil: round2(hoursUntil) };
+
+  // Default tenants: their own policy, guest-friendly unless they set tiers.
+  if (!isLegacyPolicy(tenant)) {
+    const policy = nativeCancellationPolicy(tenant);
+    if (hoursUntil < 0) return { tier: "already_checked_in", chargePct: policy.checkedInChargePct, hoursUntil: round2(hoursUntil) };
+    const hit = policy.tiers.find(t => hoursUntil < t.underHours);
+    return hit
+      ? { tier: `under_${hit.underHours}h`, chargePct: hit.chargePct, hoursUntil: round2(hoursUntil) }
+      : { tier: "full_refund", chargePct: 0, hoursUntil: round2(hoursUntil) };
+  }
+
+  // "tiered_legacy" (Luminara) -- unchanged.
   let chargePct, tier;
-  if (isException)           { chargePct = 0;    tier = "exception_full_refund"; }
   // hoursUntil < 0 means the check-in moment has already passed -- the guest
   // is mid-stay (or a no-show past arrival). Common practice: those nights
   // aren't resellable on that notice, so nothing is refunded on them.
-  else if (hoursUntil < 0)   { chargePct = 1.00; tier = "already_checked_in"; }
+  if (hoursUntil < 0)        { chargePct = 1.00; tier = "already_checked_in"; }
   else if (hoursUntil < 24)  { chargePct = 0.50; tier = "under_24h"; }
   else if (hoursUntil < 120) { chargePct = 0.30; tier = "24h_to_5d"; }
   else                       { chargePct = 0.20; tier = "over_5d"; }

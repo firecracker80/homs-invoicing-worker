@@ -4,7 +4,11 @@ let activeTab = "overview";
 const $ = (sel) => document.querySelector(sel);
 const esc = (s) =>
   String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-const money = (n) => (n === null || n === undefined || n === "" ? "—" : `$${Number(n).toFixed(2)}`);
+// Anything that is not a finite number (a malformed amount from a broken sync) shows as a dash, never "$NaN".
+const money = (n) => {
+  const v = n === null || n === undefined || n === "" ? NaN : Number(n);
+  return Number.isFinite(v) ? `$${v.toFixed(2)}` : "—";
+};
 const CURRENCY_SYMBOLS = { DOP: "RD$", USD: "US$", EUR: "€" };
 // An amount in a stated currency. No currency = the account's own, shown as before.
 // The amount of an expense in the account's own currency, or null when it is in
@@ -17,9 +21,9 @@ const inAccountCurrency = (x) => {
   return x.convertedAmount ? Number(x.convertedAmount) : null;
 };
 const moneyIn = (n, cur) => {
-  if (n === null || n === undefined || n === "") return "—";
   if (!cur) return money(n);
-  return `${CURRENCY_SYMBOLS[cur] || cur + " "}${Number(n).toFixed(2)}`;
+  const v = n === null || n === undefined || n === "" ? NaN : Number(n);
+  return Number.isFinite(v) ? `${CURRENCY_SYMBOLS[cur] || cur + " "}${v.toFixed(2)}` : "—";
 };
 const dash = (v) => (v === null || v === undefined || v === "" ? "—" : esc(v));
 const dateFmt = (v) => (v ? new Date(v).toLocaleDateString() : "—");

@@ -20,6 +20,7 @@ const REAL_CUSTOM_VALUES = [
   cv("wbrand_name", "WBrand Name", "Luminara Hospitality"),
   cv("wcleaning_fee", "WCleaning Fee", "69"),
   cv("wcurrency", "WCurrency", "USD"),
+  cv("wcancellation_policy", "WCancellation Policy", "24h 50%, 5 dias 20%, check-in 100%"),
   cv("wghl_cancelation_url", "WGHL Cancelation URL", "https://services.leadconnectorhq.com/hooks/cancel"),
   cv("wlocale", "WLocale", "es-ES"),
   cv("wlocation_id", "WLocation ID", "wLGDbGcQ4QSG3nlT3Sis"),
@@ -38,6 +39,7 @@ const REAL_CUSTOM_VALUES = [
 global.fetch = async (url) => {
   if (url.includes("/customValues")) {
     if (url.includes("bad-pit-location")) return { ok: false, status: 403, text: async () => JSON.stringify({ message: "The token does not have access to this location." }) };
+    if (url.includes("bad-policy")) return { ok: true, status: 200, text: async () => JSON.stringify({ customValues: [cv("wcancellation_policy", "WCancellation Policy", "24h 50%, whenever")] }) };
     if (url.includes("bare-keys")) return { ok: true, status: 200, text: async () => JSON.stringify({ customValues: [{ fieldKey: "wbrand_name", name: "WBrand Name", value: "Bare" }] }) };
     return { ok: true, status: 200, text: async () => JSON.stringify({ customValues: REAL_CUSTOM_VALUES }) };
   }
@@ -66,7 +68,8 @@ const dry = await (await call(env1, "GET", "locationId=L1&ghlPit=pit1&paypalSecr
 assert.equal(dry.dryRun, true);
 assert.equal(dry.wouldWrite.brandName, "Luminara Hospitality", "wrapped '{{ custom_values.wbrand_name }}' must map");
 assert.equal(dry.wouldWrite.ownerPct, 0.85, "\"85\" from GHL must convert to the 0.85 fraction the worker's split math expects");
-assert.equal(dry.wouldWrite.defaultCleaningFee, 69);
+assert.equal(dry.wouldWrite.defaultCleaningFee, undefined, "cleaning is GHL-native; wcleaning_fee is no longer copied");
+assert.deepEqual(dry.wouldWrite.cancellationPolicy, { tiers: [{ underHours: 24, chargePct: 0.5 }, { underHours: 120, chargePct: 0.2 }], checkedInChargePct: 1 }, "WCancellation Policy text -> cancellationPolicy");
 assert.equal(dry.wouldWrite.paypalWebhookId, "WH-999", "wpaypal_webhook -> paypalWebhookId, read by payment.js webhook verification");
 assert.equal(dry.wouldWrite.ownerPaypalEmail, "owner@x.com");
 assert.equal(dry.wouldWrite.managerPaypalEmail, "mgr@x.com");
@@ -96,6 +99,11 @@ assert.ok(unset.warnings.some(w => w.includes("wrangler secret put PAYPAL_SECRET
 console.log("5) Missing or unset paypalSecretName -> gateway not inferred, warning tells you the fix");
 
 // ---- 6. Bare fieldKeys still map (in case GHL ever returns them) ----
+const badPolicy = await (await call(env1, "GET", "locationId=bad-policy&ghlPit=pit1")).json();
+assert.ok(badPolicy.warnings.some(w => w.includes("whenever")), "an unreadable cancellation rule is reported, not silently dropped");
+assert.deepEqual(badPolicy.wouldWrite.cancellationPolicy.tiers, [{ underHours: 24, chargePct: 0.5 }], "the readable rules still apply");
+console.log("   WCancellation Policy: unreadable rule -> warning, readable rules kept");
+
 const bare = await (await call(env1, "GET", "locationId=bare-keys&ghlPit=pit1")).json();
 assert.equal(bare.wouldWrite.brandName, "Bare");
 console.log("6) Bare fieldKey form still maps");

@@ -1,6 +1,12 @@
 // booking-composer.js (v2) — GHL payload + tenant profile → snapshot + PayPal purchase units.
 // Deposit is passThrough — never in commission basis, never in payout split.
+// The cleaning fee is not charged here any more (2026-09-16): GHL's native
+// Additional Fees collect it for every tenant. charges.cleaningFee stays in
+// the snapshot at 0 (or the amount GHL's own invoice line shows, recorded by
+// the enrich path) so older bookings and the ledger keep one shape.
+// The deposit follows the tenant's policy -- see policy.js.
 import { calcSecurityDeposit, round2 } from "./deposit-engine.js";
+import { depositConfigFor } from "./policy.js";
 
 function nightsBetween(checkIn, checkOut) {
   return Math.round((new Date(checkOut) - new Date(checkIn)) / 86400000);
@@ -10,10 +16,10 @@ function composeBooking(payload, tenantProfile) {
   const nights = payload.nights ?? nightsBetween(payload.checkIn, payload.checkOut);
   const nightlyRate = payload.nightlyRate ?? round2(payload.bookingTotal / nights);
   const rentTotal = round2(nights * nightlyRate);
-  const cleaningFee = payload.cleaningFee ?? tenantProfile.defaultCleaningFee ?? 0;
-  const deposit = calcSecurityDeposit(nights, nightlyRate, tenantProfile.deposit || { rule: "tiered" }, cleaningFee);
+  const cleaningFee = 0;
+  const deposit = calcSecurityDeposit(nights, nightlyRate, depositConfigFor(tenantProfile), cleaningFee);
 
-  // Processing fee: guest-paid, default 6%, applied to rent + cleaning + deposit.
+  // Processing fee: guest-paid, default 6%, applied to rent + deposit.
   // Collected inside the RENT purchase unit so the DEP unit stays pure —
   // deposit refunds return 100% of the deposit; the fee is never refunded.
   const feePct = tenantProfile.processingFeePct ?? 0.06;
@@ -38,11 +44,6 @@ function composeBooking(payload, tenantProfile) {
         quantity: String(nights),
         unit_amount: { currency_code: tenantProfile.currency || "USD", value: nightlyRate.toFixed(2) }
       },
-      ...(cleaningFee > 0 ? [{
-        name: "Tarifa de limpieza",
-        quantity: "1",
-        unit_amount: { currency_code: tenantProfile.currency || "USD", value: cleaningFee.toFixed(2) }
-      }] : []),
       ...(processingFee > 0 ? [{
         name: "Tarifa de procesamiento de pago",
         quantity: "1",

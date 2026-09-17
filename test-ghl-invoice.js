@@ -8,7 +8,7 @@ import { buildAppendItems, resolveDraftInvoiceId, enrichAndSendInvoice } from ".
 const tenant = {
   brandName: "Luminara", currency: "USD", ownerPct: 0.85, processingFeePct: 0.06,
   defaultCleaningFee: 69, cleaningFeeRecipient: "manager", bookingWorkerEnabled: true,
-  gateway: "paypal", deposit: { rule: "tiered" },
+  gateway: "paypal", deposit: { rule: "tiered" }, depositPolicy: "tiered_legacy",
   paypalApi: "https://p", paypalClientId: "C", paypalSecret: "S",
   airtableBaseId: "a", airtableToken: "pat", defaultPropertyRecId: "rP",
   ghlPit: "test-ghl-pit"
@@ -66,10 +66,9 @@ function jsonRes(obj) {
 
 // ---- 1. append-only line items (rent line is GHL's, NOT rebuilt here) ----
 const appendItems = buildAppendItems(snapshot, tenant);
-assert.equal(appendItems.length, 3, "expected 3 append-only line items (cleaning, deposit, fee)");
-assert.equal(appendItems[0].name.includes("Cleaning"), true);
-assert.equal(appendItems[1].name.includes("Security deposit"), true);
-assert.equal(appendItems[2].amount, 24.3);
+assert.equal(appendItems.length, 2, "expected 2 append-only line items (deposit, fee) -- cleaning is GHL-native, never appended");
+assert.equal(appendItems[0].name.includes("Security deposit"), true);
+assert.equal(appendItems[1].amount, 24.3);
 
 // ---- 2. resolve draft id: hinted id short-circuits (zero calls) ----
 calls.length = 0;
@@ -106,7 +105,7 @@ assert.equal(put.body.dueDate, "2026-09-01", "dueDate must be truncated to YYYY-
 assert.ok(put.body.discount, "discount must be present -- 422s live with 'discount should not be empty' despite the schema marking it optional");
 assert.equal(put.body.contactDetails.phoneNo, "+18090000000", "phone must be normalized to E.164 -- 422s live on '(809) 000-0000' with 'Phone number must be in E.164 format'");
 // Rent line preserved + 3 appended = 4, rent line untouched (still GHL's own $60 x5)
-assert.equal(put.body.invoiceItems.length, 4, "rent line (GHL's) + 3 appended lines");
+assert.equal(put.body.invoiceItems.length, 3, "rent line (GHL's) + 2 appended lines");
 assert.deepEqual(put.body.invoiceItems[0], { name: "Estadía", currency: "USD", amount: 60, qty: 5 }, "existing rent line must be preserved untouched, not rebuilt");
 
 const send = calls.find(c => c.url.endsWith("/send"));
