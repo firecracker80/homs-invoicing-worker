@@ -96,7 +96,7 @@ function makeGhl() {
       return json(201, { task: { id: tid, ...body } });
     }
     if ((m = path.match(/^\/contacts\/([^/]+)$/))) {
-      return json(200, { contact: { id: m[1], firstName: "Ana", lastName: "Reyes", phone: "8095551234", email: "ana@example.com" } });
+      return json(200, { contact: { id: m[1], firstName: "Ana", lastName: "Reyes", phone: "8095551234", email: "ana@example.com", ...(db.contactExtra?.[m[1]] || {}) } });
     }
     if ((m = path.match(/^\/locations\/([^/]+)$/))) {
       return json(200, { location: { id: m[1], name: "RL Santana Refrigeración", phone: "+18298779574", timezone: "America/Santo_Domingo", business: { name: "RL Santana Refrigeración", address: "Primera, Manzana 16", city: "Santo Domingo Este", country: "DO" } } });
@@ -664,6 +664,47 @@ const expensesOf = () => Object.values(ghl.db.records[`${CLIENT}|custom_objects.
   assert.equal(none.processed, 0);
   assert.equal(none.attempts, 3, "gives up after two extra looks");
   console.log("17) taskId invoices the completed task's own job; an empty sweep looks again (found on 2nd look, gives up after 3)");
+}
+
+// ---- 18. marketplace link tags the request with the HOMS client ----
+{
+  const env = baseEnv("DOP");
+  const base = { service_item: "Mantenimiento A/C", quoted_amount: { value: 3500, currency: "default" }, request_status: "solicitado", request_source: "directo", job_address: "Villa Marisol, Las Terrenas", category: "aire_acondicionado" };
+
+  ghl = makeGhl();
+  ghl.db.contactExtra = { contact9: { attributionSource: { utmSource: "homs-marketplace", utmCampaign: CLIENT } } };
+  seedRequest({ ...base });
+  const out = await (await call(env, "/api/services/estimate", payload)).json();
+  assert.equal(vendorRec().properties.homs_client, CLIENT, JSON.stringify(out));
+  assert.equal(vendorRec().properties.request_source, "cliente_homs");
+  assert.equal(Object.keys(ghl.db.records[`${CLIENT}|${SR}`]).length, 1, "tagged request is mirrored to the client");
+
+  ghl = makeGhl();
+  ghl.db.contactExtra = { contact9: { attributionSource: { url: `https://rlsantana.example/chat?utm_source=homs-marketplace&utm_campaign=${CLIENT}` } } };
+  seedRequest({ ...base });
+  await call(env, "/api/services/estimate", payload);
+  assert.equal(vendorRec().properties.homs_client, CLIENT, "read from the landing URL when utm fields are absent");
+
+  for (const [why, attr] of [
+    ["guest link", { utmSource: "homs-guest", utmCampaign: CLIENT }],
+    ["vendor as campaign", { utmSource: "homs-marketplace", utmCampaign: VENDOR }],
+    ["unknown account", { utmSource: "homs-marketplace", utmCampaign: "nope" }],
+    ["no attribution", null],
+  ]) {
+    ghl = makeGhl();
+    ghl.db.contactExtra = { contact9: attr ? { attributionSource: attr } : {} };
+    seedRequest({ ...base });
+    const r = await (await call(env, "/api/services/estimate", payload)).json();
+    assert.equal(vendorRec().properties.homs_client, undefined, why);
+    assert.equal(r.sync?.skipped, "not_a_homs_client_request", why);
+  }
+
+  ghl = makeGhl();
+  ghl.db.contactExtra = { contact9: { attributionSource: { utmSource: "homs-marketplace", utmCampaign: "other" } } };
+  seedRequest({ ...base, request_source: "cliente_homs", homs_client: CLIENT });
+  await call(env, "/api/services/estimate", payload);
+  assert.equal(vendorRec().properties.homs_client, CLIENT, "an existing tag is never overwritten");
+  console.log("18) marketplace link tags homs_client (utm fields or landing URL); guest/vendor/unknown/none/existing left alone");
 }
 
 // ---- 10. existing dashboard routes still gated --------------------------------------
