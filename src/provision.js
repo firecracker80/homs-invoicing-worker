@@ -31,6 +31,8 @@
 // extracts the slug; matching the raw string misses every value. Still run a
 // GET first and check "unmappedCustomValues" before trusting a POST.
 
+import { parseCancellationPolicy } from "./policy.js";
+
 const GHL_BASE = "https://services.leadconnectorhq.com";
 const GHL_VERSION = "2021-07-28";
 
@@ -74,6 +76,8 @@ const FIELD_MAP = {
   wbrand_name: { tenantField: "brandName" },
   // wcleaning_fee is no longer mapped: cleaning is a GHL-native Additional Fee.
   wcurrency: { tenantField: "currency" },
+  // Rent kept on a cancellation, e.g. "24h 50%, 5d 20%, check-in 100%". Blank = full refund.
+  wcancellation_policy: { tenantField: "cancellationPolicy", transform: parseCancellationPolicy },
   wghl_cancelation_url: { tenantField: "ghlCancellationUrl" },
   wghl_deposit_url: { tenantField: "ghlDepositRefundUrl" },
   wghl_payment_confirmation_url: { tenantField: "ghlPaymentConfirmedUrl" },
@@ -123,6 +127,7 @@ function buildTenantFromCustomValues(customValues, ghlPit, paypalSecretName) {
   const mapped = [];
   const unmapped = [];
   const skippedSensitive = [];
+  const policyProblems = [];
 
   for (const cv of customValues) {
     const key = slugOf(cv);
@@ -131,6 +136,10 @@ function buildTenantFromCustomValues(customValues, ghlPit, paypalSecretName) {
     const rule = FIELD_MAP[key];
     if (!rule) { unmapped.push({ fieldKey: cv.fieldKey, name: cv.name, value: cv.value }); continue; }
     const value = rule.transform ? rule.transform(cv.value) : cv.value;
+    if (value?.unparsed) {
+      for (const part of value.unparsed) policyProblems.push(`${cv.name || key}: could not read "${part}"`);
+      delete value.unparsed;
+    }
     tenant[rule.tenantField] = value;
     mapped.push({ fieldKey: cv.fieldKey, tenantField: rule.tenantField, value });
   }
@@ -139,7 +148,7 @@ function buildTenantFromCustomValues(customValues, ghlPit, paypalSecretName) {
   // since guessing a payment processor wrong would misroute live payments.
   if (tenant.paypalClientId && tenant.paypalSecretName) tenant.gateway = "paypal";
 
-  return { tenant, mapped, unmapped, skippedSensitive };
+  return { tenant, mapped, unmapped, skippedSensitive, policyProblems };
 }
 
 export async function handleProvisionTenant(request, env) {
@@ -161,11 +170,11 @@ export async function handleProvisionTenant(request, env) {
     return json({ error: err.message }, err.status || 502);
   }
 
-  const { tenant: provisioned, mapped, unmapped, skippedSensitive } = buildTenantFromCustomValues(customValues, ghlPit, paypalSecretName);
+  const { tenant: provisioned, mapped, unmapped, skippedSensitive, policyProblems } = buildTenantFromCustomValues(customValues, ghlPit, paypalSecretName);
 
   // Names a secret that isn't set on this Worker -> payments would fail at
   // auth time. Surface it now rather than at the first guest checkout.
-  const warnings = [];
+  const warnings = [...policyProblems];
   if (paypalSecretName && !env[paypalSecretName]) {
     warnings.push(`paypalSecretName "${paypalSecretName}" is not set as a Worker secret on this environment -- run: wrangler secret put ${paypalSecretName}`);
   }

@@ -5,7 +5,7 @@ import assert from "node:assert";
 import { composeBooking } from "./src/booking-composer.js";
 import { cancellationTier, calcCancellation } from "./src/cancellation.js";
 import { enrichAndSendInvoice } from "./src/ghl-invoice.js";
-import { yesNo, depositConfigFor } from "./src/policy.js";
+import { yesNo, depositConfigFor, parseCancellationPolicy } from "./src/policy.js";
 
 const base = { currency: "USD", ownerPct: 0.85, processingFeePct: 0.06, ghlPit: "pit", defaultCleaningFee: 69, deposit: { rule: "tiered" } };
 const native = { ...base };
@@ -105,6 +105,20 @@ async function enrich(hasPets, items) {
   assert.equal(yesNo(" Si "), true);
   assert.equal(yesNo("maybe"), null);
   console.log("3) invoice: Pet Fee dropped only on a clear No; native cleaning recorded, never appended");
+}
+
+// ---- 4. WCancellation Policy text ----
+{
+  assert.deepEqual(parseCancellationPolicy(""), { tiers: [], checkedInChargePct: 0, unparsed: [] });
+  assert.deepEqual(parseCancellationPolicy("none").tiers, []);
+  const p = parseCancellationPolicy("5d 20%; 24 horas 50%\nllegada 100%");
+  assert.deepEqual(p.tiers, [{ underHours: 24, chargePct: 0.5 }, { underHours: 120, chargePct: 0.2 }]);
+  assert.equal(p.checkedInChargePct, 1);
+  assert.deepEqual(parseCancellationPolicy("48h, 10%").unparsed, ["48h", "10%"], "a rule needs both a window and a share");
+  const tenant = { cancellationPolicy: parseCancellationPolicy("24h 50%, 5d 20%") };
+  const anchor = Date.parse("2026-10-10T00:00:00Z") + 19 * 3600000;
+  assert.equal(cancellationTier("2026-10-10", anchor - 50 * 3600000, tenant).chargePct, 0.2, "parsed policy drives the cancellation");
+  console.log("4) WCancellation Policy text parses (English/Spanish, h/d), bad rules reported");
 }
 
 console.log("\nPASS — native-first policies.");
