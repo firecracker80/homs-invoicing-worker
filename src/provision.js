@@ -72,7 +72,7 @@ function pctToFraction(raw) {
 const FIELD_MAP = {
   wadmin_secret: { tenantField: "adminSecret" },
   wbrand_name: { tenantField: "brandName" },
-  wcleaning_fee: { tenantField: "defaultCleaningFee", transform: Number },
+  // wcleaning_fee is no longer mapped: cleaning is a GHL-native Additional Fee.
   wcurrency: { tenantField: "currency" },
   wghl_cancelation_url: { tenantField: "ghlCancellationUrl" },
   wghl_deposit_url: { tenantField: "ghlDepositRefundUrl" },
@@ -100,6 +100,9 @@ const FIELD_MAP = {
 // withheld, so the response doesn't echo a credential back either.
 const SKIPPED_SENSITIVE = new Set(["wpaypal_secret_key"]);
 
+// Still present in older client accounts, no longer read by the Worker.
+const RETIRED = new Set(["wcleaning_fee"]);
+
 async function fetchCustomValues(locationId, ghlPit) {
   const res = await fetch(`${GHL_BASE}/locations/${locationId}/customValues`, {
     headers: { Authorization: `Bearer ${ghlPit}`, Version: GHL_VERSION, Accept: "application/json" }
@@ -123,7 +126,7 @@ function buildTenantFromCustomValues(customValues, ghlPit, paypalSecretName) {
 
   for (const cv of customValues) {
     const key = slugOf(cv);
-    if (key === "wlocation_id") continue;
+    if (key === "wlocation_id" || RETIRED.has(key)) continue;
     if (SKIPPED_SENSITIVE.has(key)) { skippedSensitive.push(key); continue; }
     const rule = FIELD_MAP[key];
     if (!rule) { unmapped.push({ fieldKey: cv.fieldKey, name: cv.name, value: cv.value }); continue; }

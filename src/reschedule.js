@@ -9,6 +9,7 @@
 // rolls back a completed reschedule; it just flags the manual follow-up.
 
 import { calcSecurityDeposit, round2 } from "./deposit-engine.js";
+import { depositConfigFor } from "./policy.js";
 import { createOrder, getAccessToken } from "./paypal.js";
 import { createCheckoutSession } from "./stripe.js";
 import { writeAndSyncRows } from "./ledger.js";
@@ -106,7 +107,7 @@ export async function handleReschedule(request, env) {
   const oldDeposit = snapshot.securityDeposit.total;
   const newRent = round2(newNights * rate);
   const newDepositCalc = calcSecurityDeposit(
-    newNights, rate, tenant.deposit || { rule: "tiered" }, snapshot.charges.cleaningFee
+    newNights, rate, depositConfigFor(tenant), snapshot.charges.cleaningFee
   );
   const newDeposit = newDepositCalc.totalDeposit;
 

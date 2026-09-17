@@ -45,7 +45,7 @@ const env = {
       defaultLanguage: "es",
       ownerPct: 0.85,
       processingFeePct: 0.06,
-      defaultCleaningFee: 60,
+      depositPolicy: "tiered_legacy", // Luminara-style opt-in: the Worker sizes + collects the deposit
       cleaningFeeRecipient: "manager",
       invoiceDueHours: 24,
       bookingWorkerEnabled: true,

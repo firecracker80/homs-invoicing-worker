@@ -66,14 +66,14 @@ const dry = await (await call(env1, "GET", "locationId=L1&ghlPit=pit1&paypalSecr
 assert.equal(dry.dryRun, true);
 assert.equal(dry.wouldWrite.brandName, "Luminara Hospitality", "wrapped '{{ custom_values.wbrand_name }}' must map");
 assert.equal(dry.wouldWrite.ownerPct, 0.85, "\"85\" from GHL must convert to the 0.85 fraction the worker's split math expects");
-assert.equal(dry.wouldWrite.defaultCleaningFee, 69);
+assert.equal(dry.wouldWrite.defaultCleaningFee, undefined, "cleaning is GHL-native; wcleaning_fee is no longer copied");
 assert.equal(dry.wouldWrite.paypalWebhookId, "WH-999", "wpaypal_webhook -> paypalWebhookId, read by payment.js webhook verification");
 assert.equal(dry.wouldWrite.ownerPaypalEmail, "owner@x.com");
 assert.equal(dry.wouldWrite.managerPaypalEmail, "mgr@x.com");
 assert.equal(dry.wouldWrite.ghlPit, "pit1", "the PIT handed to this call must end up in the written tenant too, not just used to fetch");
 assert.equal(dry.wouldWrite.bookingWorkerEnabled, true);
 assert.ok(!("wlocation_id" in dry.wouldWrite) && dry.wouldWrite.locationId === undefined, "wlocation_id is the KV key, must never become a JSON field");
-assert.equal(dry.mappedFromCustomValues.length, 14, "every known value maps -- none silently lost to the fieldKey wrapper");
+assert.equal(dry.mappedFromCustomValues.length, 13, "every known value maps -- none silently lost to the fieldKey wrapper");
 assert.deepEqual(dry.unmappedCustomValues.map(u => u.name), ["WSomething New"], "only the genuinely unknown value is unmapped");
 assert.equal(kv1._store.size, 0, "GET must never write, regardless of what it found");
 console.log("3) GET dry run: wrapped fieldKeys map, 85 -> 0.85, webhook ID + payout emails mapped, nothing written");

@@ -64,6 +64,7 @@
 // as contactId/locationId already do. Keeps onboarding a new client to
 // zero static per-tenant GHL-user config -- it scales across every user in
 // every account without a KV entry per person.
+import { yesNo } from "./policy.js";
 
 const GHL_BASE = "https://services.leadconnectorhq.com";
 const GHL_VERSION = "2021-07-28";
@@ -108,11 +109,11 @@ async function ghlFetch(tenant, env, path, { method = "GET", body } = {}, fetchI
 // booking-composer.js): snapshot.charges.{cleaningFee,processingFee},
 // snapshot.securityDeposit.total. Currency lives on the TENANT, not the
 // snapshot -- pass it separately.
+// Cleaning is GHL-native now and never appended; the deposit is only here for
+// a "tiered_legacy" tenant (the composer leaves it at 0 for everyone else).
 export function buildAppendItems(snapshot, tenant) {
   const cur = tenant.currency || "USD";
   const items = [];
-  if (snapshot.charges.cleaningFee > 0)
-    items.push({ name: "Limpieza / Cleaning fee", currency: cur, amount: round2(snapshot.charges.cleaningFee), qty: 1 });
   if (snapshot.securityDeposit.total > 0)
     items.push({ name: "Depósito de seguridad / Security deposit", currency: cur, amount: round2(snapshot.securityDeposit.total), qty: 1 });
   if (snapshot.charges.processingFee > 0)
@@ -174,8 +175,16 @@ export async function resolveDraftInvoiceId(
 // userId comes from the booking webhook's {{user.id}} (see index.js), not
 // tenant config -- required by send-invoice, but it identifies WHO is
 // sending, which is a per-request fact, not a per-client one.
+// GHL's native Additional Fees can't be conditional, so a Pet Fee lands on
+// every booking. The booking form asks (required) whether the guest brings a
+// pet; on "No" that line is dropped before the invoice is sent. Payment at
+// booking is off, so nothing has been paid on it yet. Matched by exact name.
+export const PET_FEE_NAME = "pet fee";
+const isPetFee = item => String(item?.name || "").trim().toLowerCase() === PET_FEE_NAME;
+const isCleaningFee = item => /clean|limpieza/i.test(String(item?.name || ""));
+
 export async function enrichAndSendInvoice(
-  { tenant, env, locationId, invoiceId, snapshot, contact, userId },
+  { tenant, env, locationId, invoiceId, snapshot, contact, userId, hasPets },
   fetchImpl = fetch
 ) {
   if (!userId) throw new Error("No userId on this request ({{user.id}} merge tag) -- required by send-invoice");
@@ -188,7 +197,19 @@ export async function enrichAndSendInvoice(
   );
 
   const appendItems = buildAppendItems(snapshot, tenant);
-  const invoiceItems = [...(existing.invoiceItems || []), ...appendItems];
+  const noPets = yesNo(hasPets) === false;
+  const nativeItems = (existing.invoiceItems || []).filter(i => !(noPets && isPetFee(i)));
+  const removedItems = (existing.invoiceItems || []).length - nativeItems.length;
+  const invoiceItems = [...nativeItems, ...appendItems];
+
+  // Record (not charge) GHL's own cleaning line so the owner/manager split
+  // still sees it.
+  const nativeCleaning = round2(nativeItems.filter(isCleaningFee)
+    .reduce((s, i) => s + Number(i.amount || 0) * Number(i.qty || 1), 0));
+  if (nativeCleaning > 0) {
+    snapshot.charges.cleaningFee = nativeCleaning;
+    snapshot.charges.cleaningFeeSource = "ghl_native";
+  }
 
   // Keep GHL's own sequential number (guest-facing on the invoice/PDF/email)
   // and append the booking id for correlation instead of overwriting it --
@@ -243,7 +264,7 @@ export async function enrichAndSendInvoice(
     fetchImpl
   );
 
-  return { invoiceId, items: invoiceItems, appendedItems: appendItems, sent };
+  return { invoiceId, items: invoiceItems, appendedItems: appendItems, removedItems, sent };
 }
 
 function round2(n) {

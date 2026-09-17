@@ -62,7 +62,6 @@ function normalizePayload(raw) {
   // money: GHL sends stayTotal (often formatted: "$420.00")
   if (p.bookingTotal == null && p.stayTotal != null) p.bookingTotal = toMoney(p.stayTotal);
   if (typeof p.bookingTotal === "string") p.bookingTotal = toMoney(p.bookingTotal);
-  if (typeof p.cleaningFee === "string") p.cleaningFee = toMoney(p.cleaningFee);
   if (typeof p.nightlyRate === "string") p.nightlyRate = toMoney(p.nightlyRate);
   // dates: rentalBooking.start_time/end_time are datetimes → date-only
   if (p.checkIn) p.checkIn = toDateOnly(p.checkIn);
@@ -110,7 +109,7 @@ async function handleBookingCreated(request, env) {
       invoiceId: "SAMPLE-INVOICE-ID",
       grandTotal: "1037.74",
       rentTotal: "420.00",
-      cleaningFee: "69.00",
+      cleaningFee: "0.00",
       processingFee: "58.74",
       depositTotal: "490.00",
       nights: 6,
@@ -138,7 +137,7 @@ async function handleBookingCreated(request, env) {
     checkOut: payload.checkOut ?? null,
     stayTotal: payload.stayTotal ?? null,
     bookingTotal: Number.isFinite(payload.bookingTotal) ? payload.bookingTotal : String(payload.bookingTotal ?? null),
-    cleaningFee: payload.cleaningFee ?? null
+    hasPets: payload.hasPets ?? null
   };
   const missing = ["bookingId", "locationId", "checkIn", "checkOut"].filter(k => !payload[k]);
   if (missing.length) {
@@ -209,7 +208,7 @@ async function handleBookingCreated(request, env) {
         bookingId: snapshot.bookingId,
         hintedInvoiceId: payload.invoiceId || payload.invoice?.id || null
       });
-      const { items } = await enrichAndSendInvoice({
+      const { items, removedItems } = await enrichAndSendInvoice({
         tenant, env,
         locationId: snapshot.locationId,
         invoiceId,
@@ -222,9 +221,11 @@ async function handleBookingCreated(request, env) {
         },
         // {{user.id}} on the webhook, not tenant config -- who is sending
         // this invoice is a per-request fact, not a per-client one.
-        userId: payload.userId
+        userId: payload.userId,
+        // Required Yes/No on the booking form; "No" drops GHL's Pet Fee line.
+        hasPets: payload.hasPets
       });
-      snapshot.ghlInvoice = { invoiceId, appendedItems: items.length, sentAt: new Date().toISOString() };
+      snapshot.ghlInvoice = { invoiceId, appendedItems: items.length, removedItems, sentAt: new Date().toISOString() };
       gateway = "ghl_invoice";
       gatewayRef = invoiceId;
       approveUrl = null; // guest pays via the invoice GHL just sent, not a link we generate
