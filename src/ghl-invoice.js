@@ -53,11 +53,13 @@
 // booking id, captured at the contact level in GHL and fed to
 // /booking-created via the {{contact.booking_id}} merge tag.
 //
-// It's APPENDED to GHL's own invoiceNumber ("000018-D6Stqz...") rather than
-// replacing it, so the guest-facing sequential numbering GHL assigns stays
-// intact. That means resolveDraftInvoiceId's retry-lookup can't do an exact
-// match (GHL's own number isn't known until after the invoice is found) --
-// it matches by substring instead.
+// GHL's own invoice number is left exactly as GHL assigned it (2026-09-21).
+// Appending the booking id ("000005-rpbWV3iis3rDG1gBB7Ky") overflowed the
+// Invoice No column on GHL's hosted invoice page into Issue Date, and that
+// page's CSS isn't ours to change. Retries are guarded in index.js instead:
+// the booking snapshot records the invoice as "sending" before it's touched,
+// and GHL's own invoice status (draft / sent / viewed / paid / void) says
+// whether a run that died part-way still needs finishing.
 //
 // userId (required by send-invoice) is likewise per-REQUEST, not
 // per-tenant config: it comes from {{user.id}} on the booking webhook, same
@@ -122,8 +124,8 @@ export function buildAppendItems(snapshot, tenant) {
 }
 
 // --- resolve the draft's _id ---------------------------------------------
-// Prefer the id handed to you on the booking webhook. Fall back to a scoped
-// list-invoices lookup keyed by contact + our correlation number.
+// Prefer the id handed to you on the booking webhook. Fall back to the
+// contact's newest invoice GHL hasn't sent yet.
 // altId IS required here despite not appearing in the operation's public
 // parameter schema -- confirmed live: omitting it 401s ("A 401 from the
 // invoices service almost always means a missing altId, not a missing
@@ -151,24 +153,33 @@ export async function resolveDraftInvoiceId(
   const list = await ghlFetch(tenant, env, `/invoices/?${q}`, {}, fetchImpl);
   const invoices = list.invoices || [];
 
-  // The stamped invoiceNumber is GHL's own number with bookingId APPENDED
-  // ("000018-D6Stqz...") so GHL's native numbering sequence stays intact --
-  // see enrichAndSendInvoice. That means an exact match isn't possible here:
-  // on a retry we don't know what GHL's original number was until we've
-  // already found the invoice, so match by substring instead.
-  const byNumber = invoices.find(i => i.invoiceNumber && i.invoiceNumber.includes(bookingId));
-  if (byNumber) return byNumber._id;
-
-  // No correlation number yet -> newest NOT-YET-PAID invoice for this
-  // contact (excludes "paid" specifically since that's a status we DO know
-  // for certain, rather than guessing what "draft" is actually spelled).
-  const candidates = invoices.filter(i => i.status !== "paid");
+  // Only an invoice GHL hasn't sent can be the booking's fresh draft: never
+  // one already sent, viewed, (partly) paid or voided.
+  const candidates = invoices.filter(i => !isPastDraft(i.status));
   const newest = candidates.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))[0];
   if (!newest) {
     const statuses = invoices.map(i => i.status).join(", ") || "none";
     throw new Error(`No unpaid draft invoice found for contact ${contactId} / booking ${bookingId}. Fetched ${invoices.length} invoice(s), statuses: [${statuses}]`);
   }
   return newest._id;
+}
+
+// GHL invoice statuses, as its workflow filters list them: Sent, Viewed,
+// Paid, Partially Paid, Void (plus draft). The API spells them lowercase with
+// underscores. Anything past draft has gone to the guest.
+const PAST_DRAFT = new Set(["sent", "viewed", "paid", "partially_paid", "void", "overdue", "payment_processing"]);
+export function normStatus(s) {
+  return String(s ?? "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+}
+export function isPastDraft(status) {
+  return PAST_DRAFT.has(normStatus(status));
+}
+
+export async function getInvoiceStatus({ tenant, env, locationId, invoiceId }, fetchImpl = fetch) {
+  const inv = await ghlFetch(
+    tenant, env, `/invoices/${invoiceId}?altId=${encodeURIComponent(locationId)}&altType=location`, {}, fetchImpl
+  );
+  return normStatus(inv.status);
 }
 
 // --- enrich + send ---------------------------------------------------------
@@ -197,8 +208,13 @@ export async function enrichAndSendInvoice(
 
   const appendItems = buildAppendItems(snapshot, tenant);
   const noPets = yesNo(hasPets) === false;
-  const nativeItems = (existing.invoiceItems || []).filter(i => !(noPets && isPetFeeName(i?.name, tenant)));
-  const removedItems = (existing.invoiceItems || []).length - nativeItems.length;
+  // A run that died after its PUT left our lines on the draft already; drop
+  // them so finishing it doesn't add them twice.
+  const ours = new Set(appendItems.map(i => i.name));
+  const nativeItems = (existing.invoiceItems || [])
+    .filter(i => !ours.has(i?.name))
+    .filter(i => !(noPets && isPetFeeName(i?.name, tenant)));
+  const removedItems = (existing.invoiceItems || []).filter(i => !ours.has(i?.name)).length - nativeItems.length;
   const invoiceItems = [...nativeItems, ...appendItems];
 
   // Record (not charge) GHL's own cleaning line so the owner/manager split
@@ -210,14 +226,9 @@ export async function enrichAndSendInvoice(
     snapshot.charges.cleaningFeeSource = "ghl_native";
   }
 
-  // Keep GHL's own sequential number (guest-facing on the invoice/PDF/email)
-  // and append the booking id for correlation instead of overwriting it --
-  // e.g. "000018-D6Stqz...". Guarded against double-appending if this ever
-  // runs twice against an already-stamped invoice (shouldn't happen -- the
-  // caller's idempotency check short-circuits retries -- but cheap to guard).
-  const invoiceNumber = existing.invoiceNumber
-    ? (existing.invoiceNumber.includes(snapshot.bookingId) ? existing.invoiceNumber : `${existing.invoiceNumber}-${snapshot.bookingId}`)
-    : snapshot.bookingId;
+  // GHL's own sequential number, untouched (guest-facing on the invoice page,
+  // PDF and email). Only a draft with no number at all gets the booking id.
+  const invoiceNumber = existing.invoiceNumber || snapshot.bookingId;
 
   await ghlFetch(
     tenant, env, `/invoices/${invoiceId}`,
