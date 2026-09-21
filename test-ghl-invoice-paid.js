@@ -102,7 +102,14 @@ await kv.put(BOOKING, JSON.stringify(snapshot()));
 const byNumber = await post({ ...base, invoiceId: "000006" });
 assert.equal(byNumber.body.settled, true, JSON.stringify(byNumber.body));
 assert.equal(byNumber.body.invoiceId, INV);
-console.log("5) Invoice number in place of the id -> resolved via the contact's invoices");
+for (const shown of ["INV-000006", "6", " 000006 "]) {
+  await kv.put(BOOKING, JSON.stringify(snapshot()));
+  const r = await post({ locationId: LOC, contactId: "ALDS6JyzJiH4a5mDPdnA", secret: "hook-secret", invoiceNumber: shown });
+  assert.equal(r.body.settled, true, shown + " " + JSON.stringify(r.body));
+}
+await kv.put(BOOKING, JSON.stringify(snapshot()));
+assert.equal((await post({ locationId: LOC, secret: "hook-secret", invoiceNumber: "INV-000006" })).status, 404, "a number alone needs the contact to find it");
+console.log("5) Invoice number in place of the id (bare, with INV- prefix, unpadded) -> resolved via the contact's invoices");
 
 // 6. legacy tenant with a Worker deposit line: payment split into RENT + DEP
 await kv.put(BOOKING, JSON.stringify({ ...snapshot(), securityDeposit: { total: 135, blocks: [], status: "pending_payment" } }));
