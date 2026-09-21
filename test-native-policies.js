@@ -133,6 +133,11 @@ async function enrich(hasPets, items, tenant = native) {
   assert.equal(yesNo("NO"), false);
   assert.equal(yesNo(" Si "), true);
   assert.equal(yesNo("Sí"), true);
+  assert.equal(yesNo(["No"]), false, "a checkbox field comes through as a list");
+  assert.equal(yesNo('["No"]'), false, "or as that list rendered to JSON text");
+  assert.equal(yesNo('["Sí"]'), true);
+  assert.equal(yesNo(["No", "Sí"]), null, "two answers are unknown -- the fee stays");
+  assert.equal(yesNo([]), null);
   assert.equal(yesNo("NO."), null, "punctuation makes it unknown -- the fee stays");
   assert.equal(yesNo("maybe"), null);
   console.log("3) invoice: Pet Fee dropped only on a clear No; native cleaning recorded, never appended");

@@ -41,8 +41,14 @@ export function nativeCancellationPolicy(tenant) {
 }
 
 // GHL form answers arrive as human text. true = yes, false = no, null = unknown.
+// A checkbox/radio field can also come through as a list: ["No"], or the
+// JSON text '["No"]' when a merge tag renders it. One answer is read as that
+// answer; more than one is unknown.
 export function yesNo(v) {
-  const s = String(v ?? "").trim().toLowerCase();
+  let x = v;
+  if (typeof x === "string" && /^\s*\[/.test(x)) { try { x = JSON.parse(x); } catch { /* leave as text */ } }
+  if (Array.isArray(x)) { if (x.length !== 1) return null; x = x[0]; }
+  const s = String(x ?? "").trim().toLowerCase();
   if (["yes", "y", "si", "sí", "true", "1", "on"].includes(s)) return true;
   if (["no", "n", "false", "0", "off"].includes(s)) return false;
   return null;
