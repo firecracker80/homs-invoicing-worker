@@ -208,6 +208,11 @@ async function handleBookingCreated(request, env) {
         bookingId: snapshot.bookingId,
         hintedInvoiceId: payload.invoiceId || payload.invoice?.id || null
       });
+      // Claim the invoice before touching it. GHL retries a webhook that
+      // times out while the first run is still working; the retry then finds
+      // this and returns instead of appending the lines and sending twice.
+      snapshot.ghlInvoice = { invoiceId, status: "sending" };
+      await env.BOOKINGS.put(snapshot.bookingId, JSON.stringify(snapshot));
       const { items, removedItems } = await enrichAndSendInvoice({
         tenant, env,
         locationId: snapshot.locationId,
@@ -225,13 +230,14 @@ async function handleBookingCreated(request, env) {
         // Required Yes/No on the booking form; "No" drops GHL's Pet Fee line.
         hasPets: payload.hasPets
       });
-      snapshot.ghlInvoice = { invoiceId, appendedItems: items.length, removedItems, sentAt: new Date().toISOString() };
+      snapshot.ghlInvoice = { invoiceId, status: "sent", appendedItems: items.length, removedItems, sentAt: new Date().toISOString() };
       gateway = "ghl_invoice";
       gatewayRef = invoiceId;
       approveUrl = null; // guest pays via the invoice GHL just sent, not a link we generate
     } catch (err) {
       console.error(`GHL invoice enrich failed for ${snapshot.bookingId}, falling back to paypal_url:`, err.message);
       invoiceEnrichError = err.message;
+      delete snapshot.ghlInvoice; // release the claim; the fallback below rewrites the snapshot
     }
   }
 

@@ -53,11 +53,12 @@
 // booking id, captured at the contact level in GHL and fed to
 // /booking-created via the {{contact.booking_id}} merge tag.
 //
-// It's APPENDED to GHL's own invoiceNumber ("000018-D6Stqz...") rather than
-// replacing it, so the guest-facing sequential numbering GHL assigns stays
-// intact. That means resolveDraftInvoiceId's retry-lookup can't do an exact
-// match (GHL's own number isn't known until after the invoice is found) --
-// it matches by substring instead.
+// GHL's own invoice number is left exactly as GHL assigned it (2026-09-21).
+// Appending the booking id ("000005-rpbWV3iis3rDG1gBB7Ky") overflowed the
+// Invoice No column on GHL's hosted invoice page into Issue Date, and that
+// page's CSS isn't ours to change. Retries are guarded in index.js instead:
+// the booking snapshot records the invoice as "sending" before it's touched.
+// Invoices stamped before this change still resolve by substring below.
 //
 // userId (required by send-invoice) is likewise per-REQUEST, not
 // per-tenant config: it comes from {{user.id}} on the booking webhook, same
@@ -151,11 +152,9 @@ export async function resolveDraftInvoiceId(
   const list = await ghlFetch(tenant, env, `/invoices/?${q}`, {}, fetchImpl);
   const invoices = list.invoices || [];
 
-  // The stamped invoiceNumber is GHL's own number with bookingId APPENDED
-  // ("000018-D6Stqz...") so GHL's native numbering sequence stays intact --
-  // see enrichAndSendInvoice. That means an exact match isn't possible here:
-  // on a retry we don't know what GHL's original number was until we've
-  // already found the invoice, so match by substring instead.
+  // Invoices enriched before 2026-09-21 carry the bookingId appended to
+  // GHL's number ("000018-D6Stqz..."); newer ones don't, and fall through
+  // to the newest-unpaid rule below.
   const byNumber = invoices.find(i => i.invoiceNumber && i.invoiceNumber.includes(bookingId));
   if (byNumber) return byNumber._id;
 
@@ -210,14 +209,9 @@ export async function enrichAndSendInvoice(
     snapshot.charges.cleaningFeeSource = "ghl_native";
   }
 
-  // Keep GHL's own sequential number (guest-facing on the invoice/PDF/email)
-  // and append the booking id for correlation instead of overwriting it --
-  // e.g. "000018-D6Stqz...". Guarded against double-appending if this ever
-  // runs twice against an already-stamped invoice (shouldn't happen -- the
-  // caller's idempotency check short-circuits retries -- but cheap to guard).
-  const invoiceNumber = existing.invoiceNumber
-    ? (existing.invoiceNumber.includes(snapshot.bookingId) ? existing.invoiceNumber : `${existing.invoiceNumber}-${snapshot.bookingId}`)
-    : snapshot.bookingId;
+  // GHL's own sequential number, untouched (guest-facing on the invoice page,
+  // PDF and email). Only a draft with no number at all gets the booking id.
+  const invoiceNumber = existing.invoiceNumber || snapshot.bookingId;
 
   await ghlFetch(
     tenant, env, `/invoices/${invoiceId}`,

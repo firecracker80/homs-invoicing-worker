@@ -95,7 +95,7 @@ assert.ok(get, "expected a get-invoice call before the PUT");
 
 const put = calls.find(c => c.method === "PUT");
 assert.ok(put, "expected an update-invoice PUT");
-assert.equal(put.body.invoiceNumber, "000018-BK-1001", "must APPEND bookingId to GHL's own invoiceNumber, not replace it -- keeps the guest-facing sequential numbering intact");
+assert.equal(put.body.invoiceNumber, "000018", "GHL's own invoice number is sent back unchanged -- a booking id appended to it overflowed the hosted invoice page's Invoice No column");
 // The fields update-invoice actually REQUIRES (verified live) -- must be present, echoed from get-invoice
 for (const f of ["name", "currency", "issueDate", "dueDate"]) {
   assert.ok(put.body[f], `update-invoice body missing required field: ${f}`);
@@ -154,6 +154,8 @@ let paypalOrderCalls = 0;
 let ghlInvoiceCalls = 0;
 let forceGhlFailure = false;
 let lastSendUserId = null;
+let claimAtPut = undefined;
+let putsWithoutClaim = 0;
 
 global.fetch = async (url, opts = {}) => {
   if (url.includes("oauth2/token")) return { ok: true, json: async () => ({ access_token: "T" }) };
@@ -165,6 +167,8 @@ global.fetch = async (url, opts = {}) => {
     ghlInvoiceCalls++;
     if (forceGhlFailure) return { ok: false, status: 500, text: async () => JSON.stringify({ message: "boom" }) };
     if (url.endsWith("/send")) lastSendUserId = JSON.parse(opts.body).userId;
+    if (opts.method === "PUT") claimAtPut = [...store.values()].map(v => { try { return JSON.parse(v); } catch { return null; } }).find(v => v?.ghlInvoice?.status === "sending")?.ghlInvoice;
+    if (opts.method === "PUT") putsWithoutClaim += claimAtPut ? 0 : 1;
     return mockFetch(url, opts);
   }
   if (url.includes("airtable")) {
@@ -242,5 +246,19 @@ assert.equal(r8.idempotent, true);
 assert.equal(r8.mode, "enrich");
 assert.equal(ghlInvoiceCalls, 0, "a retried enrich booking must not re-fire get/update/send-invoice (no duplicate guest notification)");
 console.log("8) Retry of E2E-ENRICH -> idempotent:", r8.idempotent, "| GHL calls made:", ghlInvoiceCalls, "(0 = no duplicate send)");
+
+// 9. The invoice is claimed in the booking snapshot BEFORE it's edited, so a
+// GHL retry that lands mid-run finds it and doesn't send a second time.
+assert.equal(claimAtPut?.status, "sending", "snapshot must record the invoice as 'sending' before the PUT");
+assert.equal(putsWithoutClaim, 0, "every worker-run PUT happened with the claim already stored");
+assert.equal(JSON.parse(store.get("E2E-ENRICH")).ghlInvoice.status, "sent");
+paypalOrderCalls = 0; ghlInvoiceCalls = 0;
+store.set("E2E-MIDRUN", JSON.stringify({ ...JSON.parse(store.get("E2E-ENRICH")), bookingId: "E2E-MIDRUN", ghlInvoice: { invoiceId: "inv_draft_1", status: "sending" } }));
+const r9 = await (await worker.fetch({ method: "POST", url: "https://w.dev/booking-created", json: async () => bookingBody("E2E-MIDRUN"), headers: { get: () => null } }, workerEnv)).json();
+assert.equal(r9.idempotent, true, "a retry during the first run returns instead of re-enriching");
+assert.equal(ghlInvoiceCalls + paypalOrderCalls, 0);
+const failed = JSON.parse(store.get("E2E-FALLBACK"));
+assert.equal(failed.ghlInvoice, undefined, "a failed enrich releases its claim");
+console.log("9) Invoice claimed as 'sending' before the PUT; a mid-run retry sends nothing; GHL's number untouched");
 
 console.log("\nPASS — all end-to-end assertions held. Existing PayPal-URL flow is provably untouched by this change.");
