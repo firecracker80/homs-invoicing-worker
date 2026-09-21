@@ -66,7 +66,8 @@
 // as contactId/locationId already do. Keeps onboarding a new client to
 // zero static per-tenant GHL-user config -- it scales across every user in
 // every account without a KV entry per person.
-import { yesNo, isPetFeeName } from "./policy.js";
+import { yesNo, isPetFeeName, depositConfigFor } from "./policy.js";
+import { calcSecurityDeposit } from "./deposit-engine.js";
 
 const GHL_BASE = "https://services.leadconnectorhq.com";
 const GHL_VERSION = "2021-07-28";
@@ -113,14 +114,54 @@ async function ghlFetch(tenant, env, path, { method = "GET", body } = {}, fetchI
 // snapshot -- pass it separately.
 // Cleaning is GHL-native now and never appended; the deposit is only here for
 // a "tiered_legacy" tenant (the composer leaves it at 0 for everyone else).
+const DEPOSIT_LINE = "Depósito de seguridad / Security deposit";
+const FEE_LINE = "Cargo por procesamiento / Processing fee";
+const OUR_LINES = new Set([DEPOSIT_LINE, FEE_LINE]);
+
 export function buildAppendItems(snapshot, tenant) {
   const cur = tenant.currency || "USD";
   const items = [];
   if (snapshot.securityDeposit.total > 0)
-    items.push({ name: "Depósito de seguridad / Security deposit", currency: cur, amount: round2(snapshot.securityDeposit.total), qty: 1 });
+    items.push({ name: DEPOSIT_LINE, currency: cur, amount: round2(snapshot.securityDeposit.total), qty: 1 });
   if (snapshot.charges.processingFee > 0)
-    items.push({ name: "Cargo por procesamiento / Processing fee", currency: cur, amount: round2(snapshot.charges.processingFee), qty: 1 });
+    items.push({ name: FEE_LINE, currency: cur, amount: round2(snapshot.charges.processingFee), qty: 1 });
   return items;
+}
+
+const lineTotal = i => round2(Number(i?.amount || 0) * Number(i?.qty || 1));
+
+// Amounts come from GHL's own draft, not the booking webhook (2026-09-21).
+// The webhook's stayTotal sent $500 for a stay GHL billed at $135, and the
+// 6% fee and the owner/manager split followed the wrong number. GHL's
+// invoice is what the guest actually pays, so:
+//   rent            = GHL's stay line (the first line the rental calendar writes)
+//   processing fee  = feePct x everything on the invoice (stay, GHL's cleaning,
+//                     pet and other fees, plus a legacy Worker deposit) --
+//                     the same "whole charge" basis the fee always had
+// Everything else about the booking (dates, guest, split %) is unchanged.
+export function repriceFromInvoice(snapshot, tenant, nativeItems) {
+  if (!nativeItems.length) return;
+  const rent = lineTotal(nativeItems[0]);
+  if (!(rent > 0)) return;
+  const nights = snapshot.stay.nights || 1;
+  const nativeSubtotal = round2(nativeItems.reduce((s, i) => s + lineTotal(i), 0));
+  const nightlyRate = round2(rent / nights);
+  const deposit = calcSecurityDeposit(nights, nightlyRate, depositConfigFor(tenant), 0);
+  const feePct = snapshot.charges.feePct ?? tenant.processingFeePct ?? 0.06;
+  const processingFee = round2(feePct * (nativeSubtotal + deposit.totalDeposit));
+
+  snapshot.stay.nightlyRate = nightlyRate;
+  snapshot.charges.rentTotal = rent;
+  snapshot.charges.processingFee = processingFee;
+  snapshot.charges.grandTotal = round2(nativeSubtotal + processingFee + deposit.totalDeposit);
+  snapshot.charges.amountsSource = "ghl_invoice";
+  snapshot.securityDeposit.total = deposit.totalDeposit;
+  snapshot.securityDeposit.blocks = deposit.blocks;
+  if (snapshot.payout) {
+    snapshot.payout.basis = rent;
+    snapshot.payout.owner = round2(rent * snapshot.payout.ownerPct);
+    snapshot.payout.manager = round2(rent - snapshot.payout.owner);
+  }
 }
 
 // --- resolve the draft's _id ---------------------------------------------
@@ -206,15 +247,14 @@ export async function enrichAndSendInvoice(
     tenant, env, `/invoices/${invoiceId}?altId=${encodeURIComponent(locationId)}&altType=location`, {}, fetchImpl
   );
 
-  const appendItems = buildAppendItems(snapshot, tenant);
   const noPets = yesNo(hasPets) === false;
   // A run that died after its PUT left our lines on the draft already; drop
   // them so finishing it doesn't add them twice.
-  const ours = new Set(appendItems.map(i => i.name));
-  const nativeItems = (existing.invoiceItems || [])
-    .filter(i => !ours.has(i?.name))
-    .filter(i => !(noPets && isPetFeeName(i?.name, tenant)));
-  const removedItems = (existing.invoiceItems || []).filter(i => !ours.has(i?.name)).length - nativeItems.length;
+  const ghlItems = (existing.invoiceItems || []).filter(i => !OUR_LINES.has(i?.name));
+  const nativeItems = ghlItems.filter(i => !(noPets && isPetFeeName(i?.name, tenant)));
+  const removedItems = ghlItems.length - nativeItems.length;
+  repriceFromInvoice(snapshot, tenant, nativeItems);
+  const appendItems = buildAppendItems(snapshot, tenant);
   const invoiceItems = [...nativeItems, ...appendItems];
 
   // Record (not charge) GHL's own cleaning line so the owner/manager split
