@@ -3,7 +3,7 @@
 // Part 2 runs the actual worker (src/index.js) end-to-end to prove the flag wiring,
 // the fallback-on-failure, and that the existing PayPal-URL flow is untouched.
 import assert from "node:assert";
-import { buildAppendItems, resolveDraftInvoiceId, enrichAndSendInvoice } from "./src/ghl-invoice.js";
+import { buildAppendItems, resolveDraftInvoiceId, enrichAndSendInvoice, isPastDraft } from "./src/ghl-invoice.js";
 
 const tenant = {
   brandName: "Luminara", currency: "USD", ownerPct: 0.85, processingFeePct: 0.06,
@@ -26,6 +26,8 @@ const snapshot = {
 
 // ---- capture what the module sends to GHL ----
 const calls = [];
+let mockInvoiceStatus = undefined; // what get-invoice reports; undefined = a fresh draft
+let mockInvoiceItems = null;       // override the draft's lines
 function mockFetch(url, opts) {
   calls.push({ url, method: opts.method || "GET", body: opts.body ? JSON.parse(opts.body) : null, headers: opts.headers });
 
@@ -50,10 +52,10 @@ function mockFetch(url, opts) {
     // Real GHL also returns full ISO datetimes here, NOT date-only -- this
     // is exactly the shape that 422'd live before the dateOnly() fix.
     return jsonRes({
-      _id: "inv_draft_1", name: "Reserva BK-1001", title: "INVOICE", currency: "USD",
+      _id: "inv_draft_1", name: "Reserva BK-1001", title: "INVOICE", currency: "USD", status: mockInvoiceStatus,
       invoiceNumber: "000018",
       issueDate: "2026-08-26T04:00:00.000Z", dueDate: "2026-09-01T03:59:59.999Z",
-      invoiceItems: [{ name: "Estadía", currency: "USD", amount: 60, qty: 5 }],
+      invoiceItems: mockInvoiceItems || [{ name: "Estadía", currency: "USD", amount: 60, qty: 5 }],
       businessDetails: { name: "Luminara" }
     });
   }
@@ -120,27 +122,28 @@ console.log("PASS (unit) — ghl-invoice.js matches the verified live API schema
 console.log(`  Appended ${result.appendedItems.length} lines to the existing ${put.body.invoiceItems.length - result.appendedItems.length}-line draft`);
 console.log(`  Sent via action=${send.body.action}, liveMode=${send.body.liveMode}`);
 
-// ---- 4b. retry lookup: substring match against an already-stamped number ----
-// Simulates a second webhook fire hitting list-invoices directly (e.g. the
-// hinted-id path was unavailable) after this exact invoice was already
-// enriched once. GHL's own number ("000018") isn't known in advance, so this
-// MUST be a substring match, not the exact "===" the earlier CC-prefix design used.
+// ---- 4b. lookup without a hint: only an invoice GHL hasn't sent qualifies ----
+// Newer invoices for the same contact that are Sent / Viewed / Partially Paid /
+// Void must never be picked -- they already went to the guest.
 calls.length = 0;
 async function retryMockFetch(url, opts) {
   if (url.includes("/invoices/?")) {
     return jsonRes({ invoices: [
       { _id: "inv_paid_old", invoiceNumber: "000012", status: "paid", createdAt: "2026-08-20T12:00:00Z" },
-      { _id: "inv_draft_1", invoiceNumber: "000018-BK-1001", status: "sent", createdAt: "2026-08-26T12:00:00Z" },
-      // A DIFFERENT, unrelated newer invoice for the same contact -- proves
-      // the substring match on bookingId wins over "just take the newest".
-      { _id: "inv_unrelated", invoiceNumber: "000019", status: "sent", createdAt: "2026-08-27T12:00:00Z" }
-    ], total: 3 });
+      { _id: "inv_draft_1", invoiceNumber: "000018", status: "draft", createdAt: "2026-08-26T12:00:00Z" },
+      { _id: "inv_sent", invoiceNumber: "000019", status: "sent", createdAt: "2026-08-27T12:00:00Z" },
+      { _id: "inv_viewed", invoiceNumber: "000020", status: "viewed", createdAt: "2026-08-28T12:00:00Z" },
+      { _id: "inv_part", invoiceNumber: "000021", status: "partially_paid", createdAt: "2026-08-29T12:00:00Z" },
+      { _id: "inv_void", invoiceNumber: "000022", status: "void", createdAt: "2026-08-30T12:00:00Z" }
+    ], total: 6 });
   }
   throw new Error("unexpected call in retry test: " + url);
 }
 const retryId = await resolveDraftInvoiceId({ tenant, env, locationId: snapshot.locationId, contactId: snapshot.ghlContactId, bookingId: snapshot.bookingId, hintedInvoiceId: null }, retryMockFetch);
-assert.equal(retryId, "inv_draft_1", "must find the already-stamped invoice by substring match, not fall through to 'newest' and grab the unrelated one");
-console.log("4b) Retry lookup against a stamped '000018-BK-1001' -> found inv_draft_1, not the newer unrelated invoice");
+assert.equal(retryId, "inv_draft_1", "the only unsent invoice wins over newer sent/viewed/partly paid/void ones");
+for (const s of ["Sent", "Viewed", "Paid", "Partially Paid", "Void", "partially_paid"]) assert.ok(isPastDraft(s), s);
+for (const s of ["draft", "", undefined]) assert.ok(!isPastDraft(s), String(s));
+console.log("4b) Lookup without a hint -> the unsent draft, never a Sent/Viewed/Paid/Partially Paid/Void invoice");
 
 // =========================================================================
 // Part 2 — end-to-end through the actual worker, proving the flag wiring
@@ -253,12 +256,47 @@ assert.equal(claimAtPut?.status, "sending", "snapshot must record the invoice as
 assert.equal(putsWithoutClaim, 0, "every worker-run PUT happened with the claim already stored");
 assert.equal(JSON.parse(store.get("E2E-ENRICH")).ghlInvoice.status, "sent");
 paypalOrderCalls = 0; ghlInvoiceCalls = 0;
-store.set("E2E-MIDRUN", JSON.stringify({ ...JSON.parse(store.get("E2E-ENRICH")), bookingId: "E2E-MIDRUN", ghlInvoice: { invoiceId: "inv_draft_1", status: "sending" } }));
+store.set("E2E-MIDRUN", JSON.stringify({ ...JSON.parse(store.get("E2E-ENRICH")), bookingId: "E2E-MIDRUN", ghlInvoice: { invoiceId: "inv_draft_1", status: "sending", claimedAt: new Date().toISOString() } }));
 const r9 = await (await worker.fetch({ method: "POST", url: "https://w.dev/booking-created", json: async () => bookingBody("E2E-MIDRUN"), headers: { get: () => null } }, workerEnv)).json();
 assert.equal(r9.idempotent, true, "a retry during the first run returns instead of re-enriching");
 assert.equal(ghlInvoiceCalls + paypalOrderCalls, 0);
 const failed = JSON.parse(store.get("E2E-FALLBACK"));
 assert.equal(failed.ghlInvoice, undefined, "a failed enrich releases its claim");
 console.log("9) Invoice claimed as 'sending' before the PUT; a mid-run retry sends nothing; GHL's number untouched");
+
+// 10. A run that died part-way: claim is old. GHL's status decides.
+const stale = (id) => {
+  store.set(id, JSON.stringify({ ...JSON.parse(store.get("E2E-ENRICH")), bookingId: id,
+    ghlInvoice: { invoiceId: "inv_draft_1", status: "sending", claimedAt: new Date(Date.now() - 10 * 60000).toISOString() } }));
+};
+// 10a. Still a draft in GHL, and the dead run's PUT already added our lines -> finish it, without doubling them.
+stale("E2E-STALE-DRAFT");
+mockInvoiceStatus = "draft";
+mockInvoiceItems = [
+  { name: "Estadía", currency: "USD", amount: 60, qty: 5 },
+  { name: "Cargo por procesamiento / Processing fee", currency: "USD", amount: 18, qty: 1 }
+];
+ghlInvoiceCalls = 0; paypalOrderCalls = 0; lastSendUserId = null;
+const putsBefore = calls.length;
+const r10a = await (await worker.fetch({ method: "POST", url: "https://w.dev/booking-created", json: async () => bookingBody("E2E-STALE-DRAFT"), headers: { get: () => null } }, workerEnv)).json();
+assert.equal(r10a.mode, "enrich", JSON.stringify(r10a));
+assert.ok(!r10a.idempotent, "a dead run's draft is finished, not skipped");
+assert.equal(lastSendUserId, "u_from_ghl_workflow", "the invoice is sent");
+const finishedPut = calls.slice(putsBefore).filter(c => c.method === "PUT").pop();
+assert.equal(finishedPut.body.invoiceItems.filter(i => /Processing fee/.test(i.name)).length, 1, "our lines are not added twice");
+assert.equal(JSON.parse(store.get("E2E-STALE-DRAFT")).ghlInvoice.status, "sent");
+
+// 10b. GHL already shows it Sent (or Viewed/Paid) -> done, never resent.
+for (const st of ["sent", "viewed", "paid"]) {
+  stale("E2E-STALE-" + st);
+  mockInvoiceStatus = st;
+  ghlInvoiceCalls = 0; lastSendUserId = null;
+  const r = await (await worker.fetch({ method: "POST", url: "https://w.dev/booking-created", json: async () => bookingBody("E2E-STALE-" + st), headers: { get: () => null } }, workerEnv)).json();
+  assert.equal(r.idempotent, true, st);
+  assert.equal(lastSendUserId, null, `${st}: nothing resent`);
+  assert.equal(ghlInvoiceCalls, 1, `${st}: only the status read`);
+}
+mockInvoiceStatus = undefined; mockInvoiceItems = null;
+console.log("10) Stale 'sending' claim: GHL draft -> finished once (no doubled lines); Sent/Viewed/Paid -> left alone");
 
 console.log("\nPASS — all end-to-end assertions held. Existing PayPal-URL flow is provably untouched by this change.");

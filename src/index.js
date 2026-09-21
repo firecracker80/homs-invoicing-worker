@@ -6,7 +6,11 @@ import { createCheckoutSession } from "./stripe.js";
 import { handlePayPalReturn, handlePayPalWebhook, handleStripeReturn, handleStripeWebhook } from "./payment.js";
 import { handleCancel, handleDepositRefund } from "./cancellation.js";
 import { handleReschedule } from "./reschedule.js";
-import { resolveDraftInvoiceId, enrichAndSendInvoice } from "./ghl-invoice.js";
+import { resolveDraftInvoiceId, enrichAndSendInvoice, getInvoiceStatus } from "./ghl-invoice.js";
+
+// A "sending" claim younger than this belongs to a run that may still be
+// working; an older one whose invoice GHL still shows as a draft died part-way.
+const CLAIM_STALE_MS = 2 * 60 * 1000;
 import { handleOwnerStatement, handleManagerStatement, handleReconcile } from "./reports.js";
 import { handleProvisionTenant } from "./provision.js";
 
@@ -167,7 +171,21 @@ async function handleBookingCreated(request, env) {
   const existing = await env.BOOKINGS.get(payload.bookingId, { type: "json" });
   const existingUrl = existing?.paypal?.approveUrl || existing?.stripe?.checkoutUrl;
   const existingInvoiceId = existing?.ghlInvoice?.invoiceId;
-  if (existingUrl || existingInvoiceId) {
+
+  // A claim left at "sending" by a run that died before GHL sent the invoice
+  // is finished now. GHL's status decides: still a draft -> finish it;
+  // sent or anything later (or unreadable) -> treat as done, never resend.
+  let resumeInvoiceId = null;
+  const claim = existing?.ghlInvoice;
+  if (claim?.status === "sending" && !existingUrl) {
+    const age = Date.now() - (Date.parse(claim.claimedAt || "") || 0);
+    if (age >= CLAIM_STALE_MS) {
+      const status = await getInvoiceStatus({ tenant, env, locationId: payload.locationId, invoiceId: claim.invoiceId }).catch(() => null);
+      if (status === "draft" || status === "") resumeInvoiceId = claim.invoiceId;
+    }
+  }
+
+  if ((existingUrl || existingInvoiceId) && !resumeInvoiceId) {
     // Return the FULL field set from the stored snapshot so downstream
     // mappings (SMS, contact updates) work identically on cached hits.
     return json({
@@ -206,12 +224,12 @@ async function handleBookingCreated(request, env) {
         locationId: snapshot.locationId,
         contactId: snapshot.ghlContactId,
         bookingId: snapshot.bookingId,
-        hintedInvoiceId: payload.invoiceId || payload.invoice?.id || null
+        hintedInvoiceId: resumeInvoiceId || payload.invoiceId || payload.invoice?.id || null
       });
       // Claim the invoice before touching it. GHL retries a webhook that
       // times out while the first run is still working; the retry then finds
       // this and returns instead of appending the lines and sending twice.
-      snapshot.ghlInvoice = { invoiceId, status: "sending" };
+      snapshot.ghlInvoice = { invoiceId, status: "sending", claimedAt: new Date().toISOString() };
       await env.BOOKINGS.put(snapshot.bookingId, JSON.stringify(snapshot));
       const { items, removedItems } = await enrichAndSendInvoice({
         tenant, env,

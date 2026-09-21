@@ -57,8 +57,9 @@
 // Appending the booking id ("000005-rpbWV3iis3rDG1gBB7Ky") overflowed the
 // Invoice No column on GHL's hosted invoice page into Issue Date, and that
 // page's CSS isn't ours to change. Retries are guarded in index.js instead:
-// the booking snapshot records the invoice as "sending" before it's touched.
-// Invoices stamped before this change still resolve by substring below.
+// the booking snapshot records the invoice as "sending" before it's touched,
+// and GHL's own invoice status (draft / sent / viewed / paid / void) says
+// whether a run that died part-way still needs finishing.
 //
 // userId (required by send-invoice) is likewise per-REQUEST, not
 // per-tenant config: it comes from {{user.id}} on the booking webhook, same
@@ -123,8 +124,8 @@ export function buildAppendItems(snapshot, tenant) {
 }
 
 // --- resolve the draft's _id ---------------------------------------------
-// Prefer the id handed to you on the booking webhook. Fall back to a scoped
-// list-invoices lookup keyed by contact + our correlation number.
+// Prefer the id handed to you on the booking webhook. Fall back to the
+// contact's newest invoice GHL hasn't sent yet.
 // altId IS required here despite not appearing in the operation's public
 // parameter schema -- confirmed live: omitting it 401s ("A 401 from the
 // invoices service almost always means a missing altId, not a missing
@@ -152,22 +153,33 @@ export async function resolveDraftInvoiceId(
   const list = await ghlFetch(tenant, env, `/invoices/?${q}`, {}, fetchImpl);
   const invoices = list.invoices || [];
 
-  // Invoices enriched before 2026-09-21 carry the bookingId appended to
-  // GHL's number ("000018-D6Stqz..."); newer ones don't, and fall through
-  // to the newest-unpaid rule below.
-  const byNumber = invoices.find(i => i.invoiceNumber && i.invoiceNumber.includes(bookingId));
-  if (byNumber) return byNumber._id;
-
-  // No correlation number yet -> newest NOT-YET-PAID invoice for this
-  // contact (excludes "paid" specifically since that's a status we DO know
-  // for certain, rather than guessing what "draft" is actually spelled).
-  const candidates = invoices.filter(i => i.status !== "paid");
+  // Only an invoice GHL hasn't sent can be the booking's fresh draft: never
+  // one already sent, viewed, (partly) paid or voided.
+  const candidates = invoices.filter(i => !isPastDraft(i.status));
   const newest = candidates.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))[0];
   if (!newest) {
     const statuses = invoices.map(i => i.status).join(", ") || "none";
     throw new Error(`No unpaid draft invoice found for contact ${contactId} / booking ${bookingId}. Fetched ${invoices.length} invoice(s), statuses: [${statuses}]`);
   }
   return newest._id;
+}
+
+// GHL invoice statuses, as its workflow filters list them: Sent, Viewed,
+// Paid, Partially Paid, Void (plus draft). The API spells them lowercase with
+// underscores. Anything past draft has gone to the guest.
+const PAST_DRAFT = new Set(["sent", "viewed", "paid", "partially_paid", "void", "overdue", "payment_processing"]);
+export function normStatus(s) {
+  return String(s ?? "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+}
+export function isPastDraft(status) {
+  return PAST_DRAFT.has(normStatus(status));
+}
+
+export async function getInvoiceStatus({ tenant, env, locationId, invoiceId }, fetchImpl = fetch) {
+  const inv = await ghlFetch(
+    tenant, env, `/invoices/${invoiceId}?altId=${encodeURIComponent(locationId)}&altType=location`, {}, fetchImpl
+  );
+  return normStatus(inv.status);
 }
 
 // --- enrich + send ---------------------------------------------------------
@@ -196,8 +208,13 @@ export async function enrichAndSendInvoice(
 
   const appendItems = buildAppendItems(snapshot, tenant);
   const noPets = yesNo(hasPets) === false;
-  const nativeItems = (existing.invoiceItems || []).filter(i => !(noPets && isPetFeeName(i?.name, tenant)));
-  const removedItems = (existing.invoiceItems || []).length - nativeItems.length;
+  // A run that died after its PUT left our lines on the draft already; drop
+  // them so finishing it doesn't add them twice.
+  const ours = new Set(appendItems.map(i => i.name));
+  const nativeItems = (existing.invoiceItems || [])
+    .filter(i => !ours.has(i?.name))
+    .filter(i => !(noPets && isPetFeeName(i?.name, tenant)));
+  const removedItems = (existing.invoiceItems || []).filter(i => !ours.has(i?.name)).length - nativeItems.length;
   const invoiceItems = [...nativeItems, ...appendItems];
 
   // Record (not charge) GHL's own cleaning line so the owner/manager split
