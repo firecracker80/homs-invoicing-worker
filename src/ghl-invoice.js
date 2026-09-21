@@ -107,6 +107,31 @@ async function ghlFetch(tenant, env, path, { method = "GET", body } = {}, fetchI
   return json;
 }
 
+export async function fetchInvoice({ tenant, env, locationId, invoiceId }, fetchImpl = fetch) {
+  return ghlFetch(tenant, env, `/invoices/${invoiceId}?altId=${encodeURIComponent(locationId)}&altType=location`, {}, fetchImpl);
+}
+
+export async function listContactInvoices({ tenant, env, locationId, contactId }, fetchImpl = fetch) {
+  const q = new URLSearchParams({ altId: locationId, altType: "location", contactId, limit: "50", offset: "0" });
+  const list = await ghlFetch(tenant, env, `/invoices/?${q}`, {}, fetchImpl);
+  return list.invoices || [];
+}
+
+// GHL's own payment (native Payments -> Transactions) for an invoice, so our
+// Revenue rows can point at it. Best effort: null when none is found.
+export async function findInvoiceTransactionId({ tenant, env, locationId, invoiceId }, fetchImpl = fetch) {
+  const q = new URLSearchParams({ altId: locationId, altType: "location", entityId: invoiceId, limit: "10" });
+  const res = await ghlFetch(tenant, env, `/payments/transactions?${q}`, {}, fetchImpl);
+  const txs = (res.data || []).filter(t => t.entityId === invoiceId || !t.entityId);
+  const ok = txs.find(t => normStatus(t.status) === "succeeded") || txs[0];
+  return ok?._id || null;
+}
+
+// The rental booking an invoice belongs to (GHL's calendar stamps it).
+export function bookingIdOf(invoice) {
+  return invoice?.sourceId || invoice?.meta?.serviceBookingId || null;
+}
+
 // --- the lines we append to the rent line GHL already created ------------
 // Booking-composer output shape (real field names, confirmed against
 // booking-composer.js): snapshot.charges.{cleaningFee,processingFee},

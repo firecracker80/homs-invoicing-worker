@@ -14,7 +14,8 @@
 // fail money that has already moved. Every caller logs and moves on.
 //
 // GHL sync (added 2026-09-11): the same rows written to D1 are also written
-// into custom_objects.payments in the tenant's own GHL account, linked to a
+// into custom_objects.payments (labeled "Revenue" in GHL since 2026-09-21) in
+// the tenant's own GHL account, linked to a
 // custom_objects.transactions record for the booking. D1 stays the durable
 // ledger; GHL is what feeds the admin dashboard's Owner Statement, since the
 // dashboard already reads GHL objects and already has the Property/OTA/
@@ -119,6 +120,17 @@ export async function writeLedgerEntries(env, tenant, snapshot, captures) {
 // capture/refund id when one exists (the natural idempotency key); rows that
 // omit it default to their own entry_type, which is exactly the original
 // (booking_id, entry_type) behavior for settlement's one-row-per-type rows.
+// What real payment a Revenue row came from: a refund's own id when the row
+// carries one, otherwise the settlement capture -- GHL's native payment id for
+// an invoice paid in GHL, the PayPal/Stripe capture id for our own links.
+function gatewayRefFor(snapshot, r) {
+  if (r.source && r.source !== "payment_confirmed") {
+    return r.reference && r.reference !== r.entry_type && !/^(cancellation|reschedule)$/.test(r.reference) ? r.reference : "";
+  }
+  const cap = r.entry_type === "deposit_held" ? (snapshot.captures?.DEP || snapshot.captures?.RENT) : snapshot.captures?.RENT;
+  return cap?.gatewayTransactionId || cap?.captureId || cap?.invoiceId || "";
+}
+
 export async function writeAndSyncRows(env, tenant, snapshot, rows) {
   const cur = tenant.currency || "USD";
   const now = new Date().toISOString();
@@ -218,6 +230,7 @@ async function syncRowsToGHL(env, tenant, snapshot, rows, now) {
         cleared_for_payout: r.category === "income" ? "yes" : "no",
         processed_at: now.slice(0, 10),
         notes: r.description,
+        gateway_transaction_id: gatewayRefFor(snapshot, r),
       });
       paymentIds.push(payment.id);
       await linkIfPossible(pit, locationId, associations, "custom_objects.payments", payment.id, "custom_objects.transactions", transactionId);

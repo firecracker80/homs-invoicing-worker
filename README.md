@@ -17,7 +17,7 @@ the payment link to GHL.
 - `GET /reports/owner-statement`, `GET /reports/manager-statement` — D1-backed statement, `?format=json` or the default branded HTML (admin-triggered, `X-Admin-Secret`)
 - `GET /reports/reconcile` — diffs D1's income-bearing bookings against GHL's `list-transactions` for the same window (admin-triggered)
 
-Settlement (`src/payment.js`) materializes the capture, fees and split (85/15 rent-only, cleaning fee per profile) into D1 (`src/ledger.js`), syncs those rows to the client's GHL `Payment`/`Transaction` custom objects, and notifies GHL via the tenant's `ghlPaymentConfirmedUrl` inbound webhook.
+Settlement (`src/payment.js`) materializes the capture, fees and split (85/15 rent-only, cleaning fee per profile) into D1 (`src/ledger.js`), syncs those rows to the client's GHL `Revenue` (key `custom_objects.payments`, relabeled from "Payment" 2026-09-21 since GHL now has a native Payments object) and `Transaction` custom objects, and notifies GHL via the tenant's `ghlPaymentConfirmedUrl` inbound webhook.
 
 ## Ledger + statements (D1)
 `src/ledger.js` writes one `ledger_entries` row per money movement at settlement time — owner/manager rent split (`income`), cleaning fee (`income`, to whoever the profile names), security deposit (`liability`, held, never split), processing fee (`pass_through`, never split), and an optional `shadow` OTA-commission comparison if the tenant has `otaRate` configured (skipped entirely otherwise — never guesses a commission rate). Idempotent: a `UNIQUE(booking_id, entry_type)` index + `INSERT OR IGNORE` means a retried settlement writes zero duplicate rows. Schema in [schema/homs_ledger_schema.sql](./schema/homs_ledger_schema.sql).
@@ -60,5 +60,5 @@ TENANTS KV namespace (managed in the Cloudflare dashboard) — never commit them
     src/reschedule.js       move a paid booking to new dates (delta charge/refund)
     src/ghl-calendar.js     push new dates onto the actual GHL rental-calendar booking
     src/ghl-invoice.js      GHL invoice enrichment (additive, INVOICE_STRATEGY="enrich")
-    src/ledger.js           settlement split into D1 (ledger_entries), synced to GHL Payment/Transaction objects
+    src/ledger.js           settlement split into D1 (ledger_entries), synced to GHL Revenue (custom_objects.payments)/Transaction objects
     src/reports.js          owner/manager statements + D1-vs-GHL reconciliation

@@ -3,7 +3,7 @@
 import { composeBooking } from "./booking-composer.js";
 import { createOrder } from "./paypal.js";
 import { createCheckoutSession } from "./stripe.js";
-import { handlePayPalReturn, handlePayPalWebhook, handleStripeReturn, handleStripeWebhook } from "./payment.js";
+import { handlePayPalReturn, handlePayPalWebhook, handleStripeReturn, handleStripeWebhook, handleGhlInvoicePaid } from "./payment.js";
 import { handleCancel, handleDepositRefund } from "./cancellation.js";
 import { handleReschedule } from "./reschedule.js";
 import { resolveDraftInvoiceId, enrichAndSendInvoice, invoiceHasWorkerLines } from "./ghl-invoice.js";
@@ -361,6 +361,8 @@ export default {
     try {
       if (request.method === "POST" && url.pathname === "/booking-created")
         return handleBookingCreated(request, env);
+      if (request.method === "POST" && url.pathname === "/ghl-invoice-paid")
+        return handleGhlInvoicePaid(request, env);
       if (url.pathname === "/paypal/return")
         return handlePayPalReturn(request, env);
       if (request.method === "POST" && url.pathname === "/paypal/webhook")
