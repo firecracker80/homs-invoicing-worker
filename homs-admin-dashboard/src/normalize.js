@@ -21,6 +21,9 @@ function prop(record, key, fallback = null) {
 function moneyProp(record, key) {
   const v = record.properties ? record.properties[key] : undefined;
   if (v && typeof v === "object" && typeof v.value === "number") return v.value;
+  // A bare number (older records, hand-entered data) is still an amount.
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v === "string" && v.trim() !== "" && Number.isFinite(Number(v))) return Number(v);
   return null;
 }
 
@@ -109,9 +112,9 @@ export function normalizeTransaction(record) {
     checkinDate: prop(record, "checkin_date"),
     checkoutDate: prop(record, "checkout_date"),
     bookingReference: prop(record, "booking_reference"),
-    bookingTotal: prop(record, "booking_total"),
-    platformFee: prop(record, "platform_fee"),
-    netPayout: prop(record, "net_payout"),
+    bookingTotal: moneyProp(record, "booking_total"),
+    platformFee: moneyProp(record, "platform_fee"),
+    netPayout: moneyProp(record, "net_payout"),
     paymentStatus: prop(record, "payment_status"),
     propertyId: relatedId(record, "custom_objects.properties"),
     otaChannelId: relatedId(record, "custom_objects.ota_channels"),
