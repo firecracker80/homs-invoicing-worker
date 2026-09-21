@@ -11,6 +11,7 @@
 import { getAccessToken } from "./paypal.js";
 import { settleRescheduleAdjustment } from "./reschedule.js";
 import { writeLedgerEntries } from "./ledger.js";
+import { fetchInvoice, listContactInvoices, bookingIdOf, normStatus } from "./ghl-invoice.js";
 
 const round2 = n => Math.round(n * 100) / 100;
 
@@ -163,7 +164,7 @@ async function verifyStripeWebhook(tenant, env, request, rawBody) {
 // ------------------------------------------------------------- Settlement ----
 
 // Idempotent settlement: updates snapshot, writes the D1 + GHL ledger, notifies GHL.
-async function settle(env, tenant, snapshot, captures) {
+async function settle(env, tenant, snapshot, captures, { notify = true } = {}) {
   if (snapshot.settled) return { alreadySettled: true };
 
   const now = new Date().toISOString();
@@ -208,7 +209,10 @@ async function settle(env, tenant, snapshot, captures) {
   }
 
   // ---- GHL notification (fire-and-forget) ----
-  if (tenant.ghlPaymentConfirmedUrl) {
+  // Skipped when GHL itself told us about the payment (an invoice paid in
+  // GHL): the workflow that called us is already the confirmation, and
+  // posting back to its own inbound-webhook trigger would run it twice.
+  if (notify && tenant.ghlPaymentConfirmedUrl) {
     try {
       await fetch(tenant.ghlPaymentConfirmedUrl, {
         method: "POST",
@@ -256,6 +260,69 @@ async function findSnapshot(env, bookingId) {
 
 async function tenantFor(env, snapshot) {
   return env.TENANTS.get(snapshot.locationId, { type: "json" });
+}
+
+// ------------------------------------------------- GHL invoice paid ----
+// POST /ghl-invoice-paid  <- GHL "Payment Confirmed" workflow (trigger:
+// Invoice status is Paid), Custom Webhook action. Body (any of the ids):
+//   { locationId, invoiceId, invoiceNumber, contactId, secret? }
+//   headers X-Location-Id / X-Webhook-Secret work too, as on /booking-created.
+// A booking whose invoice was enriched is paid inside GHL, so no PayPal or
+// Stripe return/webhook ever reaches us. This settles it the same way:
+// ledger rows (D1 + GHL Transaction/Payments), owner/manager split.
+// GHL is the source of truth: the invoice is re-read and must be Paid; the
+// booking is the one GHL's calendar stamped on it (sourceId). Anything else
+// -- the same workflow's other trigger, a non-booking invoice -- is skipped
+// with a 200 so the workflow carries on. Settling twice is a no-op.
+const unresolved = v => v == null || /^\s*$|^\s*(null|undefined)\s*$|\{\{/i.test(String(v));
+
+export async function handleGhlInvoicePaid(request, env) {
+  let body;
+  try { body = await request.json(); } catch { return json({ error: "Expected JSON body" }, 400); }
+  const locationId = (request.headers?.get?.("X-Location-Id") || body.locationId || "").trim();
+  const secret = (request.headers?.get?.("X-Webhook-Secret") || body.secret || "").trim();
+  if (unresolved(locationId)) return json({ error: "locationId is required" }, 400);
+
+  const tenant = await env.TENANTS.get(locationId, { type: "json" });
+  if (!tenant) return json({ error: `Unknown locationId: ${locationId}` }, 404);
+  if (tenant.webhookSecret && secret !== tenant.webhookSecret) return json({ error: "Unauthorized" }, 401);
+
+  const invoiceId = unresolved(body.invoiceId) ? null : String(body.invoiceId).trim();
+  const invoiceNumber = unresolved(body.invoiceNumber) ? null : String(body.invoiceNumber).trim();
+  const contactId = unresolved(body.contactId) ? null : String(body.contactId).trim();
+  if (!invoiceId && !invoiceNumber) return json({ ok: true, skipped: "no_invoice_in_request" });
+
+  // Find the invoice. Merge tags can hand over the NUMBER instead of the id
+  // (seen live on RL Santana), so an id that doesn't load is tried as a number.
+  let invoice = null;
+  if (invoiceId) invoice = await fetchInvoice({ tenant, env, locationId, invoiceId }).catch(() => null);
+  if (!invoice && contactId) {
+    const wanted = invoiceNumber || invoiceId;
+    const same = n => String(n ?? "").trim() === wanted || (Number(n) && Number(n) === Number(wanted));
+    const hit = (await listContactInvoices({ tenant, env, locationId, contactId })).find(i => i._id === wanted || same(i.invoiceNumber));
+    if (hit) invoice = await fetchInvoice({ tenant, env, locationId, invoiceId: hit._id });
+  }
+  if (!invoice) return json({ error: "Invoice not found", invoiceId, invoiceNumber, contactId }, 404);
+
+  const bookingId = bookingIdOf(invoice);
+  if (!bookingId) return json({ ok: true, skipped: "not_a_booking_invoice", invoiceId: invoice._id });
+  const status = normStatus(invoice.status);
+  if (status !== "paid") return json({ ok: true, skipped: `invoice_${status || "unknown"}`, invoiceId: invoice._id, bookingId });
+
+  const snapshot = await findSnapshot(env, bookingId);
+  if (!snapshot) return json({ error: `No booking ${bookingId} on record for invoice ${invoice.invoiceNumber || invoice._id}` }, 404);
+  if (snapshot.locationId !== locationId) return json({ error: "Invoice and booking belong to different accounts" }, 409);
+  if (snapshot.settled) return json({ ok: true, alreadySettled: true, bookingId });
+
+  const paid = Number(invoice.amountPaid ?? invoice.total ?? 0);
+  const depositHeld = Number(snapshot.securityDeposit?.total || 0);
+  const common = { source: "ghl_invoice", invoiceId: invoice._id, invoiceNumber: invoice.invoiceNumber || null, paidAt: invoice.lastPaidAt || invoice.updatedAt || null };
+  const captures = {
+    RENT: { ...common, captureId: `ghl-${invoice._id}`, gross: round2(paid - depositHeld) },
+    ...(depositHeld > 0 ? { DEP: { ...common, captureId: `ghl-${invoice._id}-dep`, gross: depositHeld } } : {})
+  };
+  const result = await settle(env, tenant, snapshot, captures, { notify: false });
+  return json({ ok: true, bookingId, invoiceId: invoice._id, amountPaid: round2(paid), ...result });
 }
 
 export async function handlePayPalReturn(request, env) {
