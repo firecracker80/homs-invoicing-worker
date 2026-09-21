@@ -165,8 +165,12 @@ export function repriceFromInvoice(snapshot, tenant, nativeItems) {
 }
 
 // --- resolve the draft's _id ---------------------------------------------
-// Prefer the id handed to you on the booking webhook. Fall back to the
-// contact's newest invoice GHL hasn't sent yet.
+// Prefer the id handed to you on the booking webhook. Otherwise the booking's
+// own invoice: GHL's rental calendar stamps it with source "calendar" and
+// sourceId = the booking id (verified live 2026-09-21, invoice 000005 for
+// booking Apl1ioBR66hSkugOYM9c). GHL creates that invoice already in status
+// "sent", so status can't tell a fresh booking invoice apart -- only paid,
+// partly paid and void ones are ruled out.
 // altId IS required here despite not appearing in the operation's public
 // parameter schema -- confirmed live: omitting it 401s ("A 401 from the
 // invoices service almost always means a missing altId, not a missing
@@ -194,33 +198,39 @@ export async function resolveDraftInvoiceId(
   const list = await ghlFetch(tenant, env, `/invoices/?${q}`, {}, fetchImpl);
   const invoices = list.invoices || [];
 
-  // Only an invoice GHL hasn't sent can be the booking's fresh draft: never
-  // one already sent, viewed, (partly) paid or voided.
-  const candidates = invoices.filter(i => !isPastDraft(i.status));
+  const own = invoices.find(i => i.sourceId === bookingId || i.meta?.serviceBookingId === bookingId);
+  if (own && !isSettled(own.status)) return own._id;
+  if (own) throw new Error(`Invoice ${own.invoiceNumber || own._id} for booking ${bookingId} is already ${own.status}`);
+
+  const candidates = invoices.filter(i => !isSettled(i.status));
   const newest = candidates.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))[0];
   if (!newest) {
     const statuses = invoices.map(i => i.status).join(", ") || "none";
-    throw new Error(`No unpaid draft invoice found for contact ${contactId} / booking ${bookingId}. Fetched ${invoices.length} invoice(s), statuses: [${statuses}]`);
+    throw new Error(`No unpaid invoice found for contact ${contactId} / booking ${bookingId}. Fetched ${invoices.length} invoice(s), statuses: [${statuses}]`);
   }
   return newest._id;
 }
 
-// GHL invoice statuses, as its workflow filters list them: Sent, Viewed,
-// Paid, Partially Paid, Void (plus draft). The API spells them lowercase with
-// underscores. Anything past draft has gone to the guest.
-const PAST_DRAFT = new Set(["sent", "viewed", "paid", "partially_paid", "void", "overdue", "payment_processing"]);
+// GHL invoice statuses (its workflow filters list Sent, Viewed, Paid,
+// Partially Paid, Void). The API spells them lowercase with underscores.
+// Sent and Viewed don't mean we've handled it: the calendar's booking invoice
+// starts out "sent". Money received or a void does rule it out.
+const SETTLED = new Set(["paid", "partially_paid", "void", "payment_processing"]);
 export function normStatus(s) {
   return String(s ?? "").trim().toLowerCase().replace(/[\s-]+/g, "_");
 }
-export function isPastDraft(status) {
-  return PAST_DRAFT.has(normStatus(status));
+export function isSettled(status) {
+  return SETTLED.has(normStatus(status));
 }
 
-export async function getInvoiceStatus({ tenant, env, locationId, invoiceId }, fetchImpl = fetch) {
+// Has the Worker already written to this invoice? Our processing-fee (and a
+// legacy deposit) line is the only reliable mark: status can't say, because
+// GHL creates the booking invoice as "sent".
+export async function invoiceHasWorkerLines({ tenant, env, locationId, invoiceId }, fetchImpl = fetch) {
   const inv = await ghlFetch(
     tenant, env, `/invoices/${invoiceId}?altId=${encodeURIComponent(locationId)}&altType=location`, {}, fetchImpl
   );
-  return normStatus(inv.status);
+  return (inv.invoiceItems || []).some(i => OUR_LINES.has(i?.name)) || isSettled(inv.status);
 }
 
 // --- enrich + send ---------------------------------------------------------

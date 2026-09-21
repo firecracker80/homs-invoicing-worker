@@ -6,7 +6,7 @@ import { createCheckoutSession } from "./stripe.js";
 import { handlePayPalReturn, handlePayPalWebhook, handleStripeReturn, handleStripeWebhook } from "./payment.js";
 import { handleCancel, handleDepositRefund } from "./cancellation.js";
 import { handleReschedule } from "./reschedule.js";
-import { resolveDraftInvoiceId, enrichAndSendInvoice, getInvoiceStatus } from "./ghl-invoice.js";
+import { resolveDraftInvoiceId, enrichAndSendInvoice, invoiceHasWorkerLines } from "./ghl-invoice.js";
 
 // A "sending" claim younger than this belongs to a run that may still be
 // working; an older one whose invoice GHL still shows as a draft died part-way.
@@ -172,16 +172,18 @@ async function handleBookingCreated(request, env) {
   const existingUrl = existing?.paypal?.approveUrl || existing?.stripe?.checkoutUrl;
   const existingInvoiceId = existing?.ghlInvoice?.invoiceId;
 
-  // A claim left at "sending" by a run that died before GHL sent the invoice
-  // is finished now. GHL's status decides: still a draft -> finish it;
-  // sent or anything later (or unreadable) -> treat as done, never resend.
+  // A claim left at "sending" by a run that died part-way is finished now.
+  // The invoice itself decides: no Worker lines on it yet -> finish it; our
+  // lines already there, it's paid/void, or it can't be read -> treat as
+  // done, never resend. (Status alone can't tell: GHL creates the booking
+  // invoice as "sent".)
   let resumeInvoiceId = null;
   const claim = existing?.ghlInvoice;
   if (claim?.status === "sending" && !existingUrl) {
     const age = Date.now() - (Date.parse(claim.claimedAt || "") || 0);
     if (age >= CLAIM_STALE_MS) {
-      const status = await getInvoiceStatus({ tenant, env, locationId: payload.locationId, invoiceId: claim.invoiceId }).catch(() => null);
-      if (status === "draft" || status === "") resumeInvoiceId = claim.invoiceId;
+      const done = await invoiceHasWorkerLines({ tenant, env, locationId: payload.locationId, invoiceId: claim.invoiceId }).catch(() => true);
+      if (!done) resumeInvoiceId = claim.invoiceId;
     }
   }
 
