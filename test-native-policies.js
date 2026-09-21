@@ -66,7 +66,7 @@ const payload = { bookingId: "BK-1", locationId: "L1", checkIn: "2026-10-01", ch
 }
 
 // ---- 3. pet fee + native cleaning on the GHL invoice ----
-async function enrich(hasPets, items) {
+async function enrich(hasPets, items, tenant = native) {
   const calls = [];
   const fetchImpl = async (url, opts = {}) => {
     calls.push({ url, method: opts.method || "GET", body: opts.body ? JSON.parse(opts.body) : null });
@@ -76,10 +76,10 @@ async function enrich(hasPets, items) {
     });
     return { ok: true, status: 200, text: async () => JSON.stringify(body) };
   };
-  const snapshot = { bookingId: "BK-1", charges: { rentTotal: 200, cleaningFee: 0, processingFee: 12 }, securityDeposit: { total: 0 } };
-  const out = await enrichAndSendInvoice({ tenant: native, env: {}, locationId: "L1", invoiceId: "inv1", snapshot, contact: { id: "c1", phoneNo: "8090000000" }, userId: "u1", hasPets }, fetchImpl);
+  const snapshot = { bookingId: "BK-1", stay: { nights: 1, nightlyRate: 500 }, charges: { rentTotal: 500, cleaningFee: 0, processingFee: 30, feePct: 0.06, grandTotal: 530 }, securityDeposit: { total: 0 }, payout: { ownerPct: 0.85, basis: 500, owner: 425, manager: 75 } };
+  const out = await enrichAndSendInvoice({ tenant, env: {}, locationId: "L1", invoiceId: "inv1", snapshot, contact: { id: "c1", phoneNo: "8090000000" }, userId: "u1", hasPets }, fetchImpl);
   const put = calls.find(c => c.method === "PUT");
-  return { names: put.body.invoiceItems.map(i => i.name), out, snapshot };
+  return { names: put.body.invoiceItems.map(i => i.name), items: put.body.invoiceItems, out, snapshot };
 }
 {
   const ghlItems = [
@@ -110,6 +110,25 @@ async function enrich(hasPets, items) {
     assert.ok(!isPetFeeName(n), `"${n}" is not the pet fee`);
   assert.ok(isPetFeeName("Depósito por mascota", { petFeeName: "Deposito por mascota" }), "tenant petFeeName adds a client's own wording");
   assert.ok(isPetFeeName("Animal fee", { petFeeName: ["x", "animal fee"] }), "petFeeName may be a list");
+
+  // INV-000005 replayed: webhook stayTotal said 500, GHL billed the stay at 135.
+  const inv5 = await enrich("No", [
+    { name: "Arpel 07", amount: 135, qty: 1 }, { name: "Cleaning Fee", amount: 65, qty: 1 }, { name: "Pet Fee", amount: 25, qty: 1 }
+  ]);
+  assert.equal(inv5.snapshot.charges.rentTotal, 135, "rent comes from GHL's stay line, not stayTotal");
+  assert.equal(inv5.snapshot.charges.processingFee, 12, "6% of the whole invoice after the pet check: 6% of 200");
+  assert.equal(inv5.items.find(i => /Processing fee/.test(i.name)).amount, 12, "the appended fee line carries the repriced fee");
+  assert.equal(inv5.snapshot.charges.grandTotal, 212);
+  assert.deepEqual([inv5.snapshot.payout.basis, inv5.snapshot.payout.owner, inv5.snapshot.payout.manager], [135, 114.75, 20.25], "split follows the real rent");
+  assert.equal(inv5.snapshot.stay.nightlyRate, 135);
+  const withPet = await enrich("Sí", [
+    { name: "Arpel 07", amount: 135, qty: 1 }, { name: "Cleaning Fee", amount: 65, qty: 1 }, { name: "Pet Fee", amount: 25, qty: 1 }
+  ]);
+  assert.equal(withPet.snapshot.charges.processingFee, 13.5, "a kept pet fee is part of the fee basis: 6% of 225");
+  const leg = await enrich("No", [{ name: "Arpel 07", amount: 135, qty: 2 }], legacy);
+  assert.equal(leg.snapshot.securityDeposit.total, 270, "legacy deposit is sized from the real stay line (1 night = full rent, 270)");
+  assert.equal(leg.snapshot.charges.processingFee, 32.4, "fee also covers the legacy deposit: 6% of 270 + 270");
+  console.log("   Amounts from GHL's invoice: INV-000005 replay -> rent 135, fee 12 (was 500 / 30)");
 
   assert.equal(yesNo("NO"), false);
   assert.equal(yesNo(" Si "), true);

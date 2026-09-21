@@ -225,22 +225,31 @@ await (await worker.fetch({ method: "POST", url: "https://w.dev/booking-created"
 assert.equal(lastSendUserId, "u_a_different_teammate");
 console.log("6b) Different {{user.id}} on the webhook -> sent as:", lastSendUserId);
 
-// 7. GHL failure -> silent fallback to paypal_url, guest still gets a link
+// 7. GHL failure -> no fallback link (retired 2026-09-21); the response says
+// enrich_failed so the booking workflow can alert the manager.
 paypalOrderCalls = 0; ghlInvoiceCalls = 0; forceGhlFailure = true;
 const r7 = await (await worker.fetch({ method: "POST", url: "https://w.dev/booking-created", json: async () => bookingBody("E2E-FALLBACK"), headers: { get: () => null } }, workerEnv)).json();
-assert.equal(r7.mode, "paypal_url", "a GHL failure must fall back to the existing flow, not error out to the guest");
-assert.ok(r7.approveUrl.includes("sandbox.paypal.com"), "guest must still receive a working PayPal link on fallback");
-assert.equal(paypalOrderCalls, 1);
-console.log("7) GHL enrich fails -> mode:", r7.mode, "| approveUrl present:", !!r7.approveUrl, "(fallback worked, nothing lost)");
+assert.equal(r7.mode, "enrich_failed", JSON.stringify(r7));
+assert.ok(r7.error.includes("500"), "the reason is in the response for the manager alert");
+assert.equal(r7.approveUrl, null, "no payment link is sent");
+assert.equal(paypalOrderCalls, 0, "PayPal is never called for an enrich tenant");
+const failedSnap = JSON.parse(store.get("E2E-FALLBACK"));
+assert.equal(failedSnap.ghlInvoice, undefined, "claim released");
+assert.ok(failedSnap.enrichFailed?.error);
 forceGhlFailure = false;
+ghlInvoiceCalls = 0;
+const r7retry = await (await worker.fetch({ method: "POST", url: "https://w.dev/booking-created", json: async () => bookingBody("E2E-FALLBACK"), headers: { get: () => null } }, workerEnv)).json();
+assert.equal(r7retry.mode, "enrich", "a re-fire after the failure tries again and succeeds");
+console.log("7) GHL enrich fails -> mode:", r7.mode, "| no link, PayPal calls:", paypalOrderCalls, "| re-fire -> ", r7retry.mode);
 
 // 7b. Missing {{user.id}} on the webhook (workflow misconfigured) -> same
-// fallback path, not a hard error to the guest.
+// enrich_failed answer, no link.
 paypalOrderCalls = 0; ghlInvoiceCalls = 0;
 const r7b = await (await worker.fetch({ method: "POST", url: "https://w.dev/booking-created", json: async () => bookingBody("E2E-NO-USERID", { userId: null }), headers: { get: () => null } }, workerEnv)).json();
-assert.equal(r7b.mode, "paypal_url", "a missing {{user.id}} must also fall back cleanly, not error out");
-assert.equal(paypalOrderCalls, 1);
-console.log("7b) Missing userId on webhook -> mode:", r7b.mode, "(fallback worked)");
+assert.equal(r7b.mode, "enrich_failed");
+assert.ok(r7b.error.includes("userId"));
+assert.equal(paypalOrderCalls, 0);
+console.log("7b) Missing userId on webhook -> mode:", r7b.mode);
 
 // 8. Idempotency: retrying an already-enriched booking must NOT re-send the invoice
 ghlInvoiceCalls = 0;
@@ -260,7 +269,7 @@ store.set("E2E-MIDRUN", JSON.stringify({ ...JSON.parse(store.get("E2E-ENRICH")),
 const r9 = await (await worker.fetch({ method: "POST", url: "https://w.dev/booking-created", json: async () => bookingBody("E2E-MIDRUN"), headers: { get: () => null } }, workerEnv)).json();
 assert.equal(r9.idempotent, true, "a retry during the first run returns instead of re-enriching");
 assert.equal(ghlInvoiceCalls + paypalOrderCalls, 0);
-const failed = JSON.parse(store.get("E2E-FALLBACK"));
+const failed = JSON.parse(store.get("E2E-NO-USERID"));
 assert.equal(failed.ghlInvoice, undefined, "a failed enrich releases its claim");
 console.log("9) Invoice claimed as 'sending' before the PUT; a mid-run retry sends nothing; GHL's number untouched");
 
