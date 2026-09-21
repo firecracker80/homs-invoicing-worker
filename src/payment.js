@@ -298,7 +298,10 @@ export async function handleGhlInvoicePaid(request, env) {
   if (invoiceId) invoice = await fetchInvoice({ tenant, env, locationId, invoiceId }).catch(() => null);
   if (!invoice && contactId) {
     const wanted = invoiceNumber || invoiceId;
-    const same = n => String(n ?? "").trim() === wanted || (Number(n) && Number(n) === Number(wanted));
+    // GHL shows numbers with its prefix ("INV-000006") and stores them bare
+    // ("000006"); the workflow only exposes the number, so compare digits.
+    const digits = v => String(v ?? "").replace(/\D/g, "");
+    const same = n => String(n ?? "").trim() === wanted || (digits(n) !== "" && Number(digits(n)) === Number(digits(wanted)));
     const hit = (await listContactInvoices({ tenant, env, locationId, contactId })).find(i => i._id === wanted || same(i.invoiceNumber));
     if (hit) invoice = await fetchInvoice({ tenant, env, locationId, invoiceId: hit._id });
   }
