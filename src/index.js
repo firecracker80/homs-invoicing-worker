@@ -215,7 +215,6 @@ async function handleBookingCreated(request, env) {
   // existing PayPal-URL flow below unmodified — nothing lost.
   const invoiceStrategy = tenant.invoiceStrategy ?? env.INVOICE_STRATEGY ?? "paypal_url";
   let approveUrl, gatewayRef, gateway;
-  let invoiceEnrichError = null; // diagnostic only -- surfaced in the response when enrich falls back
 
   if (invoiceStrategy === "enrich") {
     try {
@@ -253,13 +252,33 @@ async function handleBookingCreated(request, env) {
       gatewayRef = invoiceId;
       approveUrl = null; // guest pays via the invoice GHL just sent, not a link we generate
     } catch (err) {
-      console.error(`GHL invoice enrich failed for ${snapshot.bookingId}, falling back to paypal_url:`, err.message);
-      invoiceEnrichError = err.message;
-      delete snapshot.ghlInvoice; // release the claim; the fallback below rewrites the snapshot
+      // No fallback link (retired 2026-09-21). The link was priced from the
+      // webhook's stayTotal ({{rentalBooking.amount_due}}), which includes every
+      // GHL fee before the pet check -- on a failure it would have charged a
+      // $300 Pet Fee after a "No" and booked all of it as rent. GHL's invoice
+      // is the only thing a guest is asked to pay. The booking workflow reads
+      // mode "enrich_failed" from this response and alerts the manager; the
+      // claim is released so a re-fire can try again.
+      console.error(`GHL invoice enrich failed for ${snapshot.bookingId}:`, err.message);
+      delete snapshot.ghlInvoice;
+      snapshot.enrichFailed = { at: new Date().toISOString(), error: err.message };
+      await env.BOOKINGS.put(snapshot.bookingId, JSON.stringify(snapshot));
+      return json({
+        bookingId: snapshot.bookingId,
+        mode: "enrich_failed",
+        invoiceId: null,
+        approveUrl: null,
+        error: err.message,
+        checkIn: snapshot.stay.checkIn,
+        checkOut: snapshot.stay.checkOut,
+        guestName: snapshot.guest?.name || "",
+        propertyName: snapshot.propertyCode || tenant.brandName || ""
+      });
     }
   }
 
-  // Existing PayPal-URL flow — UNMODIFIED, also the fallback target above.
+  // PayPal/Stripe link flow -- only for a tenant whose invoiceStrategy is not
+  // "enrich". It is no longer a fallback for a failed enrich.
   if (!gateway) {
     gateway = (tenant.gateway || "paypal").toLowerCase();
     if (gateway === "stripe") {
@@ -330,8 +349,7 @@ async function handleBookingCreated(request, env) {
     nights: snapshot.stay.nights,
     nightlyRate: snapshot.stay.nightlyRate.toFixed(2),
     gateway,
-    gatewayRef,
-    invoiceEnrichError: invoiceEnrichError || undefined
+    gatewayRef
   });
 }
 
