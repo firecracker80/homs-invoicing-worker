@@ -117,6 +117,16 @@ export async function listContactInvoices({ tenant, env, locationId, contactId }
   return list.invoices || [];
 }
 
+// GHL's own payment (native Payments -> Transactions) for an invoice, so our
+// Revenue rows can point at it. Best effort: null when none is found.
+export async function findInvoiceTransactionId({ tenant, env, locationId, invoiceId }, fetchImpl = fetch) {
+  const q = new URLSearchParams({ altId: locationId, altType: "location", entityId: invoiceId, limit: "10" });
+  const res = await ghlFetch(tenant, env, `/payments/transactions?${q}`, {}, fetchImpl);
+  const txs = (res.data || []).filter(t => t.entityId === invoiceId || !t.entityId);
+  const ok = txs.find(t => normStatus(t.status) === "succeeded") || txs[0];
+  return ok?._id || null;
+}
+
 // The rental booking an invoice belongs to (GHL's calendar stamps it).
 export function bookingIdOf(invoice) {
   return invoice?.sourceId || invoice?.meta?.serviceBookingId || null;

@@ -7,7 +7,7 @@ changes, no redeploy — the same Worker deployment serves every tenant.
 base (`airtableBaseId`/`airtableToken`/`defaultPropertyRecId` in the tenant
 KV entry). That's gone — `src/airtable.js` was deleted; `payment.js`,
 `cancellation.js`, and `reschedule.js` now write straight to D1
-(`src/ledger.js`) and sync to the client's own GHL `Transaction`/`Payment`
+(`src/ledger.js`) and sync to the client's own GHL `Transaction`/`Revenue` (key `custom_objects.payments`)
 custom objects. Property matching, which used to resolve `defaultPropertyRecId`
 against the Airtable base, now resolves against the client's GHL
 `custom_objects.properties` object instead — matched by `property_name`

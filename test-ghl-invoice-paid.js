@@ -25,6 +25,7 @@ const snapshot = () => ({
 let invoiceStatus = "paid";
 let notifyCalls = 0;
 let invoiceGets = 0;
+const revenueRows = [];
 const invoice = () => ({
   _id: INV, invoiceNumber: "000006", status: invoiceStatus, source: "calendar", sourceId: BOOKING,
   meta: { serviceBookingId: BOOKING, subSource: "rental" }, total: 212, amountPaid: invoiceStatus === "paid" ? 212 : 0,
@@ -38,6 +39,8 @@ global.fetch = async (url, opts = {}) => {
   if (u.includes("/invoices/000006?")) return res({ message: "Invoice not found" }, 404);
   if (u.includes("/invoices/?")) return res({ invoices: [{ _id: "other", invoiceNumber: "000004", status: "paid" }, { _id: INV, invoiceNumber: "000006", status: invoiceStatus }] });
   if (u.includes("/invoices/other?")) return res({ _id: "other", invoiceNumber: "000004", status: "paid" });
+  if (u.includes("/payments/transactions?")) return res({ data: [{ _id: "ghl-tx-1", entityId: INV, status: "succeeded", amount: 212 }] });
+  if (u.includes("/objects/custom_objects.payments/records") && opts.method === "POST") { revenueRows.push(JSON.parse(opts.body)); return res({ record: { id: "rev" + revenueRows.length } }); }
   // Ledger's GHL object writes: accept anything.
   return res({ records: [], record: { id: "rec1" }, associations: [], id: "rec1" });
 };
@@ -82,6 +85,11 @@ assert.equal(snap.captures.RENT.invoiceNumber, "000006");
 assert.equal(snap.captures.DEP, undefined, "no deposit line on a native tenant");
 assert.deepEqual([snap.payout.owner, snap.payout.manager], [114.75, 20.25]);
 assert.equal(notifyCalls, 0, "no post back to the Payment Confirmation webhook -- the workflow would run twice");
+assert.equal(snap.captures.RENT.gatewayTransactionId, "ghl-tx-1", "GHL's native payment id is kept");
+assert.equal(snap.captures.RENT.captureId, undefined, "no fake capture id -- refunds for GHL-paid invoices stay manual");
+const gw = revenueRows.map(r => r.properties?.gateway_transaction_id);
+assert.ok(gw.length > 0, "Revenue rows were written");
+assert.ok(gw.every(v => v === "ghl-tx-1"), "every Revenue row points at GHL's native payment: " + JSON.stringify(gw));
 console.log("3) Paid -> settled: RENT 212 via ghl_invoice, split 114.75 / 20.25, no echo to the confirmation webhook");
 
 // 4. twice -> no-op

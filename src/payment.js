@@ -11,7 +11,7 @@
 import { getAccessToken } from "./paypal.js";
 import { settleRescheduleAdjustment } from "./reschedule.js";
 import { writeLedgerEntries } from "./ledger.js";
-import { fetchInvoice, listContactInvoices, bookingIdOf, normStatus } from "./ghl-invoice.js";
+import { fetchInvoice, listContactInvoices, bookingIdOf, normStatus, findInvoiceTransactionId } from "./ghl-invoice.js";
 
 const round2 = n => Math.round(n * 100) / 100;
 
@@ -316,10 +316,14 @@ export async function handleGhlInvoicePaid(request, env) {
 
   const paid = Number(invoice.amountPaid ?? invoice.total ?? 0);
   const depositHeld = Number(snapshot.securityDeposit?.total || 0);
-  const common = { source: "ghl_invoice", invoiceId: invoice._id, invoiceNumber: invoice.invoiceNumber || null, paidAt: invoice.lastPaidAt || invoice.updatedAt || null };
+  // No captureId: the money sits with GHL's processor, not a PayPal/Stripe
+  // capture of ours, so cancellation refunds for it stay manual (in GHL).
+  // gatewayTransactionId ties our Revenue rows to GHL's native payment.
+  const gatewayTransactionId = await findInvoiceTransactionId({ tenant, env, locationId, invoiceId: invoice._id }).catch(() => null);
+  const common = { source: "ghl_invoice", invoiceId: invoice._id, invoiceNumber: invoice.invoiceNumber || null, gatewayTransactionId, paidAt: invoice.lastPaidAt || invoice.updatedAt || null };
   const captures = {
-    RENT: { ...common, captureId: `ghl-${invoice._id}`, gross: round2(paid - depositHeld) },
-    ...(depositHeld > 0 ? { DEP: { ...common, captureId: `ghl-${invoice._id}-dep`, gross: depositHeld } } : {})
+    RENT: { ...common, gross: round2(paid - depositHeld) },
+    ...(depositHeld > 0 ? { DEP: { ...common, gross: depositHeld } } : {})
   };
   const result = await settle(env, tenant, snapshot, captures, { notify: false });
   return json({ ok: true, bookingId, invoiceId: invoice._id, amountPaid: round2(paid), ...result });
