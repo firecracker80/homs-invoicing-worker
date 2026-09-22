@@ -752,7 +752,10 @@ export function readMarketplaceTag(contact) {
       try { if (u) for (const [k, v] of new URL(u).searchParams) params[k.toLowerCase()] = v; } catch { /* not a URL */ }
     }
     const source = a.utmSource ?? a.utm_source ?? params.utm_source;
-    const campaign = a.utmCampaign ?? a.utm_campaign ?? a.campaign ?? params.utm_campaign;
+    // The landing URL keeps the id exactly as written. GHL lowercases the
+    // first-touch "campaign" (live 2026-09-22: "Zghxu8i60bem39jubtcm" for
+    // ZghxU8I60bEm39JUbtCm) and tenant ids are case-sensitive.
+    const campaign = params.utm_campaign ?? a.utmCampaign ?? a.utm_campaign ?? a.campaign;
     if (String(source || "").trim().toLowerCase() === MARKETPLACE_SOURCE && campaign) found.push(String(campaign).trim());
   }
   return found;

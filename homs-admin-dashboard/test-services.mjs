@@ -685,6 +685,13 @@ const expensesOf = () => Object.values(ghl.db.records[`${CLIENT}|custom_objects.
   await call(env, "/api/services/estimate", payload);
   assert.equal(vendorRec().properties.homs_client, CLIENT, "read from the landing URL when utm fields are absent");
 
+  // Live shape 2026-09-22: first-touch campaign lowercased, no utmCampaign, URL intact.
+  ghl = makeGhl();
+  ghl.db.contactExtra = { contact9: { attributionSource: { utmSource: "homs-marketplace", campaign: CLIENT.toLowerCase(), url: `https://cliente.rlsantana.com/widget/form/x?utm_source=homs-marketplace&utm_campaign=${CLIENT}` } } };
+  seedRequest({ ...base });
+  await call(env, "/api/services/estimate", payload);
+  assert.equal(vendorRec().properties.homs_client, CLIENT, "exact-case id from the URL beats GHL's lowercased campaign");
+
   for (const [why, attr] of [
     ["guest link", { utmSource: "homs-guest", utmCampaign: CLIENT }],
     ["vendor as campaign", { utmSource: "homs-marketplace", utmCampaign: VENDOR }],
