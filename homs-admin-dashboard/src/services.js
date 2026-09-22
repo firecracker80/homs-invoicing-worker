@@ -600,10 +600,46 @@ async function invoiceOne(env, ctx) {
   }
 }
 
+// { pending: true } -- WF1 (Solicitud created) since 2026-09-22, when Roberto
+// took over the estimate. The record-created trigger carries no record id, so
+// sync every request created or changed in the last vendor.syncSweepHours
+// (default 24): each is tagged from the marketplace link if it came through
+// one, and HOMS-client requests get their client copy created or updated.
+// Anything else is skipped by runSync. The newest request is often not
+// searchable yet when the trigger fires, so look again (as the estimate sweep
+// does) until something created in the last few minutes shows up.
+const FRESH_MS = 10 * 60 * 1000;
+
+async function syncSweep(env, ctx) {
+  const hours = Number(ctx.vendor.syncSweepHours) || 24;
+  const since = Date.now() - hours * 3600000;
+  const retryDelay = ctx.vendor.sweepRetryDelayMs ?? 4000;
+  let recent = [];
+  let attempts = 0;
+  for (;;) {
+    attempts++;
+    const all = await fetchAllObjectRecords(ctx.pit, ctx.vendorLocationId, SERVICE_REQUEST_KEY);
+    recent = all.filter((r) => {
+      const touched = Date.parse(r.updatedAt || r.createdAt || "");
+      return Number.isNaN(touched) || touched >= since;
+    });
+    const fresh = recent.some((r) => Date.now() - Date.parse(r.createdAt || "") <= FRESH_MS);
+    if (fresh || attempts > SWEEP_RETRIES) break;
+    await new Promise((r) => setTimeout(r, retryDelay));
+  }
+  const results = [];
+  for (const record of recent) {
+    const res = await runSync(env, { ...ctx, record, pending: false });
+    results.push({ serviceRequestId: record.id, status: res.status, ...(await res.json()) });
+  }
+  return Response.json({ ok: results.every((r) => r.ok !== false), pending: true, processed: results.length, attempts, results });
+}
+
 export async function handleServiceSync(request, env) {
   try {
     const ctx = await loadVendorContext(request, env);
     if (ctx.error) return ctx.error;
+    if (ctx.pending) return syncSweep(env, ctx);
     return runSync(env, ctx);
   } catch (err) {
     return errorResponse(err);

@@ -707,6 +707,62 @@ const expensesOf = () => Object.values(ghl.db.records[`${CLIENT}|custom_objects.
   console.log("18) marketplace link tags homs_client (utm fields or landing URL); guest/vendor/unknown/none/existing left alone");
 }
 
+// ---- 19. WF1 sync sweep: a form submission (no Estado/Origen yet) is tagged and mirrored ----
+{
+  const env = baseEnv("DOP");
+  const now = new Date().toISOString();
+  const old = new Date(Date.now() - 3 * 86400000).toISOString();
+
+  ghl = makeGhl();
+  ghl.db.contactExtra = { contact9: { attributionSource: { utmSource: "homs-marketplace", utmCampaign: CLIENT } } };
+  // Straight from Rogelio's form: no request_status, no request_source.
+  ghl.db.records[`${VENDOR}|${SR}`].form1 = { id: "form1", createdAt: now, updatedAt: now,
+    properties: { service_item: "Mantenimiento de aire 18,000 BTU", category: "aire_acondicionado", job_address: "Villa Marisol", job_description: "Gotea agua", urgency: "media" } };
+  ghl.db.relations.push({ associationId: "a-sr-contact", firstRecordId: "contact9", secondRecordId: "form1" });
+  // A direct client's request from the same day, and an old one outside the window.
+  ghl.db.records[`${VENDOR}|${SR}`].direct1 = { id: "direct1", createdAt: now, updatedAt: now, properties: { service_item: "Instalación", request_status: "solicitado", request_source: "directo" } };
+  ghl.db.relations.push({ associationId: "a-sr-contact", firstRecordId: "contact8", secondRecordId: "direct1" });
+  ghl.db.records[`${VENDOR}|${SR}`].old1 = { id: "old1", createdAt: old, updatedAt: old, properties: { service_item: "Viejo", request_status: "pagado", request_source: "cliente_homs", homs_client: CLIENT } };
+
+  const res = await call(env, "/api/services/sync", { vendorLocationId: VENDOR, pending: true });
+  const out = await res.json();
+  assert.equal(res.status, 200, JSON.stringify(out));
+  assert.equal(out.processed, 2, "only requests touched in the window: " + JSON.stringify(out));
+  const form1 = ghl.db.records[`${VENDOR}|${SR}`].form1.properties;
+  assert.equal(form1.homs_client, CLIENT, "form request tagged from the marketplace link");
+  assert.equal(form1.request_source, "cliente_homs");
+  const mirrors = Object.values(ghl.db.records[`${CLIENT}|${SR}`]);
+  assert.equal(mirrors.length, 1, "exactly one client copy (the marketplace request)");
+  assert.equal(mirrors[0].properties.request_status, "requested", "a blank Estado reads as Solicitado -> requested");
+  assert.equal(out.results.find((r) => r.serviceRequestId === "direct1").skipped, "not_a_homs_client_request");
+  assert.equal(ghl.db.estimates && Object.keys(ghl.db.estimates).length, 0, "sync never creates an estimate");
+
+  // Second run: the copy is updated, not duplicated.
+  await call(env, "/api/services/sync", { vendorLocationId: VENDOR, pending: true });
+  assert.equal(Object.values(ghl.db.records[`${CLIENT}|${SR}`]).length, 1, "re-sync updates the same client copy");
+
+  // Search lag: nothing fresh on the first look -> looks again.
+  ghl = makeGhl();
+  let searches = 0;
+  const realHandler = ghl.handler;
+  ghl.handler = async (url, init) => {
+    if (String(url).endsWith(`/objects/${SR}/records/search`) && ++searches === 1) {
+      const table = ghl.db.records[`${VENDOR}|${SR}`]; const saved = { ...table };
+      for (const k of Object.keys(table)) delete table[k];
+      const res = await realHandler(url, init);
+      Object.assign(table, saved);
+      return res;
+    }
+    return realHandler(url, init);
+  };
+  ghl.db.records[`${VENDOR}|${SR}`].late = { id: "late", createdAt: now, updatedAt: now, properties: { service_item: "Tarde" } };
+  const lagged = await (await call(env, "/api/services/sync", { vendorLocationId: VENDOR, pending: true })).json();
+  assert.equal(lagged.attempts, 2, "looked again after an empty first search");
+  assert.equal(lagged.processed, 1);
+  ghl.handler = realHandler;
+  console.log("19) WF1 sync sweep: form request (no Estado/Origen) tagged + mirrored once; direct skipped; old ignored; search lag retried; no estimate");
+}
+
 // ---- 10. existing dashboard routes still gated --------------------------------------
 {
   const res = await worker.fetch(new Request("https://w.dev/api/data?locationId=x"), baseEnv("DOP"));
