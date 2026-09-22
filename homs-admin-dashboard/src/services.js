@@ -627,8 +627,12 @@ async function syncSweep(env, ctx) {
     if (fresh || attempts > SWEEP_RETRIES) break;
     await new Promise((r) => setTimeout(r, retryDelay));
   }
+  // Search results can be a step behind: on the live re-run (2026-09-22) the
+  // sweep saw Origen as it was before WF1's update, so nothing was corrected.
+  // Each record is read again by id, which is current, before acting on it.
   const results = [];
-  for (const record of recent) {
+  for (const found of recent) {
+    const record = (await getObjectRecord(ctx.pit, ctx.vendorLocationId, SERVICE_REQUEST_KEY, found.id)) || found;
     const res = await runSync(env, { ...ctx, record, pending: false });
     results.push({ serviceRequestId: record.id, status: res.status, ...(await res.json()) });
   }

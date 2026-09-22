@@ -748,9 +748,21 @@ const expensesOf = () => Object.values(ghl.db.records[`${CLIENT}|custom_objects.
   await call(env, "/api/services/sync", { vendorLocationId: VENDOR, pending: true });
   assert.equal(Object.values(ghl.db.records[`${CLIENT}|${SR}`]).length, 1, "re-sync updates the same client copy");
 
-  // WF1 re-run: its update step set Origen back to Directo on a tagged request.
+  // WF1 re-run: its update step set Origen back to Directo on a tagged request,
+  // and search still returns the old copy (Cliente HOMS) -- the live 2026-09-22 case.
   ghl.db.records[`${VENDOR}|${SR}`].form1.properties.request_source = "directo";
+  const staleHandler = ghl.handler;
+  ghl.handler = async (url, init) => {
+    if (String(url).endsWith(`/objects/${SR}/records/search`)) {
+      const res = await staleHandler(url, init);
+      const body = JSON.parse(await res.text());
+      for (const r of body.records || []) if (r.id === "form1") r.properties = { ...r.properties, request_source: "cliente_homs" };
+      return { ok: true, status: 201, text: async () => JSON.stringify(body), json: async () => body };
+    }
+    return staleHandler(url, init);
+  };
   const rerun = await (await call(env, "/api/services/sync", { vendorLocationId: VENDOR, pending: true })).json();
+  ghl.handler = staleHandler;
   assert.equal(ghl.db.records[`${VENDOR}|${SR}`].form1.properties.request_source, "cliente_homs", "a tagged request is put back to Cliente HOMS");
   assert.ok(!rerun.results.find((r) => r.serviceRequestId === "form1").skipped, "and it still syncs");
 
