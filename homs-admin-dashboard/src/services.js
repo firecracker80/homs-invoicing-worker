@@ -762,7 +762,16 @@ export function readMarketplaceTag(contact) {
 }
 
 async function tagFromAttribution(env, ctx, record) {
-  if (prop(record, "homs_client")) return record;
+  // Once tagged, the client wins. WF1 sets Origen = Directo on every run (it
+  // can't tell the source), so a re-run on a tagged request would otherwise
+  // turn it back into a direct job and stop the client copy syncing (live
+  // 2026-09-22 test run). Put Origen back to match the tag.
+  if (prop(record, "homs_client")) {
+    if (prop(record, "request_source") === "cliente_homs") return record;
+    const fix = { request_source: "cliente_homs" };
+    await updateObjectRecord(ctx.pit, ctx.vendorLocationId, SERVICE_REQUEST_KEY, record.id, fix);
+    return { ...record, properties: { ...record.properties, ...fix } };
+  }
   const contactId = await customerContactId(ctx.pit, ctx.vendorLocationId, record.id);
   if (!contactId) return record;
   const contact = await getContact(ctx.pit, contactId);

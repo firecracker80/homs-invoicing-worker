@@ -748,6 +748,12 @@ const expensesOf = () => Object.values(ghl.db.records[`${CLIENT}|custom_objects.
   await call(env, "/api/services/sync", { vendorLocationId: VENDOR, pending: true });
   assert.equal(Object.values(ghl.db.records[`${CLIENT}|${SR}`]).length, 1, "re-sync updates the same client copy");
 
+  // WF1 re-run: its update step set Origen back to Directo on a tagged request.
+  ghl.db.records[`${VENDOR}|${SR}`].form1.properties.request_source = "directo";
+  const rerun = await (await call(env, "/api/services/sync", { vendorLocationId: VENDOR, pending: true })).json();
+  assert.equal(ghl.db.records[`${VENDOR}|${SR}`].form1.properties.request_source, "cliente_homs", "a tagged request is put back to Cliente HOMS");
+  assert.ok(!rerun.results.find((r) => r.serviceRequestId === "form1").skipped, "and it still syncs");
+
   // Search lag: nothing fresh on the first look -> looks again.
   ghl = makeGhl();
   let searches = 0;
