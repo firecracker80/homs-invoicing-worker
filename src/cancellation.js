@@ -43,6 +43,12 @@ function adminAuthorized(request, env, tenant) {
 
 export { adminAuthorized, notifyGHL };
 
+// Marks a ledger row whose refund has to be issued by hand -- a GHL-invoice
+// booking has no gateway capture to refund against. Greppable on purpose: this
+// is the list of refunds someone still owes a guest.
+export const MANUAL_REFUND_REF = "manual_refund_pending";
+const MANUAL_SUFFIX = " — refund to be issued manually";
+
 // ---- tier math ----
 // Shared by /cancel (whole booking) and reschedule.js (partial cancellation
 // of dropped nights). checkInDateStr is "YYYY-MM-DD" -- the CURRENT check-in
@@ -188,6 +194,22 @@ async function notifyGHL(url, payload) {
 }
 
 // =============================================================== /cancel ====
+// A cancellation that reaches us late -- a workflow that stalled, a booking
+// cancelled in GHL before the webhook was wired -- must be priced at the moment
+// it actually happened. Without this the tier is read off the clock at import
+// time, and a cancellation made 3 days out gets charged as if it were made the
+// night before. Bounded: never the future, never more than a year back.
+const ASOF_MAX_AGE_MS = 365 * 24 * 3600000;
+
+export function resolveAsOf(rawAsOf, nowMs) {
+  if (rawAsOf === undefined || rawAsOf === null || rawAsOf === "") return { ms: nowMs, backfilled: false };
+  const ms = typeof rawAsOf === "number" ? rawAsOf : Date.parse(String(rawAsOf));
+  if (!Number.isFinite(ms)) return { error: "asOf is not a valid date" };
+  if (ms > nowMs) return { error: "asOf cannot be in the future" };
+  if (nowMs - ms > ASOF_MAX_AGE_MS) return { error: "asOf is more than a year ago" };
+  return { ms, backfilled: true };
+}
+
 export async function handleCancel(request, env) {
   const ctx = await loadContext(request, env);
   if (ctx.error) return ctx.error;
@@ -196,11 +218,17 @@ export async function handleCancel(request, env) {
   if (snapshot.cancelled) return json({ alreadyCancelled: true, cancellation: snapshot.cancellation });
 
   const now = Date.now();
+  const asOf = resolveAsOf(body.asOf, now);
+  if (asOf.error) return json({ error: asOf.error }, 400);
+  const effectiveNow = asOf.ms;
 
   // ---- UNPAID booking: no refunds, just void ----
   if (!snapshot.settled) {
     snapshot.cancelled = true;
-    snapshot.cancellation = { tier: "unpaid_void", at: new Date(now).toISOString(), reason: body.reason || "" };
+    snapshot.cancellation = {
+      tier: "unpaid_void", at: new Date(effectiveNow).toISOString(), reason: body.reason || "",
+      ...(asOf.backfilled ? { backfilled: true, recordedAt: new Date(now).toISOString() } : {}),
+    };
     await env.BOOKINGS.put(snapshot.bookingId, JSON.stringify(snapshot));
     // No Transaction record exists yet for an unpaid booking, and no money
     // moved -- nothing to write to D1 or GHL here.
@@ -215,7 +243,7 @@ export async function handleCancel(request, env) {
   }
 
   // ---- PAID booking: tiered refunds ----
-  const calc = calcCancellation(snapshot, now, tenant, body.override);
+  const calc = calcCancellation(snapshot, effectiveNow, tenant, body.override);
   const note = `Cancelación ${snapshot.bookingId} — reembolso según política`;
 
     const rentCaptureId = snapshot.captures?.RENT?.captureId;
@@ -253,8 +281,9 @@ export async function handleCancel(request, env) {
   // ---- snapshot ----
   snapshot.cancelled = true;
   snapshot.cancellation = {
-    at: new Date(now).toISOString(), reason: body.reason || "",
-    ...calc, refundIds
+    at: new Date(effectiveNow).toISOString(), reason: body.reason || "",
+    ...(asOf.backfilled ? { backfilled: true, recordedAt: new Date(now).toISOString() } : {}),
+    ...calc, refundIds, refundFailures
   };
   snapshot.securityDeposit.status = "refunded";
   snapshot.securityDeposit.refundedAmount = calc.depositRefund;
@@ -270,32 +299,40 @@ export async function handleCancel(request, env) {
     const ownerPct = snapshot.payout.ownerPct;
     const rows = [];
 
-    if (refundIds.rent) {
+    // A refund owed is a refund owed. When the money moved through a gateway we
+    // reference its refund id; when it didn't -- every GHL-invoice booking, which
+    // has no captureId by design -- the reversal still belongs in the ledger, or
+    // a cancelled booking goes on counting as income until someone notices.
+    const rentRefundRef = refundIds.rent || (calc.rentUnitRefund > 0 ? MANUAL_REFUND_REF : null);
+    const manualRent = !refundIds.rent && Boolean(rentRefundRef);
+
+    if (rentRefundRef) {
       const ownerRentReversal = round2(calc.rentRefund * ownerPct);
       rows.push({
         recipient: "owner", category: "income", entry_type: "cancellation_rent_refund_owner",
-        amount: -ownerRentReversal, reference: refundIds.rent, source: "cancellation",
-        description: `Rent refund reversal (${Math.round(ownerPct * 100)}% share) — ${calc.tier}`
+        amount: -ownerRentReversal, reference: rentRefundRef, source: "cancellation",
+        description: `Rent refund reversal (${Math.round(ownerPct * 100)}% share) — ${calc.tier}${manualRent ? MANUAL_SUFFIX : ""}`
       });
       rows.push({
         recipient: "manager", category: "income", entry_type: "cancellation_rent_refund_manager",
-        amount: -round2(calc.rentRefund - ownerRentReversal), reference: refundIds.rent, source: "cancellation",
-        description: `Rent refund reversal (manager share) — ${calc.tier}`
+        amount: -round2(calc.rentRefund - ownerRentReversal), reference: rentRefundRef, source: "cancellation",
+        description: `Rent refund reversal (manager share) — ${calc.tier}${manualRent ? MANUAL_SUFFIX : ""}`
       });
       if (calc.cleaningRefund > 0) {
         const cleaningTo = snapshot.payout.cleaningFeeTo === "owner" ? "owner" : "manager";
         rows.push({
           recipient: cleaningTo, category: "income", entry_type: "cancellation_cleaning_refund",
-          amount: -calc.cleaningRefund, reference: refundIds.rent, source: "cancellation",
-          description: "Cleaning fee refund reversal"
+          amount: -calc.cleaningRefund, reference: rentRefundRef, source: "cancellation",
+          description: `Cleaning fee refund reversal${manualRent ? MANUAL_SUFFIX : ""}`
         });
       }
     }
 
-    if (refundIds.deposit) {
+    const depositRefundRef = refundIds.deposit || (calc.depositRefund > 0 ? MANUAL_REFUND_REF : null);
+    if (depositRefundRef) {
       rows.push({
         recipient: "guest", category: "liability", entry_type: "cancellation_deposit_refund",
-        amount: calc.depositRefund, reference: refundIds.deposit, source: "cancellation",
+        amount: calc.depositRefund, reference: depositRefundRef, source: "cancellation",
         description: "Security deposit returned on cancellation"
       });
     }
