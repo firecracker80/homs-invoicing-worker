@@ -661,9 +661,188 @@ function renderVendor() {
     ${table(["Contact", "Source", "Date", "Amount"], ghlRows, transactions.filter(GHL_COLLECTED).length)}
     <h3>All expenses</h3>
     ${table(["Expense", "Vendor", "Category", "Recurrence", "Paid on", "Amount"], expenseRows, expenses.length)}
+    ${importSection()}
   `;
 
   wireStatement();
+  wireImport();
+  renderImportPreview();
+}
+
+// ---------- Expense import (vendor books only) ----------
+//
+// Two steps on purpose. The server parses and returns rows; nothing is written
+// until the reviewer has seen them and pressed Import. Every row stays editable
+// here, because a bank export gets the vendor right and the category wrong far
+// more often than the other way round.
+
+let IMPORT_ROWS = [];
+
+const IMPORT_CATEGORIES = [
+  ["platform", "Platform"], ["infrastructure", "Infrastructure"], ["office", "Office"],
+  ["telecom", "Telecom"], ["contractors", "Contractors"], ["marketing", "Marketing"],
+  ["payment_fees", "Payment fees"], ["software", "Software"], ["other", "Other"],
+];
+const IMPORT_RECURRENCES = [["one_off", "One-off"], ["monthly", "Monthly"], ["annual", "Annual"]];
+
+// Plain language, because the reviewer is deciding from this text alone.
+const ISSUE_LABELS = {
+  no_amount: "no amount",
+  zero_amount: "amount is zero",
+  no_date: "no date",
+  no_name: "no description",
+  negative_in_source: "a credit, not a cost",
+  ambiguous_date: "day/month order unclear",
+  duplicate_of_existing: "already in this book",
+  duplicate_in_file: "repeated in this file",
+  category_guessed: "category guessed",
+  category_unknown: "category not recognised",
+};
+
+function importSection() {
+  return `
+    <h3>Import expenses</h3>
+    <p class="note">A CSV from a bank, card or vendor export. Columns are matched by name in English or Spanish, in any order.
+      Nothing is written to the book until you review the rows and press Import.</p>
+    <div class="toolbar">
+      <input type="file" id="importFile" accept=".csv,text/csv,text/plain" />
+      <span id="importStatus" class="count"></span>
+    </div>
+    <div id="importPreview"></div>`;
+}
+
+function issueBadges(issues) {
+  if (!issues?.length) return "";
+  return issues.map((i) => `<span class="badge">${esc(ISSUE_LABELS[i] || i)}</span>`).join(" ");
+}
+
+function renderImportPreview() {
+  const host = $("#importPreview");
+  if (!host) return;
+  if (!IMPORT_ROWS.length) { host.innerHTML = ""; return; }
+
+  const select = (name, idx, options, value) =>
+    `<select data-import="${name}" data-row="${idx}">${options
+      .map(([v, label]) => `<option value="${v}"${v === value ? " selected" : ""}>${esc(label)}</option>`)
+      .join("")}</select>`;
+
+  const rows = IMPORT_ROWS.map((r, i) => `
+    <tr class="${r.include ? "" : "row-muted"}">
+      <td><input type="checkbox" data-import="include" data-row="${i}"${r.include ? " checked" : ""} /></td>
+      <td>${r.line ?? ""}</td>
+      <td><input type="text" data-import="name" data-row="${i}" value="${esc(r.name ?? "")}" /></td>
+      <td><input type="text" data-import="vendor" data-row="${i}" value="${esc(r.vendor ?? "")}" /></td>
+      <td><input type="date" data-import="paidOn" data-row="${i}" value="${esc(r.paidOn ?? "")}" /></td>
+      <td><input type="number" step="0.01" min="0" data-import="amount" data-row="${i}" value="${r.amount ?? ""}" /></td>
+      <td>${select("category", i, IMPORT_CATEGORIES, r.category)}</td>
+      <td>${select("recurrence", i, IMPORT_RECURRENCES, r.recurrence)}</td>
+      <td>${issueBadges(r.issues)}</td>
+    </tr>`).join("");
+
+  const ticked = IMPORT_ROWS.filter((r) => r.include).length;
+  host.innerHTML = `
+    <div class="toolbar">
+      <div class="count">${ticked} of ${IMPORT_ROWS.length} row${IMPORT_ROWS.length === 1 ? "" : "s"} selected</div>
+      <button id="importConfirm"${ticked ? "" : " disabled"}>Import ${ticked} expense${ticked === 1 ? "" : "s"}</button>
+      <button id="importCancel" class="secondary">Cancel</button>
+    </div>
+    <table>
+      <thead><tr>
+        <th></th><th>Line</th><th>Description</th><th>Vendor</th><th>Paid on</th>
+        <th>Amount</th><th>Category</th><th>Recurrence</th><th>Notes</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+
+  $("#importConfirm")?.addEventListener("click", runImport);
+  $("#importCancel")?.addEventListener("click", () => {
+    IMPORT_ROWS = [];
+    const file = $("#importFile");
+    if (file) file.value = "";
+    $("#importStatus").textContent = "";
+    renderImportPreview();
+  });
+}
+
+function wireImport() {
+  const file = $("#importFile");
+  if (!file) return;
+
+  file.addEventListener("change", async () => {
+    const f = file.files?.[0];
+    if (!f) return;
+    const status = $("#importStatus");
+    status.textContent = `Reading ${f.name}…`;
+    try {
+      const csv = await f.text();
+      const res = await apiFetch("/api/expenses/parse", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ locationId: getLocationId(), csv }),
+      });
+      const out = await res.json();
+      if (!res.ok) throw new Error(ISSUE_LABELS[out.error] || out.error || "Could not read that file");
+      IMPORT_ROWS = out.rows;
+      const s = out.summary;
+      status.textContent = `${f.name}: ${s.total} row${s.total === 1 ? "" : "s"}, ${s.ready} ready` +
+        (s.needsReview ? `, ${s.needsReview} needing a look` : "") +
+        (out.truncated ? " (only the first 300 rows were read)" : "");
+      renderImportPreview();
+    } catch (err) {
+      status.textContent = err.message;
+      IMPORT_ROWS = [];
+      renderImportPreview();
+    }
+  });
+
+  // One delegated listener for the whole preview: the table is re-rendered on
+  // every change, so per-input listeners would go stale.
+  $("#importPreview").addEventListener("input", (e) => {
+    const field = e.target.dataset?.import;
+    if (!field) return;
+    const row = IMPORT_ROWS[Number(e.target.dataset.row)];
+    if (!row) return;
+    if (field === "include") { row.include = e.target.checked; renderImportPreview(); return; }
+    row[field] = field === "amount" ? (e.target.value === "" ? null : Number(e.target.value)) : (e.target.value || null);
+    if (field === "amount" || field === "paidOn" || field === "name") {
+      const ticked = IMPORT_ROWS.filter((r) => r.include).length;
+      const btn = $("#importConfirm");
+      if (btn) btn.textContent = `Import ${ticked} expense${ticked === 1 ? "" : "s"}`;
+    }
+  });
+}
+
+async function runImport() {
+  const rows = IMPORT_ROWS.filter((r) => r.include);
+  if (!rows.length) return;
+  const btn = $("#importConfirm");
+  const status = $("#importStatus");
+  if (btn) { btn.disabled = true; btn.textContent = "Importing…"; }
+
+  try {
+    const res = await apiFetch("/api/expenses/import", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ locationId: getLocationId(), rows }),
+    });
+    const out = await res.json();
+    if (!res.ok) throw new Error(out.error || "Import failed");
+
+    // Anything rejected stays on screen with the reason. Clearing the table on a
+    // partial failure would hide which rows never made it into the book.
+    const failedLines = new Set(out.failed.map((f) => f.line));
+    IMPORT_ROWS = IMPORT_ROWS.filter((r) => failedLines.has(r.line));
+
+    // Reload first: it re-renders the whole vendor view, which would otherwise
+    // wipe the message and the rows that still need attention.
+    await loadData();
+    $("#importStatus").textContent = `Imported ${out.imported}.` +
+      (out.failed.length ? ` ${out.failed.length} could not be saved: ${out.failed.map((f) => `line ${f.line} (${f.error})`).join("; ")}` : "");
+    renderImportPreview();
+  } catch (err) {
+    status.textContent = err.message;
+    if (btn) { btn.disabled = false; btn.textContent = "Import"; }
+  }
 }
 
 // ---------- Overview ----------
