@@ -13,6 +13,8 @@ import { getTenant, resolvePit } from "./tenants.js";
 import { requireAdmin, requireProvision, requireServices, handleLogin, handleLogout } from "./auth.js";
 import { provision } from "./provision.js";
 import { handleVendorData } from "./vendor.js";
+import { mapCsvRows, loadExistingExpenses, importRows } from "./expenses-import.js";
+import { extractFromFile, rowsFromExtraction, MAX_FILE_BYTES } from "./receipt-extract.js";
 import { handleServiceEstimate, handleServiceInvoice, handleServiceSync, handleServiceAccepted, handleServiceDeclined, handleServicePaid, readClientCurrencySettings } from "./services.js";
 
 // Yari's own default accent color -- used whenever a tenant's KV entry has no
@@ -140,6 +142,107 @@ async function handleCreateExpense(request, env) {
   }
 }
 
+// A vendor book (HOMS, DTCS) keeps its own expense shape -- vendor, currency,
+// recurrence, source, receipt -- and no client dimension at all. Writing a
+// client-shaped expense into it, or a vendor-shaped one into a client account,
+// would corrupt the P&L silently, so both import routes refuse anything else.
+async function resolveVendorBook(request, env) {
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return { error: Response.json({ error: "Invalid JSON body" }, { status: 400 }) };
+  }
+  const { tenant, pit, error } = await resolveTenantPit(env, body.locationId);
+  if (error) return { error };
+  if (tenant.kind !== "vendor") {
+    return { error: Response.json({ error: "Not a vendor book -- expense import is for HOMS/DTCS only" }, { status: 400 }) };
+  }
+  return { body, tenant, pit, locationId: body.locationId };
+}
+
+// Parse writes nothing. It returns draft rows for review, with every problem the
+// parser could see already attached to the row that has it.
+async function handleExpenseParse(request, env) {
+  const { body, tenant, pit, locationId, error } = await resolveVendorBook(request, env);
+  if (error) return error;
+
+  if (typeof body.csv !== "string" || !body.csv.trim()) {
+    return Response.json({ error: "csv (text) is required" }, { status: 400 });
+  }
+  try {
+    const existing = await loadExistingExpenses(pit, locationId);
+    const result = mapCsvRows(body.csv, { existing, defaultCurrency: tenant.currency || "USD" });
+    if (result.error) return Response.json(result, { status: 400 });
+    return Response.json(result);
+  } catch (err) {
+    return Response.json(
+      { error: err.message || "Unknown error" },
+      { status: err.status && err.status >= 400 && err.status < 600 ? err.status : 502 }
+    );
+  }
+}
+
+// Same contract as /parse, for a receipt photo or a PDF: draft rows out, nothing
+// written. The reading is done by Claude; everything after it -- the review, the
+// duplicate check, the hold-back rules, the import -- is the CSV path exactly.
+async function handleReceiptParse(request, env) {
+  const { body, tenant, pit, locationId, error } = await resolveVendorBook(request, env);
+  if (error) return error;
+
+  const { filename, mediaType, data } = body;
+  if (typeof data !== "string" || !data) {
+    return Response.json({ error: "data (base64) is required" }, { status: 400 });
+  }
+  // Base64 carries 3 bytes per 4 characters; check before sending it anywhere.
+  if (Math.floor((data.length * 3) / 4) > MAX_FILE_BYTES) {
+    return Response.json({ error: "That file is too large (5 MB max). Photograph the receipt again at a lower resolution." }, { status: 413 });
+  }
+
+  try {
+    const [extracted, existing] = await Promise.all([
+      extractFromFile(env.ANTHROPIC_API_KEY, { mediaType, data }, tenant.receiptModel ? { model: tenant.receiptModel } : {}),
+      loadExistingExpenses(pit, locationId),
+    ]);
+    const out = rowsFromExtraction(extracted, { filename, existing, defaultCurrency: tenant.currency || "USD" });
+    // Not a receipt at all: a 422 with the reason, so the dashboard can say what
+    // it was looking at instead of showing an empty table.
+    if (out.error) return Response.json(out, { status: 422 });
+    return Response.json({ ...out, source: "receipt_upload" });
+  } catch (err) {
+    return Response.json(
+      { error: err.message || "Unknown error" },
+      { status: err.status && err.status >= 400 && err.status < 600 ? err.status : 502 }
+    );
+  }
+}
+
+// Import writes exactly the rows it is handed -- never what parse produced, which
+// the reviewer may have edited or unticked in between.
+async function handleExpenseImport(request, env) {
+  const { body, pit, locationId, error } = await resolveVendorBook(request, env);
+  if (error) return error;
+
+  const rows = body.rows;
+  if (!Array.isArray(rows) || rows.length === 0) {
+    return Response.json({ error: "rows (array) is required" }, { status: 400 });
+  }
+  if (rows.length > 300) {
+    return Response.json({ error: "Too many rows in one import (max 300)" }, { status: 400 });
+  }
+  const source = body.source === "receipt_upload" || body.source === "manual" ? body.source : "csv_import";
+
+  try {
+    const { created, failed } = await importRows(pit, locationId, rows, { source });
+    return Response.json({ ok: failed.length === 0, imported: created.length, created, failed });
+  } catch (err) {
+    return Response.json(
+      { error: err.message || "Unknown error" },
+      { status: err.status && err.status >= 400 && err.status < 600 ? err.status : 502 }
+    );
+  }
+}
+
 // Reconciles a tenant's custom values against the blueprint. Requires PROVISION_KEY,
 // never the dashboard cookie -- this endpoint rewrites configuration and mints secrets.
 async function handleProvision(request, env) {
@@ -240,6 +343,18 @@ export default {
 
     if (url.pathname === "/api/expenses" && request.method === "POST") {
       return handleCreateExpense(request, env);
+    }
+
+    if (url.pathname === "/api/expenses/parse" && request.method === "POST") {
+      return handleExpenseParse(request, env);
+    }
+
+    if (url.pathname === "/api/expenses/parse-file" && request.method === "POST") {
+      return handleReceiptParse(request, env);
+    }
+
+    if (url.pathname === "/api/expenses/import" && request.method === "POST") {
+      return handleExpenseImport(request, env);
     }
 
     // An unmatched /api/* path must 404, not fall through to static assets --
