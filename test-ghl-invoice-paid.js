@@ -121,6 +121,24 @@ assert.equal(lsnap.captures.RENT.gross, 77, "212 paid - 135 deposit");
 assert.equal(lsnap.securityDeposit.status, "held");
 console.log("6) Legacy deposit on the invoice -> DEP 135 held, RENT the rest");
 
+// 6b. cancelled booking, invoice paid afterwards -> recorded, never settled
+// The payment window closes, GHL cancels and frees the dates, but the invoice
+// link in the guest's inbox still works. This is that guest paying anyway.
+await kv.put(BOOKING, JSON.stringify({ ...snapshot(), cancelled: true, cancellation: { at: "2026-09-21T12:47:00.000Z", tier: "unpaid_void" } }));
+notifyCalls = 0;
+const late = await post({ ...base, invoiceId: INV });
+assert.equal(late.status, 200, "200 so GHL stops retrying");
+assert.equal(late.body.skipped, "booking_cancelled");
+assert.equal(late.body.refundOwed, 212);
+const lateSnap = JSON.parse(store.get(BOOKING));
+assert.equal(lateSnap.settled, undefined, "a cancelled booking is never settled");
+assert.equal(lateSnap.captures, undefined, "and no capture is recorded");
+assert.equal(lateSnap.paymentAfterCancellation.amount, 212, "but the money is on the record");
+assert.equal(lateSnap.paymentAfterCancellation.invoiceNumber, "000006");
+assert.equal(lateSnap.paymentAfterCancellation.cancelledAt, "2026-09-21T12:47:00.000Z");
+assert.equal(notifyCalls, 0, "and the guest is never told the booking is confirmed");
+console.log("6b) Paid after cancellation -> recorded as owed, not settled, guest not confirmed");
+
 // 7. booking the Worker never saw -> 404, nothing written
 store.delete(BOOKING);
 assert.equal((await post({ ...base, invoiceId: INV })).status, 404);
