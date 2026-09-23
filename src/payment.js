@@ -317,6 +317,27 @@ export async function handleGhlInvoicePaid(request, env) {
   if (snapshot.locationId !== locationId) return json({ error: "Invoice and booking belong to different accounts" }, 409);
   if (snapshot.settled) return json({ ok: true, alreadySettled: true, bookingId });
 
+  // GHL cancels an unpaid booking when its payment window closes, but the invoice
+  // link already sitting in the guest's inbox keeps working. Money arriving after
+  // that is real money against a stay that is not happening, on dates GHL has
+  // already released. Settling it would book revenue and an owner/manager split
+  // for a booking nobody is honouring, so it is recorded and escalated instead --
+  // and the guest is never sent a confirmation.
+  if (snapshot.cancelled) {
+    const amount = round2(Number(invoice.amountPaid ?? invoice.total ?? 0));
+    snapshot.paymentAfterCancellation = {
+      at: new Date().toISOString(), amount,
+      invoiceId: invoice._id, invoiceNumber: invoice.invoiceNumber || null,
+      cancelledAt: snapshot.cancellation?.at || null,
+    };
+    await env.BOOKINGS.put(snapshot.bookingId, JSON.stringify(snapshot));
+    console.error(
+      "Payment of " + amount + " received on CANCELLED booking " + bookingId +
+      " (invoice " + (invoice.invoiceNumber || invoice._id) + ") -- owed back to the guest, or the booking has to be reinstated"
+    );
+    return json({ ok: true, skipped: "booking_cancelled", refundOwed: amount, bookingId, invoiceId: invoice._id });
+  }
+
   const paid = Number(invoice.amountPaid ?? invoice.total ?? 0);
   const depositHeld = Number(snapshot.securityDeposit?.total || 0);
   // No captureId: the money sits with GHL's processor, not a PayPal/Stripe
