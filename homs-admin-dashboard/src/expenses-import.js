@@ -216,7 +216,21 @@ const pickOption = (raw, allowed) => {
 
 // ---- rows --------------------------------------------------------------------
 
-const dupKey = (r) => `${norm(r.vendor || r.name)}|${Number(r.amount).toFixed(2)}|${r.paidOn || ""}`;
+export const dupKeyOf = (r) => `${norm(r.vendor || r.name)}|${Number(r.amount).toFixed(2)}|${r.paidOn || ""}`;
+
+export const keysOf = (existing) => new Set(
+  (existing || []).filter((e) => e.paidOn && e.amount).map((e) => dupKeyOf({ vendor: e.vendor, name: e.name, amount: e.amount, paidOn: e.paidOn }))
+);
+
+// Anything that can't be placed in time or money can't go in a P&L, so it is held
+// back by default; so is anything the reviewer should look at twice. Ticking it
+// after a fix is one click -- an unnoticed bad row is permanent.
+const BLOCKING = ["no_amount", "no_date", "no_name", "zero_amount", "not_a_receipt", "unreadable"];
+export function decideInclude(issues) {
+  const blocked = issues.some((x) => BLOCKING.includes(x));
+  const flagged = issues.some((x) => x.startsWith("duplicate") || x === "negative_in_source" || x === "low_confidence");
+  return { include: !blocked && !flagged, blocked };
+}
 
 /**
  * Turns CSV text into draft rows. Pure: no GHL, no clock beyond what's passed in.
@@ -247,9 +261,7 @@ export function mapCsvRows(text, { existing = [], defaultCurrency = "USD" } = {}
   const fileOrder = (votes.dmy || 0) > (votes.mdy || 0) ? "dmy" : (votes.mdy ? "mdy" : null);
 
   const seenInFile = new Set();
-  const existingKeys = new Set(
-    existing.filter((e) => e.paidOn && e.amount).map((e) => dupKey({ vendor: e.vendor, name: e.name, amount: e.amount, paidOn: e.paidOn }))
-  );
+  const existingKeys = keysOf(existing);
 
   const rows = parsed.map(({ row, date }, i) => {
     const issues = [];
@@ -291,17 +303,13 @@ export function mapCsvRows(text, { existing = [], defaultCurrency = "USD" } = {}
     if (!draft.name) issues.push("no_name");
 
     if (amount !== null && paidOn) {
-      const k = dupKey(draft);
+      const k = dupKeyOf(draft);
       if (existingKeys.has(k)) issues.push("duplicate_of_existing");
       else if (seenInFile.has(k)) issues.push("duplicate_in_file");
       seenInFile.add(k);
     }
 
-    // Anything that can't be placed in time or money can't go in a P&L, so it is
-    // held back by default. The reviewer can still tick it after fixing the row.
-    const blocked = issues.some((x) => ["no_amount", "no_date", "no_name", "zero_amount"].includes(x));
-    const flagged = issues.some((x) => x.startsWith("duplicate") || x === "negative_in_source");
-    return { ...draft, issues, include: !blocked && !flagged, blocked };
+    return { ...draft, issues, ...decideInclude(issues) };
   });
 
   return {

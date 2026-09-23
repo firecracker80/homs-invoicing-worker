@@ -677,6 +677,11 @@ function renderVendor() {
 // more often than the other way round.
 
 let IMPORT_ROWS = [];
+// Which path produced the rows, so the records carry honest provenance and a bad
+// batch can be found again: csv_import or receipt_upload.
+let IMPORT_SOURCE = "csv_import";
+
+const RECEIPT_TYPES = ["image/jpeg", "image/png", "image/gif", "image/webp", "application/pdf"];
 
 const IMPORT_CATEGORIES = [
   ["platform", "Platform"], ["infrastructure", "Infrastructure"], ["office", "Office"],
@@ -697,15 +702,17 @@ const ISSUE_LABELS = {
   duplicate_in_file: "repeated in this file",
   category_guessed: "category guessed",
   category_unknown: "category not recognised",
+  low_confidence: "read was unclear - check it",
 };
 
 function importSection() {
   return `
     <h3>Import expenses</h3>
-    <p class="note">A CSV from a bank, card or vendor export. Columns are matched by name in English or Spanish, in any order.
+    <p class="note">A CSV from a bank, card or vendor export, or a photo or PDF of a receipt or invoice.
+      CSV columns are matched by name in English or Spanish, in any order; receipts are read for you.
       Nothing is written to the book until you review the rows and press Import.</p>
     <div class="toolbar">
-      <input type="file" id="importFile" accept=".csv,text/csv,text/plain" />
+      <input type="file" id="importFile" accept=".csv,text/csv,text/plain,image/jpeg,image/png,image/gif,image/webp,application/pdf" />
       <span id="importStatus" class="count"></span>
     </div>
     <div id="importPreview"></div>`;
@@ -764,6 +771,17 @@ function renderImportPreview() {
   });
 }
 
+// FileReader rather than arrayBuffer + btoa: a large receipt overflows the call
+// stack when spread into String.fromCharCode, and this is the path phones use.
+function base64Of(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).split(",")[1] || "");
+    reader.onerror = () => reject(new Error("Could not read that file"));
+    reader.readAsDataURL(file);
+  });
+}
+
 function wireImport() {
   const file = $("#importFile");
   if (!file) return;
@@ -772,16 +790,25 @@ function wireImport() {
     const f = file.files?.[0];
     if (!f) return;
     const status = $("#importStatus");
-    status.textContent = `Reading ${f.name}…`;
+    // A receipt is read by Claude and takes a few seconds; a CSV is instant.
+    const isReceipt = RECEIPT_TYPES.includes(f.type) || /.(jpe?g|png|gif|webp|pdf)$/i.test(f.name);
+    status.textContent = isReceipt ? `Reading ${f.name}… this takes a few seconds` : `Reading ${f.name}…`;
     try {
-      const csv = await f.text();
-      const res = await apiFetch("/api/expenses/parse", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ locationId: getLocationId(), csv }),
-      });
+      const res = isReceipt
+        ? await apiFetch("/api/expenses/parse-file", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ locationId: getLocationId(), filename: f.name, mediaType: f.type || "application/pdf", data: await base64Of(f) }),
+          })
+        : await apiFetch("/api/expenses/parse", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ locationId: getLocationId(), csv: await f.text() }),
+          });
       const out = await res.json();
-      if (!res.ok) throw new Error(ISSUE_LABELS[out.error] || out.error || "Could not read that file");
+      // A file that isn't a receipt comes back saying what it looked like instead.
+      if (!res.ok) throw new Error(out.message || ISSUE_LABELS[out.error] || out.error || "Could not read that file");
+      IMPORT_SOURCE = out.source === "receipt_upload" ? "receipt_upload" : "csv_import";
       IMPORT_ROWS = out.rows;
       const s = out.summary;
       status.textContent = `${f.name}: ${s.total} row${s.total === 1 ? "" : "s"}, ${s.ready} ready` +
@@ -823,7 +850,7 @@ async function runImport() {
     const res = await apiFetch("/api/expenses/import", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ locationId: getLocationId(), rows }),
+      body: JSON.stringify({ locationId: getLocationId(), rows, source: IMPORT_SOURCE }),
     });
     const out = await res.json();
     if (!res.ok) throw new Error(out.error || "Import failed");

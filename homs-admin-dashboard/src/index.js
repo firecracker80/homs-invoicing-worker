@@ -14,6 +14,7 @@ import { requireAdmin, requireProvision, requireServices, handleLogin, handleLog
 import { provision } from "./provision.js";
 import { handleVendorData } from "./vendor.js";
 import { mapCsvRows, loadExistingExpenses, importRows } from "./expenses-import.js";
+import { extractFromFile, rowsFromExtraction, MAX_FILE_BYTES } from "./receipt-extract.js";
 import { handleServiceEstimate, handleServiceInvoice, handleServiceSync, handleServiceAccepted, handleServiceDeclined, handleServicePaid, readClientCurrencySettings } from "./services.js";
 
 // Yari's own default accent color -- used whenever a tenant's KV entry has no
@@ -182,6 +183,40 @@ async function handleExpenseParse(request, env) {
   }
 }
 
+// Same contract as /parse, for a receipt photo or a PDF: draft rows out, nothing
+// written. The reading is done by Claude; everything after it -- the review, the
+// duplicate check, the hold-back rules, the import -- is the CSV path exactly.
+async function handleReceiptParse(request, env) {
+  const { body, tenant, pit, locationId, error } = await resolveVendorBook(request, env);
+  if (error) return error;
+
+  const { filename, mediaType, data } = body;
+  if (typeof data !== "string" || !data) {
+    return Response.json({ error: "data (base64) is required" }, { status: 400 });
+  }
+  // Base64 carries 3 bytes per 4 characters; check before sending it anywhere.
+  if (Math.floor((data.length * 3) / 4) > MAX_FILE_BYTES) {
+    return Response.json({ error: "That file is too large (5 MB max). Photograph the receipt again at a lower resolution." }, { status: 413 });
+  }
+
+  try {
+    const [extracted, existing] = await Promise.all([
+      extractFromFile(env.ANTHROPIC_API_KEY, { mediaType, data }, tenant.receiptModel ? { model: tenant.receiptModel } : {}),
+      loadExistingExpenses(pit, locationId),
+    ]);
+    const out = rowsFromExtraction(extracted, { filename, existing, defaultCurrency: tenant.currency || "USD" });
+    // Not a receipt at all: a 422 with the reason, so the dashboard can say what
+    // it was looking at instead of showing an empty table.
+    if (out.error) return Response.json(out, { status: 422 });
+    return Response.json({ ...out, source: "receipt_upload" });
+  } catch (err) {
+    return Response.json(
+      { error: err.message || "Unknown error" },
+      { status: err.status && err.status >= 400 && err.status < 600 ? err.status : 502 }
+    );
+  }
+}
+
 // Import writes exactly the rows it is handed -- never what parse produced, which
 // the reviewer may have edited or unticked in between.
 async function handleExpenseImport(request, env) {
@@ -312,6 +347,10 @@ export default {
 
     if (url.pathname === "/api/expenses/parse" && request.method === "POST") {
       return handleExpenseParse(request, env);
+    }
+
+    if (url.pathname === "/api/expenses/parse-file" && request.method === "POST") {
+      return handleReceiptParse(request, env);
     }
 
     if (url.pathname === "/api/expenses/import" && request.method === "POST") {
