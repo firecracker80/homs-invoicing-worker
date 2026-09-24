@@ -29,7 +29,10 @@ export const CURRENCIES = ["usd", "dop"];
 // single review -- so the source belongs on the row, not on the batch.
 export const SOURCES = ["gmail_sweep", "manual", "csv_import", "receipt_upload"];
 
-const MAX_ROWS = 300;
+// A full year of one bank account runs to several hundred lines; 300 silently
+// cut a 394-row USAA export off at March and nobody noticed until the missing
+// months were chased by hand.
+const MAX_ROWS = 2000;
 
 // ---- CSV ---------------------------------------------------------------------
 
@@ -229,9 +232,10 @@ export const keysOf = (existing) => new Set(
 // back by default; so is anything the reviewer should look at twice. Ticking it
 // after a fix is one click -- an unnoticed bad row is permanent.
 const BLOCKING = ["no_amount", "no_date", "no_name", "zero_amount", "not_a_receipt", "unreadable"];
+const FLAGGED = ["negative_in_source", "money_in_not_expense", "low_confidence"];
 export function decideInclude(issues) {
   const blocked = issues.some((x) => BLOCKING.includes(x));
-  const flagged = issues.some((x) => x.startsWith("duplicate") || x === "negative_in_source" || x === "low_confidence");
+  const flagged = issues.some((x) => x.startsWith("duplicate") || FLAGGED.includes(x));
   return { include: !blocked && !flagged, blocked };
 }
 
@@ -241,6 +245,22 @@ export function decideInclude(issues) {
  * statement twice is caught before it doubles a burn line -- the exact failure
  * that inflated fixed burn by $20/month once already.
  */
+// Which sign means "money went out". A vendor export lists what you were
+// charged as a positive number, so a negative there is a refund. A BANK export
+// is the other way round: debits are negative and the positives are credits --
+// refunds, transfers in, income. Reading a bank file with the vendor convention
+// flags every real expense and waves through every credit, which is exactly
+// backwards, and is how a $9,975 card adjustment landed in a P&L as a cost.
+export function detectSignConvention(parsedAmounts) {
+  let neg = 0;
+  let pos = 0;
+  for (const a of parsedAmounts) {
+    if (a.amount === null || a.amount === 0) continue;
+    if (a.negative) neg++; else pos++;
+  }
+  return neg > pos ? "debits_negative" : "debits_positive";
+}
+
 export function mapCsvRows(text, { existing = [], defaultCurrency = "USD" } = {}) {
   const table = parseCsv(text);
   if (!table.length) return { rows: [], error: "empty_csv" };
@@ -255,8 +275,11 @@ export function mapCsvRows(text, { existing = [], defaultCurrency = "USD" } = {}
   const truncated = table.length - 1 > MAX_ROWS;
   const at = (row, key) => (cols[key] === undefined ? "" : (row[cols[key]] ?? "").trim());
 
-  // Pass 1: parse everything, and let any unambiguous date settle the file's order.
-  const parsed = body.map((row) => ({ row, date: parseDateParts(at(row, "paidOn")) }));
+  // Pass 1: parse everything, and let the file settle its own conventions --
+  // which way dates run, and which sign means money left the account.
+  const parsed = body.map((row) => ({ row, date: parseDateParts(at(row, "paidOn")), money: parseAmount(at(row, "amount")) }));
+  const convention = detectSignConvention(parsed.map((p) => p.money));
+  const debitsNegative = convention === "debits_negative";
   const votes = parsed.reduce((acc, p) => {
     if (p.date.order) acc[p.date.order] = (acc[p.date.order] || 0) + 1;
     return acc;
@@ -266,16 +289,17 @@ export function mapCsvRows(text, { existing = [], defaultCurrency = "USD" } = {}
   const seenInFile = new Set();
   const existingKeys = keysOf(existing);
 
-  const rows = parsed.map(({ row, date }, i) => {
+  const rows = parsed.map(({ row, date, money }, i) => {
     const issues = [];
     const vendor = at(row, "vendor") || null;
     const name = at(row, "name") || vendor;
 
-    const { amount, currency: symbolCurrency, negative } = parseAmount(at(row, "amount"));
+    const { amount, currency: symbolCurrency, negative } = money;
     if (amount === null) issues.push("no_amount");
     else if (amount === 0) issues.push("zero_amount");
-    // A credit or refund in a statement -- real, but not an expense. Flagged, not dropped.
-    if (negative) issues.push("negative_in_source");
+    // Money coming IN is real, but it is not an expense. Which sign that is
+    // depends on the file, so it is decided per file, not per row.
+    if (amount !== null && amount !== 0 && negative !== debitsNegative) issues.push("money_in_not_expense");
 
     let paidOn = date.date ?? null;
     if (!paidOn && (date.mdy || date.dmy)) {
@@ -318,6 +342,8 @@ export function mapCsvRows(text, { existing = [], defaultCurrency = "USD" } = {}
   return {
     rows,
     truncated,
+    totalRowsInFile: table.length - 1,
+    convention,
     columns: cols,
     summary: {
       total: rows.length,
