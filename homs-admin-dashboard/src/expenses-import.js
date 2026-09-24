@@ -25,6 +25,9 @@ export const CATEGORIES = [
 ];
 export const RECURRENCES = ["one_off", "monthly", "annual"];
 export const CURRENCIES = ["usd", "dop"];
+// Provenance. One import can now mix files -- a CSV and three receipts in a
+// single review -- so the source belongs on the row, not on the batch.
+export const SOURCES = ["gmail_sweep", "manual", "csv_import", "receipt_upload"];
 
 const MAX_ROWS = 300;
 
@@ -359,7 +362,8 @@ export async function importRows(pit, locationId, rows, { source = "csv_import" 
       continue;
     }
     try {
-      const record = await createObjectRecord(pit, locationId, EXPENSE_OBJECT, toRecordProperties(row, { source }));
+      const rowSource = SOURCES.includes(row.source) ? row.source : source;
+      const record = await createObjectRecord(pit, locationId, EXPENSE_OBJECT, toRecordProperties(row, { source: rowSource }));
       created.push({ line: row.line ?? null, id: record.id, name: row.name, amount: row.amount });
     } catch (err) {
       failed.push({ line: row.line ?? null, name: row.name, error: err.message || "create failed" });

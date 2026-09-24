@@ -201,7 +201,10 @@ async function handleReceiptParse(request, env) {
 
   try {
     const [extracted, existing] = await Promise.all([
-      extractFromFile(env.ANTHROPIC_API_KEY, { mediaType, data }, tenant.receiptModel ? { model: tenant.receiptModel } : {}),
+      extractFromFile(env.ANTHROPIC_API_KEY, { mediaType, data }, {
+        ...(tenant.receiptModel ? { model: tenant.receiptModel } : {}),
+        ...(env.ANTHROPIC_WORKSPACE_ID ? { workspaceId: env.ANTHROPIC_WORKSPACE_ID } : {}),
+      }),
       loadExistingExpenses(pit, locationId),
     ]);
     const out = rowsFromExtraction(extracted, { filename, existing, defaultCurrency: tenant.currency || "USD" });
