@@ -14,7 +14,7 @@ import { requireAdmin, requireProvision, requireServices, handleLogin, handleLog
 import { provision } from "./provision.js";
 import { handleVendorData } from "./vendor.js";
 import { mapCsvRows, loadExistingExpenses, importRows } from "./expenses-import.js";
-import { extractFromFile, rowsFromExtraction, MAX_FILE_BYTES } from "./receipt-extract.js";
+import { extractFromFile, rowsFromExtraction, estimateCost, resolveModel, MODELS, MAX_FILE_BYTES } from "./receipt-extract.js";
 import { handleServiceEstimate, handleServiceInvoice, handleServiceSync, handleServiceAccepted, handleServiceDeclined, handleServicePaid, readClientCurrencySettings } from "./services.js";
 
 // Yari's own default accent color -- used whenever a tenant's KV entry has no
@@ -200,18 +200,26 @@ async function handleReceiptParse(request, env) {
   }
 
   try {
+    // The reader can be switched per request so the same receipt can be compared
+    // across models; the tenant's own setting is the default, and anything the
+    // browser sends that is not on the allowlist falls back rather than reaching
+    // the API.
+    const model = resolveModel(body.model, resolveModel(tenant.receiptModel));
     const [extracted, existing] = await Promise.all([
       extractFromFile(env.ANTHROPIC_API_KEY, { mediaType, data }, {
-        ...(tenant.receiptModel ? { model: tenant.receiptModel } : {}),
+        model,
         ...(env.ANTHROPIC_WORKSPACE_ID ? { workspaceId: env.ANTHROPIC_WORKSPACE_ID } : {}),
       }),
       loadExistingExpenses(pit, locationId),
     ]);
     const out = rowsFromExtraction(extracted, { filename, existing, defaultCurrency: tenant.currency || "USD" });
+    // What the read cost, so spend is visible as it happens rather than
+    // reconciled out of the Console later.
+    const cost = estimateCost(model, extracted.usage);
     // Not a receipt at all: a 422 with the reason, so the dashboard can say what
     // it was looking at instead of showing an empty table.
-    if (out.error) return Response.json(out, { status: 422 });
-    return Response.json({ ...out, source: "receipt_upload" });
+    if (out.error) return Response.json({ ...out, model, cost }, { status: 422 });
+    return Response.json({ ...out, source: "receipt_upload", model, cost });
   } catch (err) {
     return Response.json(
       { error: err.message || "Unknown error" },
@@ -350,6 +358,10 @@ export default {
 
     if (url.pathname === "/api/expenses/parse" && request.method === "POST") {
       return handleExpenseParse(request, env);
+    }
+
+    if (url.pathname === "/api/expenses/models" && request.method === "GET") {
+      return Response.json({ models: Object.entries(MODELS).map(([id, m]) => ({ id, label: m.label })) });
     }
 
     if (url.pathname === "/api/expenses/parse-file" && request.method === "POST") {
