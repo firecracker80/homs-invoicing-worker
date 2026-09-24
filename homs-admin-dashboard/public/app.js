@@ -682,6 +682,20 @@ let IMPORT_ROWS = [];
 
 const RECEIPT_TYPES = ["image/jpeg", "image/png", "image/gif", "image/webp", "application/pdf"];
 
+// Which model reads receipts. Kept per browser so a comparison run survives a
+// reload, and sent per request so the same receipt can be tried both ways.
+const READER_MODELS = [
+  ["claude-opus-5", "Opus 5 — most accurate"],
+  ["claude-sonnet-5", "Sonnet 5 — middle"],
+  ["claude-haiku-4-5", "Haiku 4.5 — cheapest"],
+];
+function readerModel() {
+  try { return localStorage.getItem("receiptModel") || READER_MODELS[0][0]; } catch { return READER_MODELS[0][0]; }
+}
+// Sub-cent reads are the normal case on the cheaper models, and "$0.00" reads as
+// free rather than cheap. Under a cent shows in cents.
+const usd4 = (n) => (n < 0.01 ? `${(n * 100).toFixed(2)}¢` : "$" + n.toFixed(2));
+
 const IMPORT_CATEGORIES = [
   ["platform", "Platform"], ["infrastructure", "Infrastructure"], ["office", "Office"],
   ["telecom", "Telecom"], ["contractors", "Contractors"], ["marketing", "Marketing"],
@@ -713,6 +727,10 @@ function importSection() {
       Nothing is written to the book until you review the rows and press Import.</p>
     <div class="toolbar">
       <input type="file" id="importFile" multiple accept=".csv,text/csv,text/plain,image/jpeg,image/png,image/gif,image/webp,application/pdf" />
+      <label class="reader-pick">Read receipts with
+        <select id="importModel">${READER_MODELS.map(([id, label]) =>
+          `<option value="${id}"${id === readerModel() ? " selected" : ""}>${esc(label)}</option>`).join("")}</select>
+      </label>
       <span id="importStatus" class="count"></span>
     </div>
     <div id="importPreview"></div>`;
@@ -786,6 +804,10 @@ function wireImport() {
   const file = $("#importFile");
   if (!file) return;
 
+  $("#importModel")?.addEventListener("change", (e) => {
+    try { localStorage.setItem("receiptModel", e.target.value); } catch { /* private window */ }
+  });
+
   file.addEventListener("change", async () => {
     const files = Array.from(file.files || []);
     if (!files.length) return;
@@ -795,6 +817,8 @@ function wireImport() {
     // at once would hammer both APIs for no gain the reviewer can see. Rows
     // accumulate into one table so the whole batch gets reviewed in one pass.
     const problems = [];
+    let spent = 0;
+    let read = 0;
     for (const [i, f] of files.entries()) {
       const isReceipt = RECEIPT_TYPES.includes(f.type) || /\.(jpe?g|png|gif|webp|pdf)$/i.test(f.name);
       status.textContent = files.length > 1
@@ -805,7 +829,7 @@ function wireImport() {
           ? await apiFetch("/api/expenses/parse-file", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ locationId: getLocationId(), filename: f.name, mediaType: f.type || "application/pdf", data: await base64Of(f) }),
+              body: JSON.stringify({ locationId: getLocationId(), filename: f.name, mediaType: f.type || "application/pdf", data: await base64Of(f), model: readerModel() }),
             })
           : await apiFetch("/api/expenses/parse", {
               method: "POST",
@@ -814,12 +838,19 @@ function wireImport() {
             });
         const out = await res.json();
         // A file that isn't a receipt comes back saying what it looked like instead.
-        if (!res.ok) throw new Error(out.message || ISSUE_LABELS[out.error] || out.error || "could not be read");
+        if (!res.ok) {
+          const e = new Error(out.message || ISSUE_LABELS[out.error] || out.error || "could not be read");
+          e.cost = out.cost || null;
+          throw e;
+        }
         const source = out.source === "receipt_upload" ? "receipt_upload" : "csv_import";
-        for (const row of out.rows) IMPORT_ROWS.push({ ...row, source, fromFile: f.name });
+        if (out.cost) { spent += out.cost.usd; read++; }
+        for (const row of out.rows) IMPORT_ROWS.push({ ...row, source, fromFile: f.name, readBy: out.model });
         if (out.truncated) problems.push(`${f.name}: only the first 300 rows were read`);
       } catch (err) {
-        // One unreadable file must not throw away the ones already read.
+        // One unreadable file must not throw away the ones already read. A file
+        // that was read and rejected still cost something, so it still counts.
+        if (err.cost) { spent += err.cost.usd; read++; }
         problems.push(`${f.name}: ${err.message}`);
       }
     }
@@ -830,6 +861,7 @@ function wireImport() {
     status.textContent =
       `${files.length} file${files.length === 1 ? "" : "s"} read · ${IMPORT_ROWS.length} row${IMPORT_ROWS.length === 1 ? "" : "s"}, ${ready} ready` +
       (needsReview ? `, ${needsReview} needing a look` : "") +
+      (read ? ` · ${read} read with ${readerModel().replace("claude-", "")}, about ${usd4(spent)}` : "") +
       (problems.length ? ` · ${problems.join(" · ")}` : "");
     file.value = "";   // so the same file can be picked again after a fix
     renderImportPreview();

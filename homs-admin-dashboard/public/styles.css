@@ -290,3 +290,5 @@ tbody tr:hover { background: var(--accent-weak); }
 #importPreview button:disabled { opacity: 0.5; cursor: default; }
 #importPreview button.secondary { background: #fff; color: var(--muted); border-color: var(--border); }
 #importFile { font-size: 13px; }
+#importPreview .reader-pick, .toolbar .reader-pick { font-size: 12px; color: var(--muted); display: inline-flex; align-items: center; gap: 6px; }
+.toolbar .reader-pick select { font: inherit; font-size: 12px; padding: 3px 6px; border: 1px solid var(--border); border-radius: 6px; background: #fff; }

@@ -32,7 +32,7 @@ globalThis.fetch = async (url, init = {}) => {
 };
 
 const { default: worker } = await import("./src/index.js");
-const { requestBodyFor, contentBlocksFor, rowsFromExtraction, extractFromFile, FILE_TYPES, MAX_FILE_BYTES } =
+const { requestBodyFor, contentBlocksFor, rowsFromExtraction, extractFromFile, estimateCost, resolveModel, MODELS, FILE_TYPES, MAX_FILE_BYTES } =
   await import("./src/receipt-extract.js");
 
 const makeKv = (obj) => ({ get: async (k, o) => (obj[k] == null ? null : (o?.type === "json" ? obj[k] : JSON.stringify(obj[k]))) });
@@ -217,6 +217,34 @@ const oneExpense = (over = {}) => ({
   assert.match(msg, /not scoped to a workspace/);
   assert.match(msg, /ANTHROPIC_WORKSPACE_ID/, "and says exactly which knob fixes it: " + msg);
   console.log("9b) Org-level key -> workspace header when configured; the scoping 400 becomes a 503 naming the fix");
+}
+
+// ---- 9c. the model is chosen from an allowlist, and the read reports its cost --
+{
+  assert.equal(resolveModel("claude-haiku-4-5"), "claude-haiku-4-5");
+  assert.equal(resolveModel("gpt-4"), "claude-opus-5", "an unknown model never reaches the API");
+  assert.equal(resolveModel(undefined), "claude-opus-5");
+  assert.equal(resolveModel("", "claude-sonnet-5"), "claude-sonnet-5", "falls back to the tenant's own setting");
+  assert.equal(resolveModel("__proto__"), "claude-opus-5", "and prototype keys are not models");
+
+  // Opus 5: $5/M in, $25/M out. 3,000 in + 400 out = 0.015 + 0.010 = $0.025.
+  assert.equal(estimateCost("claude-opus-5", { input_tokens: 3000, output_tokens: 400 }).usd, 0.025);
+  // Haiku 4.5 at a fifth the price.
+  assert.equal(estimateCost("claude-haiku-4-5", { input_tokens: 3000, output_tokens: 400 }).usd, 0.005);
+  assert.equal(estimateCost("claude-opus-5", null), null, "no usage reported -> no invented figure");
+  assert.equal(estimateCost("nonsense", { input_tokens: 1 }), null);
+
+  anthropic = { status: 200, body: reply(oneExpense()), calls: [] };
+  const out = await (await call("/api/expenses/parse-file", { locationId: HOMS, mediaType: "image/png", data: "QkFTRTY0", model: "claude-haiku-4-5" })).json();
+  assert.equal(anthropic.calls[0].body.model, "claude-haiku-4-5", "the requested model is the one called");
+  assert.equal(out.model, "claude-haiku-4-5");
+  // The mocked reply reports 1500 in / 180 out.
+  assert.equal(out.cost.usd, estimateCost("claude-haiku-4-5", { input_tokens: 1500, output_tokens: 180 }).usd);
+
+  anthropic = { status: 200, body: reply(oneExpense()), calls: [] };
+  await call("/api/expenses/parse-file", { locationId: HOMS, mediaType: "image/png", data: "QkFTRTY0", model: "definitely-not-a-model" });
+  assert.equal(anthropic.calls[0].body.model, "claude-opus-5", "junk from the browser falls back, never passed through");
+  console.log("9c) Model picked from an allowlist (junk falls back); each read reports what it cost");
 }
 
 // ---- 10. the rows are the same shape the import endpoint takes --------------

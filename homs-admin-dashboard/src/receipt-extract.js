@@ -19,6 +19,34 @@ const API_URL = "https://api.anthropic.com/v1/messages";
 const API_VERSION = "2023-06-01";
 const DEFAULT_MODEL = "claude-opus-5";
 
+// What a read may run on, and what it costs. Prices are USD per million tokens,
+// from Anthropic's published rates (checked 2026-09-24) -- they are used for an
+// on-screen estimate only, never for billing, so a stale price misleads rather
+// than overcharges. Re-check when a model is added.
+export const MODELS = {
+  "claude-opus-5":   { label: "Opus 5 — most accurate",   inPerM: 5, outPerM: 25 },
+  "claude-sonnet-5": { label: "Sonnet 5 — middle",        inPerM: 2, outPerM: 10 },
+  "claude-haiku-4-5": { label: "Haiku 4.5 — cheapest",    inPerM: 1, outPerM: 5 },
+};
+
+// An allowlist, because the model arrives from the browser. Anything unknown
+// falls back rather than being passed through to the API.
+export function resolveModel(requested, fallback = DEFAULT_MODEL) {
+  return Object.hasOwn(MODELS, String(requested)) ? String(requested) : fallback;
+}
+
+export function estimateCost(model, usage) {
+  const price = MODELS[model];
+  if (!price || !usage) return null;
+  const input = Number(usage.input_tokens ?? 0) + Number(usage.cache_read_input_tokens ?? 0);
+  const output = Number(usage.output_tokens ?? 0);
+  if (!Number.isFinite(input) || !Number.isFinite(output)) return null;
+  return {
+    model, inputTokens: input, outputTokens: output,
+    usd: Math.round(((input / 1e6) * price.inPerM + (output / 1e6) * price.outPerM) * 10000) / 10000,
+  };
+}
+
 export const IMAGE_TYPES = ["image/jpeg", "image/png", "image/gif", "image/webp"];
 export const FILE_TYPES = [...IMAGE_TYPES, "application/pdf"];
 // Anthropic accepts far more; this is a sanity bound on what a phone photo or a
@@ -143,7 +171,7 @@ export async function extractFromFile(apiKey, file, { model = DEFAULT_MODEL, wor
   const out = (body.content || []).filter((b) => b.type === "text").map((b) => b.text).join("");
   if (!out.trim()) throw new ExtractError("Nothing was read from the file.", 502);
   try {
-    return { ...JSON.parse(out), usage: body.usage || null };
+    return { ...JSON.parse(out), usage: body.usage || null, model };
   } catch {
     throw new ExtractError("The file was read but the result could not be understood.", 502);
   }
