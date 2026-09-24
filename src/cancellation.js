@@ -292,9 +292,15 @@ export async function handleCancel(request, env) {
 
   // ---- D1 + GHL ledger ----
   // Reverses the income originally booked at settlement (rent + cleaning
-  // splits) and books the retained cancellation charge as new income, split
-  // the same way the original rent was. Deposit refund is a liability
+  // splits) IN FULL, then books the retained cancellation charge as new income,
+  // split the same way the original rent was. Deposit refund is a liability
   // clearing (deposit was never counted as income), tracked for audit only.
+  //
+  // Full, not partial: reversing only the refunded share leaves the retained
+  // part still booked, and then the charge rows book it a second time. On the
+  // live DEMO-HOMS booking that read as $45.90 of owner income where $22.95 was
+  // earned. Reverse everything, then book what was kept -- the two steps stay
+  // legible on a statement, and the arithmetic can only land once.
   try {
     const ownerPct = snapshot.payout.ownerPct;
     const rows = [];
@@ -307,16 +313,19 @@ export async function handleCancel(request, env) {
     const manualRent = !refundIds.rent && Boolean(rentRefundRef);
 
     if (rentRefundRef) {
-      const ownerRentReversal = round2(calc.rentRefund * ownerPct);
+      // The amounts booked at settlement, reversed exactly. Older snapshots
+      // predate payout.owner/manager, so fall back to the same split maths.
+      const ownerBooked = round2(snapshot.payout.owner ?? (snapshot.charges.rentTotal * ownerPct));
+      const managerBooked = round2(snapshot.payout.manager ?? (snapshot.charges.rentTotal - ownerBooked));
       rows.push({
         recipient: "owner", category: "income", entry_type: "cancellation_rent_refund_owner",
-        amount: -ownerRentReversal, reference: rentRefundRef, source: "cancellation",
-        description: `Rent refund reversal (${Math.round(ownerPct * 100)}% share) — ${calc.tier}${manualRent ? MANUAL_SUFFIX : ""}`
+        amount: -ownerBooked, reference: rentRefundRef, source: "cancellation",
+        description: `Rent income reversed on cancellation (${Math.round(ownerPct * 100)}% share) — ${calc.tier}${manualRent ? MANUAL_SUFFIX : ""}`
       });
       rows.push({
         recipient: "manager", category: "income", entry_type: "cancellation_rent_refund_manager",
-        amount: -round2(calc.rentRefund - ownerRentReversal), reference: rentRefundRef, source: "cancellation",
-        description: `Rent refund reversal (manager share) — ${calc.tier}${manualRent ? MANUAL_SUFFIX : ""}`
+        amount: -managerBooked, reference: rentRefundRef, source: "cancellation",
+        description: `Rent income reversed on cancellation (manager share) — ${calc.tier}${manualRent ? MANUAL_SUFFIX : ""}`
       });
       if (calc.cleaningRefund > 0) {
         const cleaningTo = snapshot.payout.cleaningFeeTo === "owner" ? "owner" : "manager";
