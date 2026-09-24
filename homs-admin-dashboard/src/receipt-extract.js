@@ -105,14 +105,23 @@ export class ExtractError extends Error {
 }
 
 /** Calls Claude and returns the parsed object. No GHL, no KV -- testable alone. */
-export async function extractFromFile(apiKey, file, { model = DEFAULT_MODEL } = {}) {
+export async function extractFromFile(apiKey, file, { model = DEFAULT_MODEL, workspaceId = null } = {}) {
   if (!apiKey) throw new ExtractError("Reading receipts is not configured: the ANTHROPIC_API_KEY secret is not set on this Worker.", 503);
   if (!FILE_TYPES.includes(file.mediaType)) throw new ExtractError(`Unsupported file type ${file.mediaType}. Use a JPEG, PNG, GIF, WebP or PDF.`, 400);
   if (!file.data) throw new ExtractError("Empty file", 400);
 
+  // An org-level key has to name the workspace to bill the call to; a
+// workspace-scoped key carries it already and must not repeat it. Live 400:
+  // "This API key is not scoped to a workspace, so this request must include
+  // the anthropic-workspace-id header".
   const res = await fetch(API_URL, {
     method: "POST",
-    headers: { "Content-Type": "application/json", "x-api-key": apiKey, "anthropic-version": API_VERSION },
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": API_VERSION,
+      ...(workspaceId ? { "anthropic-workspace-id": workspaceId } : {}),
+    },
     body: JSON.stringify(requestBodyFor(file, model)),
   });
   const text = await res.text();
@@ -120,6 +129,11 @@ export async function extractFromFile(apiKey, file, { model = DEFAULT_MODEL } = 
     // The key itself is never echoed back to the browser, only what went wrong.
     let detail = text.slice(0, 300);
     try { detail = JSON.parse(text).error?.message || detail; } catch {}
+    if (/workspace/i.test(detail) && res.status === 400) {
+      throw new ExtractError(
+        "The Anthropic API key is not scoped to a workspace. Either create a key inside a workspace, " +
+        "or set the ANTHROPIC_WORKSPACE_ID secret on this Worker to the workspace id to bill.", 503);
+    }
     throw new ExtractError(`Could not read the file (${res.status}): ${detail}`, res.status === 401 || res.status === 403 ? 503 : 502);
   }
 

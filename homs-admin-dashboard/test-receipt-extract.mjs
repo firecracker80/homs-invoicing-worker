@@ -36,9 +36,10 @@ const { requestBodyFor, contentBlocksFor, rowsFromExtraction, extractFromFile, F
   await import("./src/receipt-extract.js");
 
 const makeKv = (obj) => ({ get: async (k, o) => (obj[k] == null ? null : (o?.type === "json" ? obj[k] : JSON.stringify(obj[k]))) });
-const envWith = (key) => ({
+const envWith = (key, workspaceId) => ({
   ADMIN_KEY: "admin",
   ...(key ? { ANTHROPIC_API_KEY: key } : {}),
+  ...(workspaceId ? { ANTHROPIC_WORKSPACE_ID: workspaceId } : {}),
   GHL_PIT_HOMS: "pit-homs",
   GHL_PIT_DEMO_HOMS: "pit-demo",
   DASHBOARD_TENANTS: makeKv({
@@ -196,6 +197,26 @@ const oneExpense = (over = {}) => ({
   const unset = await call("/api/expenses/parse-file", { locationId: HOMS, mediaType: "image/png", data: "QkFTRTY0" }, envWith(null));
   assert.equal(unset.status, 503, "no key configured");
   console.log("9) Gated: bearer, vendor books only, size checked before any upload, missing key -> 503");
+}
+
+// ---- 9b. org-level keys need the workspace named; workspace keys must not ----
+{
+  anthropic = { status: 200, body: reply(oneExpense()), calls: [] };
+  await call("/api/expenses/parse-file", { locationId: HOMS, mediaType: "image/png", data: "QkFTRTY0" });
+  assert.equal(anthropic.calls[0].headers["anthropic-workspace-id"], undefined, "no workspace configured -> header absent");
+
+  anthropic = { status: 200, body: reply(oneExpense()), calls: [] };
+  await call("/api/expenses/parse-file", { locationId: HOMS, mediaType: "image/png", data: "QkFTRTY0" }, envWith("sk-test", "wrkspc_123"));
+  assert.equal(anthropic.calls[0].headers["anthropic-workspace-id"], "wrkspc_123", "configured -> header sent");
+
+  // The live failure, verbatim from Anthropic.
+  anthropic = { status: 400, body: { error: { message: "This API key is not scoped to a workspace, so this request must include the anthropic-workspace-id header with the ID of the workspace to use." } }, calls: [] };
+  const res = await call("/api/expenses/parse-file", { locationId: HOMS, mediaType: "image/png", data: "QkFTRTY0" });
+  assert.equal(res.status, 503, "a key-scoping problem is configuration, not a bad file");
+  const msg = (await res.json()).error;
+  assert.match(msg, /not scoped to a workspace/);
+  assert.match(msg, /ANTHROPIC_WORKSPACE_ID/, "and says exactly which knob fixes it: " + msg);
+  console.log("9b) Org-level key -> workspace header when configured; the scoping 400 becomes a 503 naming the fix");
 }
 
 // ---- 10. the rows are the same shape the import endpoint takes --------------
