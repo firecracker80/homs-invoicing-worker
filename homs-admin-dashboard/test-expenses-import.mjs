@@ -42,7 +42,7 @@ let ghl = makeGhl();
 globalThis.fetch = (url, init) => ghl.handler(url, init);
 
 const { default: worker } = await import("./src/index.js");
-const { parseCsv, parseAmount, parseDateParts, mapCsvRows, mapHeader, guessCategory } = await import("./src/expenses-import.js");
+const { parseCsv, parseAmount, parseDateParts, mapCsvRows, mapHeader, guessCategory, detectSignConvention } = await import("./src/expenses-import.js");
 
 const makeKv = (obj) => ({ get: async (k, o) => (obj[k] == null ? null : (o?.type === "json" ? obj[k] : JSON.stringify(obj[k]))) });
 const env = {
@@ -161,12 +161,66 @@ const call = (path, body, key = "admin") =>
   assert.deepEqual(rows.map((r) => r.include), [true, false, false, false, false]);
   assert.ok(rows[1].issues.includes("no_date"));
   assert.ok(rows[2].issues.includes("no_amount"));
-  assert.ok(rows[3].issues.includes("negative_in_source"), "a credit is surfaced, not imported as a cost");
+  assert.ok(rows[3].issues.includes("money_in_not_expense"), "a credit is surfaced, not imported as a cost");
   assert.ok(rows[4].issues.includes("zero_amount"));
   assert.deepEqual([summary.total, summary.ready, summary.needsReview], [5, 1, 4]);
   assert.deepEqual([rows[0].line, rows[4].line], [2, 6], "line numbers point at the file, header included");
   assert.equal(rows[0].category, "platform");
   console.log("7) No date / no amount / zero / credit -> held back with the reason, never silently dropped");
+}
+
+// ---- 7b. a BANK export: debits are negative, and the positives are not costs --
+{
+  // Shape taken from the real USAA export: charges negative, credits positive.
+  const csv = [
+    "Date,Description,Original Description,Category,Amount,Status",
+    '2026-08-04,"Upwork","UPWORK * -941174665",Business Services,-19.99,Posted',
+    '2026-08-31,"Altice App M Santo Domingo","ALTICE -APP ECOMM",Bills & Utilities,-51.54,Posted',
+    '2026-08-31,"Anthropic","ANTHROPIC",Electronics & Software,-45.00,Posted',
+    '2026-09-02,"Squarespace","SQSP* DOMAIN",Hosting,-15.00,Posted',
+    '2026-09-21,"Cyberghost London","CYBERGHOST VPN",Business Services,-65.50,Posted',
+    '2026-08-17,"Federal Tax Refund","IRS TREAS 310 TAX REF",Federal Tax,533.00,Posted',
+    '2026-08-11,"USAA Transfer","USAA FUNDS TRANSFER CR",Transfer,650.00,Posted',
+    '2026-05-11,"Discover Adjustment","DISCOVER ADJUSTMENT",Income,9975.00,Posted',
+  ].join(String.fromCharCode(10));
+  const { rows, convention } = mapCsvRows(csv);
+  assert.equal(convention, "debits_negative", "most lines are debits -> the file's costs are the negative ones");
+
+  const byName = Object.fromEntries(rows.map((r) => [r.name, r]));
+  for (const n of ["Upwork", "Altice App M Santo Domingo", "Anthropic"]) {
+    assert.equal(byName[n].include, true, n + " is a real charge and comes in ticked: " + JSON.stringify(byName[n].issues));
+    assert.ok(!byName[n].issues.includes("money_in_not_expense"));
+  }
+  for (const n of ["Federal Tax Refund", "USAA Transfer", "Discover Adjustment"]) {
+    assert.ok(byName[n].issues.includes("money_in_not_expense"), n + " is money coming IN: " + JSON.stringify(byName[n].issues));
+    assert.equal(byName[n].include, false, n + " must not be ticked as a cost");
+  }
+  assert.equal(byName["Discover Adjustment"].amount, 9975, "the amount is still read, it is just not a cost");
+  console.log("7c) Bank export: debits negative -> charges ticked, the $9,975 credit and the transfers held back");
+}
+
+// ---- 7d. a VENDOR export keeps the old reading -------------------------------
+{
+  // Receipts list what you were charged as a positive; a negative there is a refund.
+  const csv = [
+    "Date,Vendor,Description,Amount",
+    "2026-09-01,GoHighLevel,Agency plan,297.00",
+    "2026-09-08,Cloudflare,Workers paid,5.00",
+    "2026-09-04,Refunded,Credit note,(25.00)",
+  ].join(String.fromCharCode(10));
+  const { rows, convention } = mapCsvRows(csv);
+  assert.equal(convention, "debits_positive");
+  assert.deepEqual(rows.map((r) => r.include), [true, true, false]);
+  assert.ok(rows[2].issues.includes("money_in_not_expense"), "a bracketed credit is still caught: " + JSON.stringify(rows[2].issues));
+  console.log("7d) Vendor export: positives are the charges, a bracketed credit still held back");
+}
+
+// ---- 7e. the convention is decided per file, not per row ---------------------
+{
+  assert.equal(detectSignConvention([{ amount: 10, negative: true }, { amount: 5, negative: true }, { amount: 900, negative: false }]), "debits_negative");
+  assert.equal(detectSignConvention([{ amount: 10, negative: false }, { amount: 5, negative: false }, { amount: 900, negative: true }]), "debits_positive");
+  assert.equal(detectSignConvention([{ amount: null }, { amount: 0, negative: true }]), "debits_positive", "nothing to go on -> the vendor reading");
+  console.log("7e) Sign convention counted across the whole file, blanks and zeroes ignored");
 }
 
 // ---- 8. duplicates: against the book, and within the file --------------------
