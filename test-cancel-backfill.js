@@ -85,7 +85,19 @@ const post = async (body) => {
   }, env);
   return { status: r.status, body: await r.json() };
 };
-const reset = async (snap = paidSnapshot()) => { ledgerRows = []; notified = []; d1Rows = []; await kv.put(BOOKING, JSON.stringify(snap)); };
+const round2 = (n) => Math.round(n * 100) / 100;
+// Seeded with what settlement booked for this booking, so the assertions below
+// net the cancellation against the real income rather than against nothing.
+const SETTLED_ROWS = [
+  ["owner", "income", "rent_split_owner", 11475],
+  ["manager", "income", "rent_split_manager", 2025],
+  ["manager", "income", "cleaning_fee", 6500],
+];
+const reset = async (snap = paidSnapshot(), withSettlement = false) => {
+  ledgerRows = []; notified = []; d1Rows = [];
+  if (withSettlement) for (const [rec, cat, type, minor] of SETTLED_ROWS) d1Rows.push([LOC, BOOKING, null, null, rec, null, cat, type, minor, "USD", "", "payment_confirmed", type, ""]);
+  await kv.put(BOOKING, JSON.stringify(snap));
+};
 
 // ---- 1. asOf bounds -----------------------------------------------------------
 {
@@ -115,7 +127,7 @@ const reset = async (snap = paidSnapshot()) => { ledgerRows = []; notified = [];
 
 // ---- 3. backfilling uses the real date, and says it was backfilled ------------
 {
-  await reset();
+  await reset(paidSnapshot(), true);
   const out = await post({ asOf: "2026-09-21T12:47:00Z", reason: "Cancelled in GHL 21 Sep; workflow was parked" });
   assert.equal(out.status, 200, JSON.stringify(out.body));
   const snap = JSON.parse(store.get(BOOKING));
@@ -138,16 +150,30 @@ const reset = async (snap = paidSnapshot()) => { ledgerRows = []; notified = [];
   assert.ok(ledgerRows.length > 0, "and mirrors them into GHL");
   assert.ok(amounts.filter((a) => a < 0).length >= 3, "the original income is reversed: " + JSON.stringify(rows));
   // 108 rent refund split 85/15, plus the 65 cleaning fee, all reversed.
-  assert.ok(amounts.some((a) => Math.abs(a + 91.8) < 0.01), "owner share of the rent refund: " + JSON.stringify(amounts));
-  assert.ok(amounts.some((a) => Math.abs(a + 16.2) < 0.01), "manager share");
+  assert.ok(amounts.some((a) => Math.abs(a + 114.75) < 0.01), "the owner's booked income is reversed in FULL: " + JSON.stringify(amounts));
+  assert.ok(amounts.some((a) => Math.abs(a + 20.25) < 0.01), "and the manager's");
   assert.ok(amounts.some((a) => Math.abs(a + 65) < 0.01), "cleaning fee");
   // ...and the 20% retained is booked as income, split the same way.
   assert.ok(amounts.some((a) => Math.abs(a - 22.95) < 0.01), "owner share of the retained charge");
   assert.ok(amounts.some((a) => Math.abs(a - 4.05) < 0.01), "manager share of the retained charge");
   assert.ok(refs.some((r) => r === MANUAL_REFUND_REF), "the rows say the refund still has to be issued by hand");
   const net = amounts.reduce((s, a) => s + a, 0);
-  assert.ok(Math.abs(net - (22.95 + 4.05 - 91.8 - 16.2 - 65)) < 0.01, "net: " + net);
+  assert.ok(Math.abs(net - (114.75 + 20.25 + 65 - 114.75 - 20.25 - 65 + 22.95 + 4.05)) < 0.01, "net: " + net);
   console.log("4) Invoice-paid booking: revenue reversed and the retained 20% booked, flagged manual_refund_pending");
+}
+
+// ---- 4b. what each party is left with, which is the only number that matters --
+{
+  // Settlement booked owner 114.75 + manager 20.25 + cleaning 65 (manager)
+  // + processing fee 12 (platform). After a 20% cancellation the only income
+  // anyone keeps is the $27 retained, split 85/15, plus the non-refundable fee.
+  const net = {};
+  for (const r of ledger()) net[r.recipient] = round2((net[r.recipient] || 0) + r.amount);
+  assert.equal(net.owner, 22.95, "owner keeps 85% of the 27 retained, not a penny more: " + JSON.stringify(net));
+  assert.equal(net.manager, 4.05, "manager keeps 15% of it: " + JSON.stringify(net));
+  assert.equal(net.platform ?? 0, 0, "the processing fee was booked at settlement, not here");
+  assert.equal(round2(net.owner + net.manager), 27, "and the two shares are exactly the retained charge");
+  console.log("4b) Nets out to exactly the retained charge — reversing in full then booking the charge cannot double-count");
 }
 
 // ---- 5. the manual refund is reported, not silently swallowed ----------------
