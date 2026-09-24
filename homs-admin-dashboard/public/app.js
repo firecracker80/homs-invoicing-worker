@@ -677,9 +677,8 @@ function renderVendor() {
 // more often than the other way round.
 
 let IMPORT_ROWS = [];
-// Which path produced the rows, so the records carry honest provenance and a bad
-// batch can be found again: csv_import or receipt_upload.
-let IMPORT_SOURCE = "csv_import";
+// One review can hold several files at once -- a CSV and a handful of receipts --
+// so provenance lives on each row rather than on the batch.
 
 const RECEIPT_TYPES = ["image/jpeg", "image/png", "image/gif", "image/webp", "application/pdf"];
 
@@ -703,6 +702,7 @@ const ISSUE_LABELS = {
   category_guessed: "category guessed",
   category_unknown: "category not recognised",
   low_confidence: "read was unclear - check it",
+  duplicate_in_queue: "same as another file in this batch",
 };
 
 function importSection() {
@@ -712,7 +712,7 @@ function importSection() {
       CSV columns are matched by name in English or Spanish, in any order; receipts are read for you.
       Nothing is written to the book until you review the rows and press Import.</p>
     <div class="toolbar">
-      <input type="file" id="importFile" accept=".csv,text/csv,text/plain,image/jpeg,image/png,image/gif,image/webp,application/pdf" />
+      <input type="file" id="importFile" multiple accept=".csv,text/csv,text/plain,image/jpeg,image/png,image/gif,image/webp,application/pdf" />
       <span id="importStatus" class="count"></span>
     </div>
     <div id="importPreview"></div>`;
@@ -736,7 +736,7 @@ function renderImportPreview() {
   const rows = IMPORT_ROWS.map((r, i) => `
     <tr class="${r.include ? "" : "row-muted"}">
       <td><input type="checkbox" data-import="include" data-row="${i}"${r.include ? " checked" : ""} /></td>
-      <td>${r.line ?? ""}</td>
+      <td title="${esc(r.fromFile ?? "")}">${r.line ?? ""}</td>
       <td><input type="text" data-import="name" data-row="${i}" value="${esc(r.name ?? "")}" /></td>
       <td><input type="text" data-import="vendor" data-row="${i}" value="${esc(r.vendor ?? "")}" /></td>
       <td><input type="date" data-import="paidOn" data-row="${i}" value="${esc(r.paidOn ?? "")}" /></td>
@@ -755,7 +755,7 @@ function renderImportPreview() {
     </div>
     <table>
       <thead><tr>
-        <th></th><th>Line</th><th>Description</th><th>Vendor</th><th>Paid on</th>
+        <th></th><th title="Line number within its own file — hover a row for the file name">Line</th><th>Description</th><th>Vendor</th><th>Paid on</th>
         <th>Amount</th><th>Category</th><th>Recurrence</th><th>Notes</th>
       </tr></thead>
       <tbody>${rows}</tbody>
@@ -787,39 +787,52 @@ function wireImport() {
   if (!file) return;
 
   file.addEventListener("change", async () => {
-    const f = file.files?.[0];
-    if (!f) return;
+    const files = Array.from(file.files || []);
+    if (!files.length) return;
     const status = $("#importStatus");
-    // A receipt is read by Claude and takes a few seconds; a CSV is instant.
-    const isReceipt = RECEIPT_TYPES.includes(f.type) || /.(jpe?g|png|gif|webp|pdf)$/i.test(f.name);
-    status.textContent = isReceipt ? `Reading ${f.name}… this takes a few seconds` : `Reading ${f.name}…`;
-    try {
-      const res = isReceipt
-        ? await apiFetch("/api/expenses/parse-file", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ locationId: getLocationId(), filename: f.name, mediaType: f.type || "application/pdf", data: await base64Of(f) }),
-          })
-        : await apiFetch("/api/expenses/parse", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ locationId: getLocationId(), csv: await f.text() }),
-          });
-      const out = await res.json();
-      // A file that isn't a receipt comes back saying what it looked like instead.
-      if (!res.ok) throw new Error(out.message || ISSUE_LABELS[out.error] || out.error || "Could not read that file");
-      IMPORT_SOURCE = out.source === "receipt_upload" ? "receipt_upload" : "csv_import";
-      IMPORT_ROWS = out.rows;
-      const s = out.summary;
-      status.textContent = `${f.name}: ${s.total} row${s.total === 1 ? "" : "s"}, ${s.ready} ready` +
-        (s.needsReview ? `, ${s.needsReview} needing a look` : "") +
-        (out.truncated ? " (only the first 300 rows were read)" : "");
-      renderImportPreview();
-    } catch (err) {
-      status.textContent = err.message;
-      IMPORT_ROWS = [];
-      renderImportPreview();
+
+    // Sequential, not parallel: each receipt is its own read, and firing a dozen
+    // at once would hammer both APIs for no gain the reviewer can see. Rows
+    // accumulate into one table so the whole batch gets reviewed in one pass.
+    const problems = [];
+    for (const [i, f] of files.entries()) {
+      const isReceipt = RECEIPT_TYPES.includes(f.type) || /\.(jpe?g|png|gif|webp|pdf)$/i.test(f.name);
+      status.textContent = files.length > 1
+        ? `Reading ${i + 1} of ${files.length}: ${f.name}…`
+        : `Reading ${f.name}${isReceipt ? "… this takes a few seconds" : "…"}`;
+      try {
+        const res = isReceipt
+          ? await apiFetch("/api/expenses/parse-file", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ locationId: getLocationId(), filename: f.name, mediaType: f.type || "application/pdf", data: await base64Of(f) }),
+            })
+          : await apiFetch("/api/expenses/parse", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ locationId: getLocationId(), csv: await f.text() }),
+            });
+        const out = await res.json();
+        // A file that isn't a receipt comes back saying what it looked like instead.
+        if (!res.ok) throw new Error(out.message || ISSUE_LABELS[out.error] || out.error || "could not be read");
+        const source = out.source === "receipt_upload" ? "receipt_upload" : "csv_import";
+        for (const row of out.rows) IMPORT_ROWS.push({ ...row, source, fromFile: f.name });
+        if (out.truncated) problems.push(`${f.name}: only the first 300 rows were read`);
+      } catch (err) {
+        // One unreadable file must not throw away the ones already read.
+        problems.push(`${f.name}: ${err.message}`);
+      }
     }
+
+    markQueueDuplicates();
+    const ready = IMPORT_ROWS.filter((r) => r.include).length;
+    const needsReview = IMPORT_ROWS.length - ready;
+    status.textContent =
+      `${files.length} file${files.length === 1 ? "" : "s"} read · ${IMPORT_ROWS.length} row${IMPORT_ROWS.length === 1 ? "" : "s"}, ${ready} ready` +
+      (needsReview ? `, ${needsReview} needing a look` : "") +
+      (problems.length ? ` · ${problems.join(" · ")}` : "");
+    file.value = "";   // so the same file can be picked again after a fix
+    renderImportPreview();
   });
 
   // One delegated listener for the whole preview: the table is re-rendered on
@@ -839,6 +852,23 @@ function wireImport() {
   });
 }
 
+// The server dedupes each file against the book and against itself, but it never
+// sees the other files in the queue. Two photos of one receipt, or a receipt that
+// is also a line on the statement, would otherwise both go in.
+function markQueueDuplicates() {
+  const seen = new Set();
+  for (const row of IMPORT_ROWS) {
+    if (row.amount === null || row.amount === undefined || !row.paidOn) continue;
+    const key = `${String(row.vendor || row.name || "").trim().toLowerCase()}|${Number(row.amount).toFixed(2)}|${row.paidOn}`;
+    if (seen.has(key)) {
+      if (!row.issues.some((x) => x.startsWith("duplicate"))) row.issues = [...row.issues, "duplicate_in_queue"];
+      row.include = false;
+    } else {
+      seen.add(key);
+    }
+  }
+}
+
 async function runImport() {
   const rows = IMPORT_ROWS.filter((r) => r.include);
   if (!rows.length) return;
@@ -850,7 +880,7 @@ async function runImport() {
     const res = await apiFetch("/api/expenses/import", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ locationId: getLocationId(), rows, source: IMPORT_SOURCE }),
+      body: JSON.stringify({ locationId: getLocationId(), rows }),
     });
     const out = await res.json();
     if (!res.ok) throw new Error(out.error || "Import failed");

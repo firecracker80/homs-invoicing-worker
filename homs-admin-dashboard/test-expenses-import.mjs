@@ -221,6 +221,24 @@ const call = (path, body, key = "admin") =>
   console.log("10) POST /api/expenses/import: writes the handed rows, tags source=csv_import, reports what failed");
 }
 
+// ---- 10b. one import, several files: each row keeps its own provenance -------
+{
+  const rows = [
+    { line: 2, name: "From the statement", amount: 10, currency: "usd", paidOn: "2026-09-08", category: "other", recurrence: "one_off", source: "csv_import" },
+    { line: 1, name: "From a photo", amount: 20, currency: "usd", paidOn: "2026-09-09", category: "other", recurrence: "one_off", source: "receipt_upload" },
+    { line: 3, name: "No source given", amount: 30, currency: "usd", paidOn: "2026-09-10", category: "other", recurrence: "one_off" },
+    { line: 4, name: "Nonsense source", amount: 40, currency: "usd", paidOn: "2026-09-11", category: "other", recurrence: "one_off", source: "made_up" },
+  ];
+  const out = await (await call("/api/expenses/import", { locationId: HOMS, rows })).json();
+  assert.equal(out.imported, 4, JSON.stringify(out));
+  const byName = Object.fromEntries(Object.values(ghl.db.records[`${HOMS}|${EXP}`]).map((r) => [r.properties.expense_name, r.properties.source]));
+  assert.equal(byName["From the statement"], "csv_import");
+  assert.equal(byName["From a photo"], "receipt_upload", "a receipt row keeps receipt_upload even in a mixed batch");
+  assert.equal(byName["No source given"], "csv_import", "falls back to the batch default");
+  assert.equal(byName["Nonsense source"], "csv_import", "an unrecognised source is ignored, not written");
+  console.log("10b) A mixed batch: every row is written with its own source, junk values ignored");
+}
+
 // ---- 11. a failed write doesn't stop the batch, and is named -----------------
 {
   ghl = makeGhl();
