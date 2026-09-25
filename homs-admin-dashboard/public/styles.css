@@ -292,3 +292,29 @@ tbody tr:hover { background: var(--accent-weak); }
 #importFile { font-size: 13px; }
 #importPreview .reader-pick, .toolbar .reader-pick { font-size: 12px; color: var(--muted); display: inline-flex; align-items: center; gap: 6px; }
 .toolbar .reader-pick select { font: inherit; font-size: 12px; padding: 3px 6px; border: 1px solid var(--border); border-radius: 6px; background: #fff; }
+
+/* ---- Portfolio intake review ---- */
+#portfolioPreview table input[type="text"],
+#portfolioPreview table input[type="number"] {
+  width: 100%; min-width: 96px; box-sizing: border-box; padding: 4px 6px;
+  font: inherit; font-size: 12px; border: 1px solid var(--border); border-radius: 6px; background: #fff;
+}
+#portfolioPreview table input[type="number"] { text-align: right; min-width: 80px; }
+#portfolioPreview tr.row-muted { background: #fafbfc; }
+#portfolioPreview .badge { background: var(--warn-bg); color: var(--warn); margin-right: 4px; white-space: nowrap; }
+#portfolioPreview .toolbar { gap: 10px; justify-content: flex-start; }
+#portfolioPreview .toolbar .count { margin-right: auto; }
+#portfolioPreview button { padding: 7px 14px; font: inherit; font-size: 13px; font-weight: 600; border-radius: 8px;
+  border: 1px solid var(--accent); background: var(--accent); color: #fff; cursor: pointer; }
+#portfolioPreview button:disabled { opacity: 0.5; cursor: default; }
+#portfolioPreview button.secondary { background: #fff; color: var(--muted); border-color: var(--border); }
+/* The checklist is the work product for the step no API can do, so it reads as
+   a document rather than a warning. */
+#portfolioChecklist { margin-top: 18px; border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; }
+#portfolioChecklist summary { font-weight: 700; cursor: pointer; }
+#portfolioChecklist .chk-list { display: grid; gap: 12px; margin-top: 10px; }
+#portfolioChecklist .chk-item { border-left: 3px solid var(--accent); padding: 8px 12px; background: #fafbfc; border-radius: 0 8px 8px 0; }
+#portfolioChecklist .chk-head { font-weight: 700; margin-bottom: 6px; }
+#portfolioChecklist .chk-line { font-size: 12px; line-height: 1.6; }
+#portfolioChecklist .chk-line .muted { display: inline-block; min-width: 190px; color: var(--muted); }
+#portfolioFile { font-size: 13px; }

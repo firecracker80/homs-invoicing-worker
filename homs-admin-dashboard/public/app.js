@@ -934,6 +934,232 @@ async function runImport() {
   }
 }
 
+// ---------- Portfolio intake (client accounts) ----------
+//
+// The client returns one workbook; this reads it into reviewable rows and
+// creates the Property records for the ones that are ticked. The rental
+// listings themselves cannot be created by any API, so what comes back with
+// the rows is a checklist to work from by hand.
+
+let PORTFOLIO_ROWS = [];
+let PORTFOLIO_META = null;
+
+const PORTFOLIO_ISSUES = {
+  example_row: "the template's example row",
+  already_in_account: "already in this account",
+  duplicate_in_file: "repeated in this workbook",
+  no_listing_name: "no listing name",
+  no_base_price: "no base price",
+  not_priced_per_night: "priced per week/month, not per night",
+  unknown_status: "status not recognised",
+  unknown_property_type: "property type not recognised",
+};
+const portfolioIssue = (i) => PORTFOLIO_ISSUES[i] || i.replace(/^bad_/, "could not read ").replace(/_/g, " ");
+
+function portfolioSection() {
+  return `
+    <h3>Import the portfolio workbook</h3>
+    <p class="note">The HOMS Portfolio Intake the client filled in (.xlsx). Properties are created from it;
+      rental listings still have to be created by hand, and you get a checklist for those.
+      Nothing is written until you review the rows and press Import.</p>
+    <div class="toolbar">
+      <input type="file" id="portfolioFile" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" />
+      <span id="portfolioStatus" class="count"></span>
+    </div>
+    <div id="portfolioPreview"></div>`;
+}
+
+function portfolioSettingsHtml() {
+  if (!PORTFOLIO_META) return "";
+  const { accountSettings: a = {}, disagreements = [] } = PORTFOLIO_META;
+  const bits = [];
+  if (a.currency) bits.push(`<strong>Currency:</strong> ${esc(a.currency)}`);
+  if (a.cancellationPolicyLabel) {
+    const parsed = a.cancellationPolicy !== a.cancellationPolicyLabel
+      ? ` <span class="muted">(${esc(a.cancellationPolicy)})</span>` : "";
+    bits.push(`<strong>Cancellation:</strong> ${esc(a.cancellationPolicyLabel)}${parsed}`);
+  }
+  const settings = bits.length
+    ? `<p class="note banner">Account settings read from this workbook — ${bits.join(" &nbsp;·&nbsp; ")}</p>`
+    : "";
+
+  // A disagreement is the reason this screen exists. Loud, and above the table.
+  const warnings = disagreements.map((d) => {
+    if (d.kind === "conflict") {
+      const what = d.field === "currency" ? "currency" : "cancellation policy";
+      return `<p class="note error"><strong>${esc(d.column)} is not the same on every row.</strong>
+        Using <strong>${esc(d.used)}</strong> from row ${d.fromRow}. Row${d.rows.length === 1 ? "" : "s"}
+        ${d.rows.join(", ")} say ${esc(d.alsoSeen.join(", "))}. Check with the client before importing —
+        an account can only have one ${what}.</p>`;
+    }
+    if (d.kind === "needs_review") {
+      return `<p class="note error"><strong>Cancellation policy "${esc(d.value)}" is not one of the presets.</strong>
+        It has been left exactly as written and needs setting by hand — it is never guessed.</p>`;
+    }
+    return `<p class="note error"><strong>${esc(d.column)} is missing from this workbook.</strong>
+      It will have to be set on the account by hand.</p>`;
+  }).join("");
+
+  return settings + warnings;
+}
+
+function portfolioChecklistHtml() {
+  const list = PORTFOLIO_META?.calendarChecklist || [];
+  const ticked = new Set(PORTFOLIO_ROWS.filter((r) => r.include).map((r) => r.name));
+  const shown = list.filter((c) => ticked.has(c.listing));
+  if (!shown.length) return "";
+
+  const items = shown.map((c) => {
+    const detail = Object.entries(c.detail || {})
+      .map(([k, v]) => `<div class="chk-line"><span class="muted">${esc(k)}</span> ${esc(v)}</div>`).join("");
+    return `<div class="chk-item">
+      <div class="chk-head">${esc(c.listing)} — ${esc(c.currency || "")} ${esc(c.basePrice ?? "")}</div>
+      ${detail}
+    </div>`;
+  }).join("");
+
+  return `
+    <details id="portfolioChecklist" open>
+      <summary>${shown.length} rental listing${shown.length === 1 ? "" : "s"} to create by hand</summary>
+      <p class="note">GHL has no API for rental listings, so these are made in the Calendars screen.
+        Every answer the client gave is below, so there is nothing to look up.</p>
+      <div class="chk-list">${items}</div>
+    </details>`;
+}
+
+function renderPortfolioPreview() {
+  const host = $("#portfolioPreview");
+  if (!host) return;
+  if (!PORTFOLIO_ROWS.length) { host.innerHTML = ""; return; }
+
+  const rows = PORTFOLIO_ROWS.map((r, i) => {
+    const p = r.properties || {};
+    const rate = p.base_nightly_rate?.value;
+    const carried = Object.entries(r.carried || {})
+      .map(([k, v]) => `<div class="muted">${esc(k)}: ${esc(v)}</div>`).join("");
+    const issues = (r.issues || []).map((x) => `<span class="badge">${esc(portfolioIssue(x))}</span>`).join(" ");
+    return `
+      <tr class="${r.include ? "" : "row-muted"}">
+        <td><input type="checkbox" data-portfolio="include" data-row="${i}"${r.include ? " checked" : ""}${r.blocked ? " disabled" : ""} /></td>
+        <td>${r.rowNumber}</td>
+        <td><input type="text" data-portfolio="property_name" data-row="${i}" value="${esc(p.property_name ?? "")}" /></td>
+        <td>${esc(p.property_type ?? "—")}</td>
+        <td>${esc(p.status ?? "—")}</td>
+        <td><input type="number" step="0.01" min="0" data-portfolio="base_nightly_rate" data-row="${i}" value="${rate ?? ""}" /></td>
+        <td>${issues}${carried}</td>
+      </tr>`;
+  }).join("");
+
+  const ticked = PORTFOLIO_ROWS.filter((r) => r.include).length;
+  host.innerHTML = portfolioSettingsHtml() + `
+    <div class="toolbar">
+      <div class="count">${ticked} of ${PORTFOLIO_ROWS.length} selected</div>
+      <button id="portfolioConfirm"${ticked ? "" : " disabled"}>Import ${ticked} propert${ticked === 1 ? "y" : "ies"}</button>
+      <button id="portfolioCancel" class="secondary">Cancel</button>
+    </div>
+    <table>
+      <thead><tr><th></th><th>Row</th><th>Listing name</th><th>Type</th><th>Status</th><th>Nightly rate</th><th>Notes</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>` + portfolioChecklistHtml();
+
+  $("#portfolioConfirm")?.addEventListener("click", runPortfolioImport);
+  $("#portfolioCancel")?.addEventListener("click", () => {
+    PORTFOLIO_ROWS = []; PORTFOLIO_META = null;
+    const f = $("#portfolioFile"); if (f) f.value = "";
+    $("#portfolioStatus").textContent = "";
+    renderPortfolioPreview();
+  });
+}
+
+function wirePortfolio() {
+  const file = $("#portfolioFile");
+  if (!file) return;
+
+  file.addEventListener("change", async () => {
+    const f = file.files?.[0];
+    if (!f) return;
+    const status = $("#portfolioStatus");
+    status.textContent = `Reading ${f.name}…`;
+    try {
+      const res = await apiFetch("/api/portfolio/parse", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ locationId: getLocationId(), data: await base64Of(f) }),
+      });
+      const out = await res.json();
+      if (!res.ok) {
+        throw new Error(out.error === "no_properties_sheet"
+          ? `No Properties sheet in that workbook (found: ${(out.sheets || []).join(", ")})`
+          : out.error || "Could not read that workbook");
+      }
+
+      PORTFOLIO_ROWS = out.rows;
+      PORTFOLIO_META = out;
+      const s = out.summary;
+      status.textContent = `${f.name}: ${s.total} propert${s.total === 1 ? "y" : "ies"}, ${s.ready} ready` +
+        (s.needsReview ? `, ${s.needsReview} needing a look` : "") +
+        (out.truncated ? " (only the first 500 rows were read)" : "") +
+        (out.unrecognisedColumns?.length ? ` · unrecognised columns: ${out.unrecognisedColumns.join(", ")}` : "");
+      renderPortfolioPreview();
+    } catch (err) {
+      status.textContent = err.message;
+      PORTFOLIO_ROWS = []; PORTFOLIO_META = null;
+      renderPortfolioPreview();
+    }
+    file.value = "";
+  });
+
+  $("#portfolioPreview").addEventListener("input", (e) => {
+    const field = e.target.dataset?.portfolio;
+    if (!field) return;
+    const row = PORTFOLIO_ROWS[Number(e.target.dataset.row)];
+    if (!row) return;
+    if (field === "include") { row.include = e.target.checked; renderPortfolioPreview(); return; }
+    row.properties = row.properties || {};
+    if (field === "base_nightly_rate") {
+      const n = e.target.value === "" ? null : Number(e.target.value);
+      if (n === null) delete row.properties.base_nightly_rate;
+      else row.properties.base_nightly_rate = { value: n, currency: "default" };
+    } else if (e.target.value) {
+      row.properties[field] = e.target.value;
+      row.name = field === "property_name" ? e.target.value : row.name;
+    }
+  });
+}
+
+async function runPortfolioImport() {
+  const rows = PORTFOLIO_ROWS.filter((r) => r.include);
+  if (!rows.length) return;
+  const btn = $("#portfolioConfirm");
+  const status = $("#portfolioStatus");
+  if (btn) { btn.disabled = true; btn.textContent = "Importing…"; }
+
+  try {
+    const res = await apiFetch("/api/portfolio/import", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ locationId: getLocationId(), rows }),
+    });
+    const out = await res.json();
+    if (!res.ok) throw new Error(out.error || "Import failed");
+
+    // The checklist is the next thing to act on, so it stays on screen. Rows
+    // that failed stay too, with their reason; rows that went in are cleared.
+    const failedRows = new Set(out.failed.map((f) => f.rowNumber));
+    const keptChecklist = PORTFOLIO_META;
+    PORTFOLIO_ROWS = PORTFOLIO_ROWS.filter((r) => failedRows.has(r.rowNumber) || !r.include);
+    await loadData();
+    PORTFOLIO_META = keptChecklist;
+    $("#portfolioStatus").textContent = `Imported ${out.imported}.` +
+      (out.failed.length ? ` ${out.failed.length} could not be saved: ${out.failed.map((f) => `row ${f.rowNumber} (${f.error})`).join("; ")}` : "") +
+      ((keptChecklist?.calendarChecklist || []).length ? " The rental listings still need creating by hand — see the checklist." : "");
+    renderPortfolioPreview();
+  } catch (err) {
+    status.textContent = err.message;
+    if (btn) { btn.disabled = false; btn.textContent = "Import"; }
+  }
+}
+
 // ---------- Overview ----------
 function renderOverview() {
   const { properties, otaChannels, transactions, checklists, inventoryItems, contacts } = DATA;
@@ -993,6 +1219,10 @@ function renderProperties() {
       <td>${p.transactionCount}</td>
     </tr>`,
   });
+
+  $("#panel-properties").insertAdjacentHTML("beforeend", portfolioSection());
+  wirePortfolio();
+  renderPortfolioPreview();
 }
 
 // ---------- OTA Channels ----------
