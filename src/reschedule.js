@@ -239,8 +239,17 @@ export async function handleReschedule(request, env) {
   let netRentDelta = rentDelta;
   let cancellationInfo = null;
   if (rentDelta < 0) {
-    const { tier, chargePct, hoursUntil } = cancellationTier(snapshot.stay.checkIn, Date.now(), tenant, body.override);
+    // The dropped nights ARE the basis here, not the whole stay. A policy that
+    // keeps "one night plus 50% of the rest" therefore keeps one of the dropped
+    // nights -- the nights being kept are still being paid for in full.
     const lostRent = round2(-rentDelta);
+    const droppedNights = Math.max((snapshot.stay?.nights ?? 0) - newNights, 0);
+    const { tier, chargePct, hoursUntil } = cancellationTier(snapshot.stay.checkIn, Date.now(), tenant, body.override, {
+      nights: droppedNights,
+      nightlyRate: snapshot.stay?.nightlyRate,
+      rentBasis: lostRent,
+      bookedAtMs: Date.parse(snapshot.createdAt ?? ""),
+    });
     const adminFee = round2(lostRent * chargePct);
     netRentDelta = round2(-(lostRent - adminFee)); // always <= 0, since chargePct maxes at 1.00
     cancellationInfo = { tier, chargePct, hoursUntil, lostRent, adminFee };

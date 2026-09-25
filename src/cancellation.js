@@ -53,7 +53,46 @@ const MANUAL_SUFFIX = " — refund to be issued manually";
 // Shared by /cancel (whole booking) and reschedule.js (partial cancellation
 // of dropped nights). checkInDateStr is "YYYY-MM-DD" -- the CURRENT check-in
 // on record, not a prospective new one.
-export function cancellationTier(checkInDateStr, nowMs, tenant, override) {
+// A nights tier ("keep one night, plus half of what is left") cannot be stated
+// as a percentage until the stay is known: one night of a ten-night booking is
+// 10%, of a one-night booking it is the whole thing. This converts such a tier
+// into the fraction the rest of the engine already works in, so /cancel and
+// reschedule.js keep their existing arithmetic unchanged.
+//
+// stay: { nights, nightlyRate, rentBasis, bookedAtMs }. rentBasis is what the
+// charge is taken from -- the whole rent on /cancel, only the dropped nights
+// on a shortened stay.
+function pctForTier(tier, stay) {
+  if (typeof tier.chargePct === "number") return tier.chargePct;
+  const nightlyRate = Number(stay?.nightlyRate);
+  const basis = Number(stay?.rentBasis);
+  if (!Number.isFinite(nightlyRate) || nightlyRate <= 0 || !Number.isFinite(basis) || basis <= 0) {
+    // Nothing to measure the nights against. Inventing a share of someone's
+    // real money is worse than charging nothing, so this refunds in full and
+    // leaves a line in the logs saying why.
+    console.error("Nights-based cancellation tier with no usable stay; treating as full refund");
+    return 0;
+  }
+  const kept = Math.min(tier.nights * nightlyRate, basis);
+  const remainder = basis - kept;
+  return Math.min(round2(kept + remainder * (tier.remainderPct || 0)) / basis, 1);
+}
+
+// Airbnb's grace period: cancel within N hours of BOOKING and the guest is made
+// whole, as long as check-in is still far enough off. It outranks every tier,
+// which is the point -- it exists for the booking made by mistake.
+function withinGrace(policy, stay, nowMs, hoursUntil) {
+  const g = policy.grace;
+  if (!g) return false;
+  const bookedAt = Number(stay?.bookedAtMs);
+  if (!Number.isFinite(bookedAt)) return false;
+  const sinceBooking = (nowMs - bookedAt) / 3600000;
+  return sinceBooking >= 0
+    && sinceBooking <= g.withinHoursOfBooking
+    && hoursUntil >= g.minHoursBeforeCheckIn;
+}
+
+export function cancellationTier(checkInDateStr, nowMs, tenant, override, stay) {
   const checkInHour = tenant.checkInHour ?? 15;              // 3 PM
   const tzOffsetHours = tenant.tzOffsetHours ?? -4;          // AST
   const anchor = new Date(`${checkInDateStr}T00:00:00Z`).getTime()
@@ -70,10 +109,11 @@ export function cancellationTier(checkInDateStr, nowMs, tenant, override) {
   // Default tenants: their own policy, guest-friendly unless they set tiers.
   if (!isLegacyPolicy(tenant)) {
     const policy = nativeCancellationPolicy(tenant);
+    if (withinGrace(policy, stay, nowMs, hoursUntil)) return { tier: "grace_period", chargePct: 0, hoursUntil: round2(hoursUntil) };
     if (hoursUntil < 0) return { tier: "already_checked_in", chargePct: policy.checkedInChargePct, hoursUntil: round2(hoursUntil) };
     const hit = policy.tiers.find(t => hoursUntil < t.underHours);
     return hit
-      ? { tier: `under_${hit.underHours}h`, chargePct: hit.chargePct, hoursUntil: round2(hoursUntil) }
+      ? { tier: `under_${hit.underHours}h`, chargePct: pctForTier(hit, stay), hoursUntil: round2(hoursUntil) }
       : { tier: "full_refund", chargePct: 0, hoursUntil: round2(hoursUntil) };
   }
 
@@ -91,9 +131,14 @@ export function cancellationTier(checkInDateStr, nowMs, tenant, override) {
 }
 
 export function calcCancellation(snapshot, nowMs, tenant, override) {
-  const { tier, chargePct, hoursUntil } = cancellationTier(snapshot.stay.checkIn, nowMs, tenant, override);
-
   const rent = snapshot.charges.rentTotal;
+  const { tier, chargePct, hoursUntil } = cancellationTier(snapshot.stay.checkIn, nowMs, tenant, override, {
+    nights: snapshot.stay?.nights,
+    nightlyRate: snapshot.stay?.nightlyRate,
+    rentBasis: rent,
+    bookedAtMs: Date.parse(snapshot.createdAt ?? ""),
+  });
+
   const cleaning = snapshot.charges.cleaningFee;
   const deposit = snapshot.securityDeposit.total;
   const fee = snapshot.charges.processingFee ?? 0;

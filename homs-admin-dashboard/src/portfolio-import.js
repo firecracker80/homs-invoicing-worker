@@ -51,12 +51,22 @@ export const LISTING_COLUMNS = [
 // Carried by the workbook but account-level: one per client, not per listing.
 export const ACCOUNT_COLUMNS = { currency: "Currency", cancellationPolicy: "Cancellation Policy" };
 
-// Each label stores the exact sentence parseCancellationPolicy reads, so a
-// human-readable choice and a machine-readable policy stay the same thing.
+// Airbnb's five standard policies, in the sentence the Worker's
+// parseCancellationPolicy reads, so a human-readable choice and a
+// machine-readable policy stay the same thing. These are a copy of
+// AIRBNB_POLICIES in homs-invoicing-worker/src/policy.js -- the two repos share
+// no code, and that file is where the terms are documented and sourced. Change
+// both together.
+//
+//   grace 24h/7d  full refund within 24h of booking, if check-in is 7+ days off
+//   1n            keep one night, not a share of the rent
+//   1n+50%        one night, plus half of the nights that go unused
 export const CANCELLATION_PRESETS = {
-  flexible: "24h 100%, check-in 100%",
-  moderate: "24h 100%, 14d 20%, 3650d 10%, check-in 100%",
-  strict: "24h 100%, 30d 50%, 3650d 25%, check-in 100%",
+  flexible: "grace 24h/7d, 24h 1n, check-in 100%",
+  moderate: "grace 24h/7d, 5d 1n+50%, check-in 100%",
+  limited:  "grace 24h/7d, 7d 100%, 14d 50%, check-in 100%",
+  firm:     "grace 24h/7d, 7d 100%, 30d 50%, check-in 100%",
+  strict:   "grace 24h/7d, 7d 100%, 3650d 50%, check-in 100%",
 };
 
 const norm = (s) => String(s ?? "").trim().toLowerCase();
