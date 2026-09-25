@@ -9,7 +9,7 @@ import assert from "node:assert";
 const { readWorkbook, rowsByHeader } = await import("./src/xlsx.js");
 const {
   mapPropertiesSheet, accountSettingsFrom, calendarChecklist,
-  parsePortfolio, importProperties, CANCELLATION_PRESETS,
+  parsePortfolio, importProperties, CANCELLATION_PRESETS, LISTING_COLUMNS,
 } = await import("./src/portfolio-import.js");
 
 // ---- a minimal .xlsx builder (ZIP, stored) -----------------------------------
@@ -117,16 +117,20 @@ const EXAMPLE = { A: "Arpel 07", B: "Active", C: "Apartment", D: "Calle Arpel 7"
   console.log("3) Ten object fields mapped; a bed description becomes a count and the prose is not lost");
 }
 
-// ---- 4. everything the object has no home for is reported, never dropped -----
+// ---- 4. listing detail is not a gap; only genuinely unknown columns are -----
 {
   const wb = await readWorkbook(book([{ A: "Casa Uno", O: 120, N: "USD", W: "Moderate", S: 200, T: "15:00", Z: "https://drive.google.com/folders/abc" }]));
   const out = mapPropertiesSheet(wb.sheets[1]);
-  const unmapped = Object.keys(out.rows[0].unmapped);
-  assert.ok(unmapped.includes("Security Deposit"), "collected by the workbook, no field on the object: " + unmapped);
-  assert.ok(unmapped.includes("Check-in Time"));
-  assert.ok(!unmapped.includes("Currency"), "account-level columns are not 'unmapped', they are handled separately");
-  assert.ok(!unmapped.includes("Cancellation Policy"));
-  console.log("4) Columns with nowhere to go are surfaced per row; account-level columns excluded from that list");
+  const unrecognised = Object.keys(out.rows[0].unrecognised);
+  // Security Deposit and Check-in Time belong to the rental listing, which no
+  // API can create. They are gathered for the checklist, not reported as
+  // missing fields -- reporting them would read as a defect in the object.
+  assert.ok(!unrecognised.includes("Security Deposit"), "listing detail is expected, not a gap: " + unrecognised);
+  assert.ok(!unrecognised.includes("Check-in Time"));
+  assert.ok(!unrecognised.includes("Currency"), "account-level columns are handled separately");
+  assert.deepEqual(unrecognised, [], "a workbook matching the template has nothing unaccounted for");
+  assert.ok(LISTING_COLUMNS.includes("House Rules"));
+  console.log("4) Listing-facing columns are checklist detail, not gaps; unrecognised stays empty on the real template");
 }
 
 // ---- 5. account settings: first row wins, disagreement is loud ---------------
@@ -196,9 +200,12 @@ const EXAMPLE = { A: "Arpel 07", B: "Active", C: "Apartment", D: "Calle Arpel 7"
   const list = calendarChecklist(sheet, rows);
   assert.equal(list.length, 1, "only rows that will actually be imported");
   assert.equal(list[0].listing, "Casa Uno");
-  assert.equal(list[0].icsLinks, "https://airbnb.com/ical/real.ics");
-  assert.equal(list[0].checkIn, "14:00");
-  console.log("9) Calendar checklist carries name, price, times and .ics links for the manual step");
+  assert.equal(list[0].currency, "USD");
+  assert.equal(list[0].detail["Calendar Export Links (.ics)"], "https://airbnb.com/ical/real.ics");
+  assert.equal(list[0].detail["Check-in Time"], "14:00");
+  assert.equal(list[0].detail["Calendar Platform(s)"], "Airbnb, VRBO");
+  assert.ok(!("Listing Name" in list[0].detail), "the name is the heading, not a detail line");
+  console.log("9) Checklist carries every listing-facing answer, so creating the listing needs no lookups");
 }
 
 // ---- 10. end to end, and the writer --------------------------------------
@@ -208,7 +215,7 @@ const EXAMPLE = { A: "Arpel 07", B: "Active", C: "Apartment", D: "Calle Arpel 7"
   assert.equal(out.summary.total, 2);
   assert.equal(out.summary.ready, 1, "the example row is not ready, the real one is");
   assert.equal(out.accountSettings.cancellationPolicy, CANCELLATION_PRESETS.strict);
-  assert.ok(out.unmappedColumns.length > 0);
+  assert.deepEqual(out.unrecognisedColumns, [], "nothing unaccounted for in a template-shaped workbook");
   assert.equal(out.calendarChecklist.length, 1);
 
   const writes = [];

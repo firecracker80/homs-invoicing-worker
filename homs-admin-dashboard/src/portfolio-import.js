@@ -36,6 +36,18 @@ const FIELD_MAP = {
   "Pet Fee": { key: "pet_fee", money: true },
 };
 
+// Columns that belong to the RENTAL LISTING, not to the Property object. The
+// object is a lightweight index -- name, type, address, capacity, rates. The
+// guest-facing detail lives on the listing in GHL, which no API can create, so
+// these are gathered into the checklist a human works from. They are not a gap
+// and must never be reported as one.
+export const LISTING_COLUMNS = [
+  "Neighborhood / Zone", "Square Footage / Meters (optional)", "Description",
+  "Distinguishing Feature", "Target Guest", "Amenities (comma-separated)",
+  "Booking Unit", "Security Deposit", "Check-in Time", "Check-out Time",
+  "House Rules", "Calendar Platform(s)", "Calendar Export Links (.ics)", "Photos Folder Link",
+];
+
 // Carried by the workbook but account-level: one per client, not per listing.
 export const ACCOUNT_COLUMNS = { currency: "Currency", cancellationPolicy: "Cancellation Policy" };
 
@@ -133,8 +145,10 @@ export function mapPropertiesSheet(sheet, { existingNames = [] } = {}) {
       name: name ?? null,
       properties,
       carried,
-      // Everything the workbook collected that the object has no home for.
-      unmapped: Object.fromEntries(Object.entries(v).filter(([k]) => !FIELD_MAP[k] && !Object.values(ACCOUNT_COLUMNS).includes(k))),
+      // Anything that is neither an object field, an account setting, nor known
+      // listing detail -- i.e. a column nobody has accounted for. Normally empty.
+      unrecognised: Object.fromEntries(Object.entries(v).filter(([k]) =>
+        !FIELD_MAP[k] && !Object.values(ACCOUNT_COLUMNS).includes(k) && !LISTING_COLUMNS.includes(k))),
       issues,
       include: !blocked && !flagged,
       blocked,
@@ -187,19 +201,27 @@ export function accountSettingsFrom(sheet, rows) {
   return { settings, disagreements };
 }
 
-/** The listings a human still has to create by hand, since the API cannot. */
+/**
+ * Everything needed to create each rental listing by hand, since no API can.
+ * Carries every listing-facing column the client filled in, so creating the
+ * listing is transcription with nothing to look up and nothing to decide.
+ */
 export function calendarChecklist(sheet, rows) {
   const { records } = rowsByHeader(sheet);
   const wanted = new Set(rows.filter((r) => r.include).map((r) => r.rowNumber));
-  return records.filter((r) => wanted.has(r.rowNumber)).map((r) => ({
-    listing: r.values["Listing Name"],
-    bookingUnit: r.values["Booking Unit"] ?? null,
-    basePrice: r.values["Base Price"] ?? null,
-    checkIn: r.values["Check-in Time"] ?? null,
-    checkOut: r.values["Check-out Time"] ?? null,
-    platforms: r.values["Calendar Platform(s)"] ?? null,
-    icsLinks: r.values["Calendar Export Links (.ics)"] ?? null,
-  }));
+  return records.filter((r) => wanted.has(r.rowNumber)).map((r) => {
+    const detail = {};
+    for (const column of LISTING_COLUMNS) {
+      const value = r.values[column];
+      if (value !== undefined && value !== "") detail[column] = value;
+    }
+    return {
+      listing: r.values["Listing Name"],
+      basePrice: r.values["Base Price"] ?? null,
+      currency: r.values[ACCOUNT_COLUMNS.currency] ?? null,
+      detail,
+    };
+  });
 }
 
 export async function parsePortfolio(data, { existingNames = [] } = {}) {
@@ -211,14 +233,14 @@ export async function parsePortfolio(data, { existingNames = [] } = {}) {
   if (mapped.error) return mapped;
 
   const { settings, disagreements } = accountSettingsFrom(properties, mapped.rows);
-  const unmappedColumns = [...new Set(mapped.rows.flatMap((r) => Object.keys(r.unmapped)))];
+  const unrecognisedColumns = [...new Set(mapped.rows.flatMap((r) => Object.keys(r.unrecognised)))];
 
   return {
     rows: mapped.rows,
     truncated: mapped.truncated,
     accountSettings: settings,
     disagreements,
-    unmappedColumns,
+    unrecognisedColumns,
     calendarChecklist: calendarChecklist(properties, mapped.rows),
     sheets: wb.sheets.map((s) => s.name),
     summary: {
