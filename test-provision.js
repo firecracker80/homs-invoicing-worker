@@ -69,7 +69,7 @@ assert.equal(dry.dryRun, true);
 assert.equal(dry.wouldWrite.brandName, "Luminara Hospitality", "wrapped '{{ custom_values.wbrand_name }}' must map");
 assert.equal(dry.wouldWrite.ownerPct, 0.85, "\"85\" from GHL must convert to the 0.85 fraction the worker's split math expects");
 assert.equal(dry.wouldWrite.defaultCleaningFee, undefined, "cleaning is GHL-native; wcleaning_fee is no longer copied");
-assert.deepEqual(dry.wouldWrite.cancellationPolicy, { tiers: [{ underHours: 24, chargePct: 0.5 }, { underHours: 120, chargePct: 0.2 }], checkedInChargePct: 1 }, "WCancellation Policy text -> cancellationPolicy");
+assert.deepEqual(dry.wouldWrite.cancellationPolicy, { tiers: [{ underHours: 24, chargePct: 0.5 }, { underHours: 120, chargePct: 0.2 }], checkedInChargePct: 1, grace: null }, "WCancellation Policy text -> cancellationPolicy");
 assert.equal(dry.wouldWrite.paypalWebhookId, "WH-999", "wpaypal_webhook -> paypalWebhookId, read by payment.js webhook verification");
 assert.equal(dry.wouldWrite.ownerPaypalEmail, "owner@x.com");
 assert.equal(dry.wouldWrite.managerPaypalEmail, "mgr@x.com");

@@ -274,4 +274,24 @@ const EXAMPLE = { A: "Arpel 07", B: "Active", C: "Apartment", D: "Calle Arpel 7"
   console.log("11) Routes gated by bearer, client accounts only; parse writes nothing, import writes the ticked rows");
 }
 
+// ---- 12. the preset table has not drifted from the Worker's ----
+// The dashboard writes the sentence; the Worker parses it. They are two
+// separate copies of the same five policies, so a change to one and not the
+// other would provision clients on terms nobody chose.
+{
+  const { AIRBNB_POLICIES } = await import("../src/policy.js");
+  assert.deepEqual(
+    Object.keys(CANCELLATION_PRESETS).sort(), Object.keys(AIRBNB_POLICIES).sort(),
+    "the same five policies in both repos",
+  );
+  for (const [name, text] of Object.entries(CANCELLATION_PRESETS)) {
+    assert.equal(text, AIRBNB_POLICIES[name], name + ": the dashboard and the Worker must store the same sentence");
+  }
+  // The names the intake workbook actually offers on the answer row.
+  for (const offered of ["Flexible", "Moderate", "Limited", "Firm", "Strict"]) {
+    assert.ok(CANCELLATION_PRESETS[offered.toLowerCase()], offered + " is on the workbook dropdown but has no preset");
+  }
+  console.log("12) The five cancellation presets match the Worker's table and the workbook's dropdown");
+}
+
 console.log("\nPASS — portfolio intake: read without dependencies, example row caught, account settings first-row-and-warn.");

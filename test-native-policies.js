@@ -145,7 +145,7 @@ async function enrich(hasPets, items, tenant = native) {
 
 // ---- 4. WCancellation Policy text ----
 {
-  assert.deepEqual(parseCancellationPolicy(""), { tiers: [], checkedInChargePct: 0, unparsed: [] });
+  assert.deepEqual(parseCancellationPolicy(""), { tiers: [], checkedInChargePct: 0, grace: null, unparsed: [] });
   assert.deepEqual(parseCancellationPolicy("none").tiers, []);
   const p = parseCancellationPolicy("5d 20%; 24 horas 50%\nllegada 100%");
   assert.deepEqual(p.tiers, [{ underHours: 24, chargePct: 0.5 }, { underHours: 120, chargePct: 0.2 }]);
@@ -154,7 +154,15 @@ async function enrich(hasPets, items, tenant = native) {
   const tenant = { cancellationPolicy: parseCancellationPolicy("24h 50%, 5d 20%") };
   const anchor = Date.parse("2026-10-10T00:00:00Z") + 19 * 3600000;
   assert.equal(cancellationTier("2026-10-10", anchor - 50 * 3600000, tenant).chargePct, 0.2, "parsed policy drives the cancellation");
-  console.log("4) WCancellation Policy text parses (English/Spanish, h/d), bad rules reported");
+  // A client picks a name in the intake workbook, not a sentence. The five
+  // Airbnb policies are pinned in test-cancellation-policies.mjs; what matters
+  // here is that a name reaches the same parser the written rules go through.
+  const named = parseCancellationPolicy("Moderate");
+  assert.deepEqual(named.grace, { withinHoursOfBooking: 24, minHoursBeforeCheckIn: 168 });
+  assert.deepEqual(named.tiers, [{ underHours: 120, nights: 1, remainderPct: 0.5 }]);
+  assert.deepEqual(named, parseCancellationPolicy("Moderada"), "the Spanish name is the same policy");
+  assert.deepEqual(parseCancellationPolicy("Flexible").unparsed, [], "every preset parses without leftovers");
+  console.log("4) WCancellation Policy text parses (English/Spanish, h/d, Airbnb names), bad rules reported");
 }
 
 console.log("\nPASS — native-first policies.");
