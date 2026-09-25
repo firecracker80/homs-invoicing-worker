@@ -15,6 +15,7 @@ import { provision } from "./provision.js";
 import { handleVendorData } from "./vendor.js";
 import { mapCsvRows, loadExistingExpenses, importRows } from "./expenses-import.js";
 import { extractFromFile, rowsFromExtraction, estimateCost, resolveModel, MODELS, MAX_FILE_BYTES } from "./receipt-extract.js";
+import { parsePortfolio, loadExistingPropertyNames, importProperties } from "./portfolio-import.js";
 import { handleServiceEstimate, handleServiceInvoice, handleServiceSync, handleServiceAccepted, handleServiceDeclined, handleServicePaid, readClientCurrencySettings } from "./services.js";
 
 // Yari's own default accent color -- used whenever a tenant's KV entry has no
@@ -254,6 +255,85 @@ async function handleExpenseImport(request, env) {
   }
 }
 
+// The portfolio intake is the mirror of the expense import: properties live in a
+// CLIENT account, never in a vendor book, so the guard runs the other way.
+const PORTFOLIO_MAX_BYTES = 10 * 1024 * 1024;
+
+async function resolveClientAccount(request, env) {
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return { error: Response.json({ error: "Invalid JSON body" }, { status: 400 }) };
+  }
+  const { tenant, pit, error } = await resolveTenantPit(env, body.locationId);
+  if (error) return { error };
+  if (tenant.kind === "vendor") {
+    return { error: Response.json({ error: "Not a client account -- the portfolio intake creates properties, which a vendor book has none of" }, { status: 400 }) };
+  }
+  return { body, tenant, pit, locationId: body.locationId };
+}
+
+function decodeBase64(data) {
+  const binary = atob(data);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes.buffer;
+}
+
+// Reads the client's intake workbook and returns draft rows. Writes nothing.
+async function handlePortfolioParse(request, env) {
+  const { body, pit, locationId, error } = await resolveClientAccount(request, env);
+  if (error) return error;
+
+  if (typeof body.data !== "string" || !body.data) {
+    return Response.json({ error: "data (base64 .xlsx) is required" }, { status: 400 });
+  }
+  if (Math.floor((body.data.length * 3) / 4) > PORTFOLIO_MAX_BYTES) {
+    return Response.json({ error: "That workbook is too large (10 MB max)" }, { status: 413 });
+  }
+
+  try {
+    const [existingNames, buffer] = await Promise.all([
+      loadExistingPropertyNames(pit, locationId),
+      Promise.resolve(decodeBase64(body.data)),
+    ]);
+    const out = await parsePortfolio(buffer, { existingNames });
+    if (out.error) return Response.json(out, { status: 400 });
+    return Response.json(out);
+  } catch (err) {
+    return Response.json(
+      { error: err.message || "Unknown error" },
+      { status: err.status && err.status >= 400 && err.status < 600 ? err.status : 502 }
+    );
+  }
+}
+
+// Creates the Property records for the rows the reviewer ticked. The rental
+// listings themselves stay manual -- GHL's calendar API has no rental type.
+async function handlePortfolioImport(request, env) {
+  const { body, pit, locationId, error } = await resolveClientAccount(request, env);
+  if (error) return error;
+
+  const rows = body.rows;
+  if (!Array.isArray(rows) || rows.length === 0) {
+    return Response.json({ error: "rows (array) is required" }, { status: 400 });
+  }
+  if (rows.length > 500) {
+    return Response.json({ error: "Too many rows in one import (max 500)" }, { status: 400 });
+  }
+
+  try {
+    const { created, failed } = await importProperties(pit, locationId, rows);
+    return Response.json({ ok: failed.length === 0, imported: created.length, created, failed });
+  } catch (err) {
+    return Response.json(
+      { error: err.message || "Unknown error" },
+      { status: err.status && err.status >= 400 && err.status < 600 ? err.status : 502 }
+    );
+  }
+}
+
 // Reconciles a tenant's custom values against the blueprint. Requires PROVISION_KEY,
 // never the dashboard cookie -- this endpoint rewrites configuration and mints secrets.
 async function handleProvision(request, env) {
@@ -362,6 +442,14 @@ export default {
 
     if (url.pathname === "/api/expenses/models" && request.method === "GET") {
       return Response.json({ models: Object.entries(MODELS).map(([id, m]) => ({ id, label: m.label })) });
+    }
+
+    if (url.pathname === "/api/portfolio/parse" && request.method === "POST") {
+      return handlePortfolioParse(request, env);
+    }
+
+    if (url.pathname === "/api/portfolio/import" && request.method === "POST") {
+      return handlePortfolioImport(request, env);
     }
 
     if (url.pathname === "/api/expenses/parse-file" && request.method === "POST") {
