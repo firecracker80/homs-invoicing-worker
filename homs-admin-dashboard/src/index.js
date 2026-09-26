@@ -16,6 +16,7 @@ import { handleVendorData } from "./vendor.js";
 import { mapCsvRows, loadExistingExpenses, importRows } from "./expenses-import.js";
 import { extractFromFile, rowsFromExtraction, estimateCost, resolveModel, MODELS, MAX_FILE_BYTES } from "./receipt-extract.js";
 import { parsePortfolio, loadExistingPropertyNames, importProperties } from "./portfolio-import.js";
+import { listContactEmails, findWorkbookReply, downloadWorkbook, crossCheck, saveIntake, loadIntake } from "./onboarding-intake.js";
 import { handleServiceEstimate, handleServiceInvoice, handleServiceSync, handleServiceAccepted, handleServiceDeclined, handleServicePaid, readClientCurrencySettings } from "./services.js";
 
 // Yari's own default accent color -- used whenever a tenant's KV entry has no
@@ -334,6 +335,94 @@ async function handlePortfolioImport(request, env) {
   }
 }
 
+
+// ===================================================== onboarding intake ====
+// Stage 1: the client replies to the workbook email with it filled in. This
+// collects that reply and parks it for review. It reads the HOMS account and
+// writes only to the intake record -- never to a client sub-account, which at
+// this point usually does not exist yet.
+//
+// Triggered by a GHL "Customer Replied" workflow on HOMS, so the caller is a
+// webhook, not the dashboard UI: it authenticates with PROVISION_KEY.
+async function handleOnboardingIntake(request, env) {
+  const denied = await requireProvision(request, env);
+  if (denied) return denied;
+
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return Response.json({ error: "Invalid JSON body" }, { status: 400 });
+  }
+
+  const contactId = body.contactId;
+  if (!contactId) return Response.json({ error: "contactId is required" }, { status: 400 });
+
+  // locationId here is the account the CONVERSATION lives in (HOMS), not the
+  // client sub-account. Guarding it as a client account would be wrong.
+  const { pit, error } = await resolveTenantPit(env, body.locationId);
+  if (error) return error;
+
+  try {
+    const messages = await listContactEmails(pit, contactId);
+    const reply = findWorkbookReply(messages);
+
+    if (!reply.found) {
+      const record = {
+        contactId, locationId: body.locationId, status: "waiting",
+        reason: reply.reason, checkedAt: new Date().toISOString(),
+      };
+      await saveIntake(env.DASHBOARD_TENANTS, contactId, record);
+      return Response.json(record, { status: 202 });
+    }
+
+    const buffer = await downloadWorkbook(reply.found.url, pit);
+    // No existing-name list: there is no client account to compare against yet,
+    // so "already in this account" cannot be judged here and is not pretended.
+    const portfolio = await parsePortfolio(buffer, { existingNames: [] });
+    if (portfolio.error) {
+      const record = {
+        contactId, locationId: body.locationId, status: "unreadable",
+        reply: reply.found, error: portfolio.error, sheets: portfolio.sheets || [],
+        checkedAt: new Date().toISOString(),
+      };
+      await saveIntake(env.DASHBOARD_TENANTS, contactId, record);
+      return Response.json(record, { status: 422 });
+    }
+
+    const quiz = body.quiz && typeof body.quiz === "object" ? body.quiz : null;
+    const record = {
+      contactId, locationId: body.locationId, status: "ready_for_review",
+      reply: reply.found, superseded: reply.superseded,
+      quiz, crossCheck: crossCheck(quiz, portfolio),
+      portfolio, checkedAt: new Date().toISOString(),
+    };
+    await saveIntake(env.DASHBOARD_TENANTS, contactId, record);
+
+    // The full portfolio is large and already stored; the webhook caller only
+    // needs to know it landed and whether a human has to look.
+    return Response.json({
+      contactId, status: record.status, reply: reply.found,
+      summary: portfolio.summary, conflicts: record.crossCheck.conflicts,
+      supersededCount: reply.superseded.length,
+    });
+  } catch (err) {
+    return Response.json(
+      { error: err.message || "Unknown error" },
+      { status: err.status && err.status >= 400 && err.status < 600 ? err.status : 502 }
+    );
+  }
+}
+
+// The parked intake, for the review screen. Dashboard cookie, not PROVISION_KEY.
+async function handleOnboardingGet(request, env, contactId) {
+  const denied = await requireAdmin(request, env);
+  if (denied) return denied;
+  const record = await loadIntake(env.DASHBOARD_TENANTS, contactId);
+  if (!record) return Response.json({ error: `No intake recorded for contact ${contactId}` }, { status: 404 });
+  return Response.json(record);
+}
+
 // Reconciles a tenant's custom values against the blueprint. Requires PROVISION_KEY,
 // never the dashboard cookie -- this endpoint rewrites configuration and mints secrets.
 async function handleProvision(request, env) {
@@ -386,6 +475,13 @@ export default {
       const denied = await requireProvision(request, env);
       if (denied) return denied;
       return handleProvision(request, env);
+    }
+
+    // Called by a "Customer Replied" workflow on HOMS when the client emails the
+    // filled-in workbook back. Gated by PROVISION_KEY inside the handler, and
+    // placed above the dashboard gate below because a webhook has no cookie.
+    if (url.pathname === "/api/onboarding/intake" && request.method === "POST") {
+      return handleOnboardingIntake(request, env);
     }
 
     // Services flow: called by a vendor's GHL workflows, gated by SERVICES_WEBHOOK_KEY.
@@ -450,6 +546,13 @@ export default {
 
     if (url.pathname === "/api/portfolio/import" && request.method === "POST") {
       return handlePortfolioImport(request, env);
+    }
+
+    if (url.pathname.startsWith("/api/onboarding/") && request.method === "GET") {
+      const contactId = url.pathname.slice("/api/onboarding/".length);
+      if (contactId && !contactId.includes("/")) {
+        return handleOnboardingGet(request, env, decodeURIComponent(contactId));
+      }
     }
 
     if (url.pathname === "/api/expenses/parse-file" && request.method === "POST") {
