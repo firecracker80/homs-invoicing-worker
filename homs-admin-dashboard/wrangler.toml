@@ -19,6 +19,16 @@ compatibility_date = "2025-01-01"
 [vars]
 INVOICING_WORKER_URL = "https://homs-invoicing-worker-0e0e.yari-058.workers.dev"
 
+# HOMS's "Onboarding Survey" -- the one survey step one of onboarding reads.
+# /api/onboarding/quiz falls back to this when the caller sends no surveyId,
+# which is the normal case: a GHL workflow has no merge tag for the id of the
+# survey that triggered it, so the only way to pass it is to hard-code it into
+# every workflow body and keep them all in step by hand.
+#
+# Not a secret, and not per-client: the survey lives in HOMS and every client
+# fills in the same one. A client's own locationId still comes from the call.
+ONBOARDING_SURVEY_ID = "4d3ykgx6DqasTydvt5zn"
+
 [assets]
 directory = "./public"
 binding = "ASSETS"

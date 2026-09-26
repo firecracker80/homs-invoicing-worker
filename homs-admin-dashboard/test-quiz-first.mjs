@@ -7,6 +7,7 @@
 // Nothing would have errored. The account would simply have been provisioned
 // with five settings missing.
 import assert from "node:assert";
+import { readFileSync } from "node:fs";
 import { book, EXAMPLE } from "./test-workbook.mjs";
 
 const { mergeIntake, fetchLatestSubmission } = await import("./src/onboarding-intake.js");
@@ -144,6 +145,27 @@ const submission = (over = {}) => ({
   assert.strictEqual(afterWorkbook.quiz.id, "sub-1");
   assert.strictEqual(afterWorkbook.status, "ready_for_review");
   console.log("5) Quiz then workbook: both end up on one record, neither overwrites the other");
+}
+
+// ---- 6. the survey id is declared where it deploys ---------------------
+// Test 5 proves the fallback works when ONBOARDING_SURVEY_ID is set. Nothing
+// there proves it IS set on the deployed Worker -- and it cannot come from the
+// caller, because GHL gives a workflow no merge tag for the id of the survey
+// that triggered it. Declared in wrangler.toml so it ships with the code.
+{
+  const toml = readFileSync(new URL("./wrangler.toml", import.meta.url), "utf8");
+  const declared = toml.match(/^ONBOARDING_SURVEY_ID\s*=\s*"([^"]+)"/m);
+  assert.ok(declared, "ONBOARDING_SURVEY_ID is declared in [vars], not left to the caller");
+  assert.strictEqual(declared[1], SURVEY,
+    "and it is the survey these tests exercise -- changing one without the other would pass every other assertion here");
+
+  // Under [vars], not [env.*.vars]: a var declared only under an environment is
+  // absent from the default deploy, which is the one that serves the workflow.
+  const varsAt = toml.indexOf("\n[vars]");
+  const nextSection = toml.indexOf("\n[", varsAt + 2);
+  assert.ok(varsAt >= 0 && declared.index > varsAt && (nextSection === -1 || declared.index < nextSection),
+    "declared inside the top-level [vars] block");
+  console.log("6) The survey id is declared in wrangler.toml, in [vars], matching what the tests use");
 }
 
 console.log("\nPASS — the quiz arrives first and survives the workbook; submissions are read from GHL, not mapped by hand.");
