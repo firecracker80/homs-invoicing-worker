@@ -259,9 +259,21 @@ export async function invoiceHasWorkerLines({ tenant, env, locationId, invoiceId
 }
 
 // --- enrich + send ---------------------------------------------------------
-// userId comes from the booking webhook's {{user.id}} (see index.js), not
-// tenant config -- required by send-invoice, but it identifies WHO is
-// sending, which is a per-request fact, not a per-client one.
+// userId is required by send-invoice. It was taken only from the booking
+// webhook's {{user.id}}, on the reasoning that who sends an invoice is a
+// per-request fact rather than a per-client one.
+//
+// That reasoning was wrong in practice, and it cost three bookings on
+// 2026-09-26: a Rental Booking trigger has no user in context, so {{user.id}}
+// resolves to nothing, every time. enrichAndSendInvoice threw on its first
+// line and the invoice went out as GHL built it -- no processing fee, no
+// deposit, and no Pet Fee removal for a guest who said they had no pet. The
+// Worker reported it correctly (mode: enrich_failed, with the merge tag named)
+// and the report sat unread in an execution log nobody could open.
+//
+// So the webhook value still wins when it resolves, and tenant.invoiceSenderUserId
+// is the fallback. One unresolved merge tag must not be able to silently
+// un-price every booking a client takes.
 // GHL's native Additional Fees can't be conditional, so a Pet Fee lands on
 // every booking. The booking form asks (required) whether the guest brings a
 // pet; on "No" that line is dropped before the invoice is sent. Payment at
@@ -273,7 +285,14 @@ export async function enrichAndSendInvoice(
   { tenant, env, locationId, invoiceId, snapshot, contact, userId, hasPets },
   fetchImpl = fetch
 ) {
-  if (!userId) throw new Error("No userId on this request ({{user.id}} merge tag) -- required by send-invoice");
+  const senderUserId = userId || tenant?.invoiceSenderUserId || null;
+  if (!senderUserId) {
+    throw new Error(
+      "No userId available -- send-invoice requires one. The webhook's {{user.id}} merge tag " +
+      "did not resolve (a Rental Booking trigger has no user in context), and this tenant has no " +
+      "invoiceSenderUserId set in KV as a fallback. Set one, or the invoice cannot be sent."
+    );
+  }
 
   // update-invoice requires the full body (name/currency/issueDate/dueDate
   // are required alongside invoiceItems) -- fetch the draft first so we can
@@ -341,7 +360,7 @@ export async function enrichAndSendInvoice(
       body: {
         altId: locationId,
         altType: "location",
-        userId,
+        userId: senderUserId,
         action: tenant.ghlInvoiceSendAction || "sms_and_email",
         liveMode: tenant.ghlInvoiceLiveMode ?? true
       }
