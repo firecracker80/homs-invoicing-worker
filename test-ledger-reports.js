@@ -13,12 +13,24 @@ function makeMockD1() {
   let nextId = 1;
 
   function insert(params) {
+    // Column order mirrors the real INSERT in ledger.js exactly. It has to:
+    // when `reference` was added for the cancellation work, this mock was left
+    // at thirteen columns, so every reference landed in created_at and
+    // created_at was dropped. Nothing threw -- the inserts looked fine and
+    // every date-filtered query silently returned nothing, which read as "the
+    // ledger writes no rows". If you change the real INSERT, change this.
     const [location_id, booking_id, invoice_number, invoice_id, recipient, recipient_name,
-      category, entry_type, amount_minor, currency, description, source, created_at] = params;
-    // Mirrors the real UNIQUE INDEX (booking_id, entry_type) + INSERT OR IGNORE.
-    if (rows.some(r => r.booking_id === booking_id && r.entry_type === entry_type)) return { changes: 0 };
+      category, entry_type, amount_minor, currency, description, source, reference, created_at] = params;
+    if (params.length !== 14) {
+      throw new Error(`ledger INSERT binds ${params.length} columns, this mock expects 14 -- update the mock`);
+    }
+    // Mirrors the real UNIQUE INDEX (booking_id, entry_type, reference).
+    if (rows.some(r => r.booking_id === booking_id && r.entry_type === entry_type && r.reference === reference)) {
+      return { changes: 0 };
+    }
     rows.push({ id: nextId++, location_id, booking_id, invoice_number, invoice_id, recipient,
-      recipient_name, category, entry_type, amount_minor, currency, description, source, created_at, reconciled: 0 });
+      recipient_name, category, entry_type, amount_minor, currency, description, source, reference,
+      created_at, reconciled: 0 });
     return { changes: 1 };
   }
 
@@ -82,7 +94,9 @@ const db1 = makeMockD1();
 const env1 = { LEDGER_DB: db1 };
 const r1 = await writeLedgerEntries(env1, tenant, makeSnapshot("BK-1"), captures);
 assert.equal(r1.ok, true);
-assert.equal(r1.rowsWritten, 6, "expected 6 rows: owner rent, manager rent, cleaning, deposit, processing fee, shadow OTA");
+// rowsWritten moved under .d1 when writeAndSyncRows began writing D1 AND
+// mirroring to GHL in one call -- the top-level result now reports both legs.
+assert.equal(r1.d1.rowsWritten, 6, "expected 6 rows: owner rent, manager rent, cleaning, deposit, processing fee, shadow OTA");
 
 const byType = Object.fromEntries(db1._rows.map(r => [r.entry_type, r]));
 assert.equal(byType.rent_split_owner.amount_minor, 59500, "owner 85% of $700 = $595.00 -> 59500 minor units");
@@ -111,7 +125,7 @@ console.log("2) Idempotent: re-write of BK-1 added 0 new rows, still 6 total");
 // ---- 3. No otaRate configured -> shadow row skipped, never guess a commission rate ----
 const db3 = makeMockD1();
 const r3 = await writeLedgerEntries({ LEDGER_DB: db3 }, { currency: "USD" }, makeSnapshot("BK-NO-OTA"), captures);
-assert.equal(r3.rowsWritten, 5, "no otaRate on tenant -> 5 rows, no shadow_ota_commission");
+assert.equal(r3.d1.rowsWritten, 5, "no otaRate on tenant -> 5 rows, no shadow_ota_commission");
 assert.ok(!db3._rows.some(r => r.entry_type === "shadow_ota_commission"));
 console.log("3) No tenant.otaRate -> shadow entry correctly omitted (never guesses a rate)");
 
@@ -146,7 +160,7 @@ console.log("3c) ledger.js: recipient_name flows onto every owner/manager row, c
 // ---- 4. No LEDGER_DB binding -> reports non-fatal, doesn't throw ----
 const r4 = await writeLedgerEntries({}, tenant, makeSnapshot("BK-NO-DB"), captures);
 assert.equal(r4.ok, false);
-assert.equal(r4.reason, "no_ledger_db_binding");
+assert.equal(r4.d1.reason, "no_ledger_db_binding");
 console.log("4) Missing LEDGER_DB binding -> reports failure cleanly, does not throw");
 
 // ---- 5. Statement query shape: owner statement totals match what was written ----
@@ -247,10 +261,15 @@ assert.ok(htmlRes.body.includes("<!doctype html>"));
 assert.ok(htmlRes.body.includes("595.00"), "rendered HTML must contain the actual owner total, not just structure");
 console.log("9) /reports/owner-statement HTML renders and contains the real total");
 
-// ---- 10. /reports/manager-statement: cleaning fee + rent split, correct recipient ----
+// ---- 10. /reports/manager-statement: rent split, correct recipient ----
+// No cleaning row on this path any more. booking-composer.js sets cleaningFee
+// to 0 deliberately -- GHL native Additional Fees collect it, and the Worker
+// records the real amount off the invoice in enrichAndSendInvoice. So
+// tenant.defaultCleaningFee is dead config, read by nothing, and a booking that
+// never reaches the GHL-invoice path has no cleaning income at all.
 const mgrRes = await (await worker.fetch({ method: "GET", url: "https://w.dev/reports/manager-statement?locationId=L1&format=json&from=2026-01-01&to=2026-12-31", headers: hdr("admin123") }, env)).json();
-assert.equal(mgrRes.incomeTotal, round2(105 + 69), "manager income = 15% rent split + cleaning fee (cleaningFeeTo=manager)");
-console.log("10) /reports/manager-statement JSON -> incomeTotal:", mgrRes.incomeTotal, "(15% rent split + cleaning fee)");
+assert.equal(mgrRes.incomeTotal, 105, "manager income = 15% rent split; cleaning is native and arrives via the invoice path");
+console.log("10) /reports/manager-statement JSON -> incomeTotal:", mgrRes.incomeTotal, "(15% rent split)");
 
 // ---- 10b. Iframe-friendly ?token= auth: scoped per recipient, can't cross over ----
 await kv.put("L2", JSON.stringify({
@@ -280,9 +299,9 @@ console.log("10b) ?token= auth: scoped correctly per recipient, no cross-over, a
 await kv.put("L3", JSON.stringify({ brandName: "Multi-owner Tenant" }));
 const seedOwnerRow = (recipientName, amountMinor, bookingId) => ledgerDb.prepare(
   `INSERT OR IGNORE INTO ledger_entries
-   (location_id, booking_id, invoice_number, invoice_id, recipient, recipient_name, category, entry_type, amount_minor, currency, description, source, created_at)
-   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-).bind("L3", bookingId, null, null, "owner", recipientName, "income", "rent_split_owner", amountMinor, "USD", "test", "payment_confirmed", new Date().toISOString()).run();
+   (location_id, booking_id, invoice_number, invoice_id, recipient, recipient_name, category, entry_type, amount_minor, currency, description, source, reference, created_at)
+   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+).bind("L3", bookingId, null, null, "owner", recipientName, "income", "rent_split_owner", amountMinor, "USD", "test", "payment_confirmed", "rent_split_owner", new Date().toISOString()).run();
 await seedOwnerRow("Yari", 59500, "BK-YARI-1");
 await seedOwnerRow("Marco", 42000, "BK-MARCO-1");
 
@@ -313,9 +332,9 @@ console.log("10d) ?brandName= in the URL overrides tenant.brandName; omitted, fa
 // exercise the actual matching logic.
 await ledgerDb.prepare(
   `INSERT OR IGNORE INTO ledger_entries
-   (location_id, booking_id, invoice_number, invoice_id, recipient, recipient_name, category, entry_type, amount_minor, currency, description, source, created_at)
-   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-).bind("L1", "E2E-ENRICH", "000018-E2E-ENRICH", "inv_999", "owner", null, "income", "rent_split_owner", 59500, "USD", "test", "payment_confirmed", new Date().toISOString()).run();
+   (location_id, booking_id, invoice_number, invoice_id, recipient, recipient_name, category, entry_type, amount_minor, currency, description, source, reference, created_at)
+   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+).bind("L1", "E2E-ENRICH", "000018-E2E-ENRICH", "inv_999", "owner", null, "income", "rent_split_owner", 59500, "USD", "test", "payment_confirmed", "rent_split_owner", new Date().toISOString()).run();
 assert.equal(ledgerDb._rows.filter(r => r.category === "income" && r.location_id === "L1").length >= 2, true, "sanity: both E2E-1's and the seeded enrich booking's income rows must be present");
 
 mockTransactions = []; // GHL shows nothing -> the enrich booking's income is genuinely unmatched
