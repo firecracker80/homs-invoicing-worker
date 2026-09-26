@@ -76,6 +76,8 @@ function composeBooking(payload, tenantProfile) {
     createdAt: new Date().toISOString(),
     // pass-throughs for Airtable mapping
     propertyCode: payload.propertyCode || null,
+    // Set only when the guard rejected a propertyCode for being the guest name.
+    ...(payload.propertyCodeRejected ? { propertyCodeRejected: payload.propertyCodeRejected } : {}),
     ghlBookingId: payload.ghlBookingId || null,
     ghlContactId: payload.ghlContactId || null,
     bookingSource: payload.bookingSource || "Direct",
