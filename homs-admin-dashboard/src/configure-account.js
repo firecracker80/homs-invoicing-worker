@@ -54,6 +54,7 @@ export const SETTINGS_SOURCES = {
   wpaypal_client_id: { source: "integration call", note: "collected on a call, never in the quiz" },
   wpaypal_webhook: { source: "integration call", note: "collected on a call, never in the quiz" },
   wservice_cost_currency: { source: "request", note: "service marketplace pricing currency, if the client sells services" },
+  wmanager_notification_email: { source: "request", note: "who cleaning and guest-request notifications go to -- the account holder, or whoever they name" },
 };
 
 export function settingsFrom(intake, { brandName = null, extra = {} } = {}) {

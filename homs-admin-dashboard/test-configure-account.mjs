@@ -77,6 +77,33 @@ const intakeFor = (overrides = {}) => ({
   console.log("2) The cancellation policy the client picked reaches a real blueprint key");
 }
 
+// ---- 2b. operational notifications have a configurable home -----------------
+// Before 2026-09-26 the notification address lived inside a workflow email
+// action, which no API can read. A cloned account kept the template address and
+// the real manager never heard about a cleaning submission -- an email that
+// does not arrive raises nothing, so nobody found out.
+{
+  const entry = BLUEPRINT.find((e) => e.slug === "wmanager_notification_email");
+  assert.ok(entry, "wmanager_notification_email must be in the blueprint");
+  assert.strictEqual(entry.policy, "input", "it is configured per account, not derived or generated");
+
+  // No source of its own yet, so it must appear in `missing` with a note
+  // rather than being silently absent from the plan.
+  const { input, missing } = settingsFrom(intakeFor(), { brandName: "Casa Bonita" });
+  assert.strictEqual(input.wmanager_notification_email, undefined, "never invented");
+  const m = missing.find((x) => x.slug === "wmanager_notification_email");
+  assert.ok(m, "an unconfigured notification address is reported, not assumed inherited");
+  assert.match(m.note, /account holder/);
+
+  // And it writes when supplied, like any other account setting.
+  const supplied = settingsFrom(intakeFor(), {
+    brandName: "Casa Bonita", extra: { wmanager_notification_email: "rosa@casabonita.do" },
+  });
+  assert.strictEqual(supplied.input.wmanager_notification_email, "rosa@casabonita.do");
+  assert.ok(!supplied.missing.some((x) => x.slug === "wmanager_notification_email"));
+  console.log("2b) The manager notification address is a configurable key, reported when unset");
+}
+
 // ---- 3. a caller cannot push a value into a key that must stay manual -------
 {
   const { input, refused } = settingsFrom(intakeFor(), {
