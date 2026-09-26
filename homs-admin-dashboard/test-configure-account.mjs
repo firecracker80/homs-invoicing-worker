@@ -351,6 +351,38 @@ const intakeFor = (overrides = {}) => ({
   console.log("13) Survey answers fill locale, split, owner and manager; a brand mismatch blocks");
 }
 
+// ---- 14. the plan hands GHL something a merge tag can actually read ------
+// A workflow builds the review task and the internal notification from this
+// response. Merge tags cannot walk into nested objects or arrays.
+{
+  const calls = [];
+  globalThis.fetch = mockGhl(calls, { brand: "" });
+  const plan = await planConfiguration("pit", CLIENT, intakeFor(), { brandName: "Casa Bonita" });
+
+  assert.ok(plan.notice, "the plan carries a flat notice block");
+  for (const [k, v] of Object.entries(plan.notice)) {
+    assert.strictEqual(typeof v, "string", `notice.${k} must be a string for a merge tag`);
+  }
+  assert.strictEqual(plan.notice.brandName, "Casa Bonita");
+  assert.strictEqual(plan.notice.clientLocationId, CLIENT);
+  assert.strictEqual(plan.notice.propertiesToCreate, "2", "counts are strings, not numbers");
+  assert.strictEqual(plan.notice.calendarsToCreate, "2");
+  assert.strictEqual(plan.notice.readyToApply, "yes");
+  assert.strictEqual(plan.notice.blockers, "", "blank when clear, so a workflow can branch on it");
+
+  // A zero has to render as "0", not as an empty cell that reads like no data.
+  const empty = await planConfiguration("pit", CLIENT, { ...intakeFor(), portfolio: { ...intakeFor().portfolio, rows: [] } }, { brandName: "Casa Bonita" });
+  assert.strictEqual(empty.notice.propertiesToCreate, "0");
+
+  // And a blocked plan says so in one readable line.
+  globalThis.fetch = mockGhl(calls, { brand: "Luminara" });
+  const blocked = await planConfiguration("pit", CLIENT, intakeFor(), { brandName: "Casa Bonita" });
+  assert.strictEqual(blocked.notice.readyToApply, "no");
+  assert.strictEqual(blocked.notice.blockerCount, "1");
+  assert.match(blocked.notice.blockers, /Luminara/);
+  console.log("14) The plan carries a flat, all-string notice a GHL task can be built from");
+}
+
 // A GHL stand-in: custom values, object records, and the writes both make.
 function mockGhl(calls, { brand = "", failCustomValueWrite = false } = {}) {
   return async (url, init = {}) => {

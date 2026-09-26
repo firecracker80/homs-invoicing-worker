@@ -231,6 +231,30 @@ async function readAccount(pit, locationId) {
   return { existingNames, accountBrand: brandEntry?.value ?? "" };
 }
 
+// A GHL workflow reads this response and builds the review task and the
+// internal notification from it. Merge tags cannot walk into nested objects or
+// arrays, so everything a task body needs is flattened to a top-level string
+// here. Numbers are strings too: a merge tag rendering 0 as an empty cell is
+// how a task ends up saying a client has properties to import when it has none.
+export function planNotice(plan) {
+  const blockers = plan.blockers || [];
+  const missing = plan.settings?.missing || [];
+  return {
+    brandName: plan.brandName || plan.accountBrand || "(unnamed)",
+    clientLocationId: plan.locationId || "",
+    freshAccount: plan.freshAccount ? "yes" : "no",
+    propertiesToCreate: String((plan.properties?.toCreate || []).length),
+    propertiesSkipped: String((plan.properties?.skipped || []).length),
+    calendarsToCreate: String((plan.calendars || []).length),
+    settingsToWrite: String(Object.keys(plan.settings?.input || {}).length),
+    settingsMissing: String(missing.length),
+    blockerCount: String(blockers.length),
+    // One line a person can act on without opening anything. Empty when clear,
+    // so a workflow can branch on it being blank.
+    blockers: blockers.map((b) => b.detail).join(" | "),
+    readyToApply: blockers.length === 0 ? "yes" : "no",
+  };
+}
 export async function planConfiguration(pit, locationId, intake, { brandName = null, extra = {}, rows = null, overwrite = false } = {}) {
   const selected = rows || (intake?.portfolio?.rows || []).filter((r) => r.include && !r.blocked);
   const { existingNames, accountBrand } = await readAccount(pit, locationId);
@@ -258,7 +282,7 @@ export async function planConfiguration(pit, locationId, intake, { brandName = n
     expectBrand: blank(accountBrand) ? null : brandName,
   });
 
-  return {
+  const plan = {
     locationId, brandName, accountBrand,
     freshAccount: blank(accountBrand),
     blockers,
@@ -271,6 +295,10 @@ export async function planConfiguration(pit, locationId, intake, { brandName = n
     deploymentSteps: DEPLOYMENT_STEPS,
     plannedAt: new Date().toISOString(),
   };
+
+  // Flattened from the finished plan, so it always describes what is actually
+  // being returned rather than a parallel calculation that could drift.
+  return { ...plan, notice: planNotice(plan) };
 }
 
 export async function applyConfiguration(pit, locationId, intake, opts = {}) {
