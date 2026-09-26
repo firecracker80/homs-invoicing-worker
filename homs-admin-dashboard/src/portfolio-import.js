@@ -70,6 +70,10 @@ export const CANCELLATION_PRESETS = {
 };
 
 const norm = (s) => String(s ?? "").trim().toLowerCase();
+// Two listings are the same listing if their names match once case and padding
+// are ignored. Exported so the configuration agent dedupes against the target
+// account exactly the way the parser dedupes within a file.
+export const listingNameKey = norm;
 const num = (v) => {
   const n = Number(String(v ?? "").replace(/[^0-9.-]/g, ""));
   return Number.isFinite(n) ? n : null;
