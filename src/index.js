@@ -11,7 +11,7 @@ import { resolveDraftInvoiceId, enrichAndSendInvoice, invoiceHasWorkerLines } fr
 // A "sending" claim younger than this belongs to a run that may still be
 // working; an older one whose invoice GHL still shows as a draft died part-way.
 const CLAIM_STALE_MS = 2 * 60 * 1000;
-import { handleOwnerStatement, handleManagerStatement, handleReconcile } from "./reports.js";
+import { handleOwnerStatement, handleManagerStatement, handleManagerPL, handleReconcile } from "./reports.js";
 import { handleProvisionTenant } from "./provision.js";
 
 function json(data, status = 200) {
@@ -381,6 +381,8 @@ export default {
         return handleOwnerStatement(request, env);
       if (url.pathname === "/reports/manager-statement")
         return handleManagerStatement(request, env);
+      if (url.pathname === "/reports/manager-pl")
+        return handleManagerPL(request, env);
       if (url.pathname === "/reports/reconcile")
         return handleReconcile(request, env);
       if (url.pathname === "/admin/provision-tenant" && (request.method === "GET" || request.method === "POST"))
