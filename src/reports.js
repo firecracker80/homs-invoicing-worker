@@ -21,6 +21,8 @@
 // is already the materialized split (see ledger.js) -- no split logic gets
 // recomputed here.
 
+import { queryManagerIncome, fetchExpenseRecords, buildManagerPL } from "./manager-pl.js";
+
 const GHL_BASE = "https://services.leadconnectorhq.com";
 const GHL_VERSION = "2021-07-28";
 
@@ -215,6 +217,112 @@ export async function handleOwnerStatement(request, env) {
 }
 export async function handleManagerStatement(request, env) {
   return handleStatement(request, env, "manager", "Manager", "managerReportToken");
+}
+
+// --- manager P&L -----------------------------------------------------------
+// Reuses the manager statement's own token: this is the same recipient seeing a
+// fuller view of the same numbers, not a new audience.
+export async function handleManagerPL(request, env) {
+  const url = new URL(request.url);
+  const locationId = url.searchParams.get("locationId");
+  if (!locationId) return json({ error: "locationId is required" }, 400);
+
+  const tenant = await env.TENANTS.get(locationId, { type: "json" });
+  if (!tenant) return json({ error: `Unknown locationId: ${locationId}` }, 404);
+  if (!statementAuthorized(request, tenant, env, url, "managerReportToken")) return json({ error: "Unauthorized" }, 401);
+  if (!env.LEDGER_DB) return json({ error: "Ledger not configured (LEDGER_DB binding missing)" }, 500);
+
+  const pit = tenant.ghlPit || (tenant.ghlPitSecretName && env[tenant.ghlPitSecretName]);
+  if (!pit) return json({ error: "No GHL PIT configured for this tenant -- expenses cannot be read" }, 500);
+
+  const { from, to, fromLabel, toLabel } = resolveWindow(url);
+  const recipientName = url.searchParams.get("recipientName") || null;
+  const reportCurrency = (url.searchParams.get("currency") || tenant.currency || "USD").toUpperCase();
+
+  try {
+    const [income, records] = await Promise.all([
+      queryManagerIncome(env, locationId, from, to, recipientName),
+      fetchExpenseRecords(pit, locationId),
+    ]);
+    const pl = buildManagerPL({ income, records, from, to, reportCurrency });
+    const brandName = url.searchParams.get("brandName") || tenant.brandName || locationId;
+
+    if ((url.searchParams.get("format") || "html") === "json") {
+      return json({ locationId, from: fromLabel, to: toLabel, recipientName, ...pl });
+    }
+    return html(managerPlHtml({ brandName, fromLabel, toLabel, pl }));
+  } catch (err) {
+    return json({ error: err.message || "Unknown error" }, err.status && err.status >= 400 && err.status < 600 ? err.status : 502);
+  }
+}
+
+const money = (n, cur) => `${cur} ${n < 0 ? "-" : ""}${Math.abs(n).toFixed(2)}`;
+
+function managerPlHtml({ brandName, fromLabel, toLabel, pl }) {
+  const cur = pl.currency;
+  const rows = pl.byCategory.map((c) =>
+    `<tr><td>${escapeHtml(c.label)}</td><td class="n">${c.count}</td><td class="n">${money(c.total, cur)}</td></tr>`).join("");
+
+  // Anything left out of the total is shown as loudly as the total itself. A
+  // P&L that quietly omits costs is worse than no P&L.
+  const warn = [];
+  if (pl.mixedIncomeCurrency) {
+    const seen = pl.incomeByCurrency.map((c) => `${c.currency} ${c.total.toFixed(2)}`).join(", ");
+    warn.push(`<p class="warn"><strong>The ledger holds more than one currency for this manager.</strong>
+      Income is not totalled, because adding them would give a number that cannot be right: ${escapeHtml(seen)}.</p>`);
+  }
+  const unconverted = pl.excluded.filter((e) => e.issues.includes("unconverted_currency"));
+  const unapproved = pl.excluded.filter((e) => e.issues.includes("not_approved"));
+  const noAmount = pl.excluded.filter((e) => e.issues.includes("no_amount"));
+  if (unconverted.length) {
+    warn.push(`<p class="warn"><strong>${unconverted.length} expense(s) are in another currency with no converted amount</strong>
+      and are left out of the total. Converting them by guesswork would be a wrong number that looks right.</p>`);
+  }
+  if (unapproved.length) {
+    warn.push(`<p class="warn"><strong>${unapproved.length} expense(s) still say &ldquo;Needs Review&rdquo;</strong>
+      and are not in the total yet.</p>`);
+  }
+  if (noAmount.length) {
+    warn.push(`<p class="warn"><strong>${noAmount.length} expense(s) have no amount</strong> and cannot be counted.</p>`);
+  }
+  if (pl.undated.length) {
+    warn.push(`<p class="warn"><strong>${pl.undated.length} expense(s) have no Paid On date</strong>, so they fall
+      into no period at all and will appear on no statement until one is set.</p>`);
+  }
+
+  const netClass = pl.net < 0 ? "neg" : "pos";
+  const dash = pl.mixedIncomeCurrency ? "&mdash;" : null;
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>${escapeHtml(brandName)} &mdash; Manager P&amp;L</title><style>
+    :root{--ink:#111;--muted:#666;--line:#e5e5e5;--pos:#0a7d55;--neg:#b3261e;--warnbg:#fff8e1;--warnline:#e6c860}
+    body{font:15px/1.55 -apple-system,Segoe UI,Roboto,sans-serif;color:var(--ink);margin:0;padding:24px;max-width:760px}
+    h1{font-size:20px;margin:0 0 4px}h2{font-size:15px;margin:28px 0 8px}
+    .period{color:var(--muted);margin:0 0 20px}
+    table{width:100%;border-collapse:collapse;margin:0 0 8px}
+    th,td{text-align:left;padding:8px 6px;border-bottom:1px solid var(--line)}
+    th{font-weight:600;color:var(--muted);font-size:13px}
+    .n{text-align:right;font-variant-numeric:tabular-nums}
+    .tot td{font-weight:600;border-top:2px solid var(--ink);border-bottom:none}
+    .pos{color:var(--pos)}.neg{color:var(--neg)}
+    .warn{background:var(--warnbg);border-left:3px solid var(--warnline);padding:10px 12px;margin:8px 0}
+    .note{color:var(--muted);font-size:13px}
+    </style></head><body>
+    <h1>${escapeHtml(brandName)} &mdash; Manager P&amp;L</h1>
+    <p class="period">${escapeHtml(fromLabel)} to ${escapeHtml(toLabel)}</p>
+    ${warn.join("")}
+    <table>
+      <tr><td>Income from bookings</td><td class="n">${dash || money(pl.income, cur)}</td></tr>
+      <tr><td>Expenses</td><td class="n">${money(-pl.expenses, cur)}</td></tr>
+      <tr class="tot"><td>Net</td><td class="n ${netClass}">${dash || money(pl.net, cur)}</td></tr>
+    </table>
+    <p class="note">Expenses count only the share the manager cannot recover (amount less Can Reimburse).
+      ${money(pl.reimbursableOutstanding, cur)} is recoverable from owners and is not treated as a cost here.</p>
+    <h2>Expenses by category</h2>
+    ${rows
+      ? `<table><tr><th>Category</th><th class="n">Count</th><th class="n">Amount</th></tr>${rows}</table>`
+      : `<p class="note">No approved expenses in this period.</p>`}
+    </body></html>`;
 }
 
 // --- reconciliation ---------------------------------------------------------
