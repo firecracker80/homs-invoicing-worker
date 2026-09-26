@@ -14,7 +14,7 @@ import { createOrder, getAccessToken } from "./paypal.js";
 import { createCheckoutSession } from "./stripe.js";
 import { writeAndSyncRows } from "./ledger.js";
 import { updateObjectRecord } from "./ghl.js";
-import { adminAuthorized, notifyGHL, cancellationTier } from "./cancellation.js";
+import { adminAuthorized, notifyAndRecord, cancellationTier } from "./cancellation.js";
 import { paymentConfirmedPayload } from "./payment.js";
 import { updateGhlBookingDates } from "./ghl-calendar.js";
 
@@ -193,7 +193,7 @@ export async function handleReschedule(request, env) {
 
     const calendar0 = await updateGhlBookingDates(env, tenant, snapshot, newCheckIn, newCheckOut);
 
-    await notifyGHL(tenant.ghlRescheduleUrl, {
+    await notifyAndRecord(env, snapshot, tenant.ghlRescheduleUrl, {
       event: "booking_rescheduled",
       bookingId: snapshot.bookingId,
       contactId: snapshot.ghlContactId || "",
@@ -498,7 +498,7 @@ export async function handleReschedule(request, env) {
 
   const calendar = await updateGhlBookingDates(env, tenant, snapshot, newCheckIn, newCheckOut);
 
-  await notifyGHL(tenant.ghlRescheduleUrl, {
+  await notifyAndRecord(env, snapshot, tenant.ghlRescheduleUrl, {
     event: "booking_rescheduled",
     bookingId: snapshot.bookingId,
     contactId: snapshot.ghlContactId || "",
@@ -590,7 +590,7 @@ export async function settleRescheduleAdjustment(env, tenant, snapshot, capture)
   }
 
   // Reuse the EXISTING "Payment Confirmed" workflow -- no new GHL build needed.
-  await notifyGHL(tenant.ghlPaymentConfirmedUrl, paymentConfirmedPayload({
+  await notifyAndRecord(env, snapshot, tenant.ghlPaymentConfirmedUrl, paymentConfirmedPayload({
     bookingId: snapshot.bookingId,
     contactId: snapshot.ghlContactId,
     amountPaid: capture.gross,

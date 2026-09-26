@@ -41,7 +41,7 @@ function adminAuthorized(request, env, tenant) {
   return expected && given === expected;
 }
 
-export { adminAuthorized, notifyGHL };
+export { adminAuthorized };
 
 // Marks a ledger row whose refund has to be issued by hand -- a GHL-invoice
 // booking has no gateway capture to refund against. Greppable on purpose: this
@@ -231,11 +231,71 @@ function resolveTransactionId(snapshot) {
   return snapshot.ghl?.transactionId || null;
 }
 
-async function notifyGHL(url, payload) {
-  if (!url) return;
+// Telling GHL something happened, and being able to prove afterwards whether it
+// heard.
+//
+// The old version had two holes, and between them they cost most of a day on
+// 2026-09-26. It returned nothing, so a caller could not react. It swallowed a
+// missing URL entirely (`if (!url) return`), so a tenant with a blank
+// wghl_*_url got no notification and left no trace of one being skipped -- and
+// those four values are filled in by hand per account and unreadable by any
+// API, so blanks are the normal failure. And `fetch` only rejects on a network
+// error: GHL answering 404 "no such webhook" resolves perfectly happily, so a
+// rejected POST was recorded as delivered.
+//
+// Every outcome is now returned AND written to the snapshot, so "GHL was told"
+// and "GHL was never told" are different states you can read, rather than the
+// same silence. A cancellation that never reached GHL is a guest who never got
+// their confirmation -- that must not be invisible.
+export async function notifyGHL(url, payload, event = "notify") {
+  const at = new Date().toISOString();
+  if (!url) return { event, at, ok: false, reason: "no_url_configured" };
   try {
-    await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
-  } catch (err) { console.error("GHL notify failed:", err.message); }
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    // A non-2xx is a real failure. fetch does not throw for it.
+    if (!res.ok) {
+      console.error(`GHL notify ${event} -> ${res.status} for ${url}`);
+      return { event, at, ok: false, status: res.status, reason: "rejected" };
+    }
+    return { event, at, ok: true, status: res.status };
+  } catch (err) {
+    console.error(`GHL notify ${event} failed:`, err.message);
+    return { event, at, ok: false, reason: "fetch_failed", error: err.message };
+  }
+}
+
+// Appends an outcome to the booking and persists it. Capped, because a booking
+// that is rescheduled repeatedly should not grow without limit.
+//
+// This can never be the reason a request fails: the notification has already
+// been attempted by the time it runs, and losing the RECORD of it is much less
+// bad than throwing away the caller's own result.
+const NOTIFY_HISTORY_MAX = 20;
+
+export async function recordNotification(env, snapshot, outcome) {
+  if (!snapshot || !outcome) return outcome;
+  try {
+    const history = Array.isArray(snapshot.notifications) ? snapshot.notifications : [];
+    history.push(outcome);
+    snapshot.notifications = history.slice(-NOTIFY_HISTORY_MAX);
+    // Greppable: the list of things GHL was supposed to hear and did not.
+    if (!outcome.ok) snapshot.notifyFailed = true;
+    await env.BOOKINGS.put(snapshot.bookingId, JSON.stringify(snapshot));
+  } catch (err) {
+    console.error(`Could not record notification for ${snapshot?.bookingId}:`, err.message);
+  }
+  return outcome;
+}
+
+// Notify and record in one step, which is what every caller actually wants.
+export async function notifyAndRecord(env, snapshot, url, payload, event) {
+  // Every payload already names its own event, so the label comes for free and
+  // cannot disagree with what was actually sent.
+  return recordNotification(env, snapshot, await notifyGHL(url, payload, event || payload?.event || "notify"));
 }
 
 // =============================================================== /cancel ====
@@ -277,7 +337,7 @@ export async function handleCancel(request, env) {
     await env.BOOKINGS.put(snapshot.bookingId, JSON.stringify(snapshot));
     // No Transaction record exists yet for an unpaid booking, and no money
     // moved -- nothing to write to D1 or GHL here.
-    await notifyGHL(tenant.ghlCancellationUrl, {
+    await notifyAndRecord(env, snapshot, tenant.ghlCancellationUrl, {
       event: "booking_cancelled", bookingId: snapshot.bookingId,
       contactId: snapshot.ghlContactId || "",
       email: snapshot.guest?.email || "", paid: false,
@@ -427,7 +487,7 @@ export async function handleCancel(request, env) {
     await env.BOOKINGS.put(snapshot.bookingId, JSON.stringify(snapshot));
   }
 
-  await notifyGHL(tenant.ghlCancellationUrl, {
+  await notifyAndRecord(env, snapshot, tenant.ghlCancellationUrl, {
     event: "booking_cancelled", bookingId: snapshot.bookingId,
     contactId: snapshot.ghlContactId || "",
     email: snapshot.guest?.email || "", paid: true,
@@ -511,7 +571,7 @@ export async function handleDepositRefund(request, env) {
     console.error(`Deposit refund ledger sync failed for ${snapshot.bookingId}:`, err.message);
   }
 
-  await notifyGHL(tenant.ghlDepositRefundUrl, {
+  await notifyAndRecord(env, snapshot, tenant.ghlDepositRefundUrl, {
     event: "deposit_refunded", bookingId: snapshot.bookingId,
     contactId: snapshot.ghlContactId || "",
     email: snapshot.guest?.email || "",
