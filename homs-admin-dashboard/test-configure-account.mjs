@@ -402,6 +402,30 @@ const intakeFor = (overrides = {}) => ({
   console.log("15) Apply builds the tenant record too, and says plainly when it could not");
 }
 
+// ---- 16. statement tokens are minted, never left for someone to remember --
+// Without them a client cannot open their own owner statement at all: the
+// statement is iframed from a GHL custom menu link, and that link can only
+// carry a report token -- the admin secret must never be there, because it
+// also gates /cancel.
+{
+  const owner = BLUEPRINT.find((e) => e.slug === "wowner_report_token");
+  const manager = BLUEPRINT.find((e) => e.slug === "wmanager_report_token");
+  assert.ok(owner && manager, "both statement tokens are in the blueprint");
+
+  for (const e of [owner, manager]) {
+    assert.strictEqual(e.policy, "generated",
+      e.slug + " must be minted, not supplied -- a token nobody sets is a statement nobody can open");
+    assert.strictEqual(e.sensitive, true, e.slug + " must be redacted from every response and log");
+  }
+  assert.notStrictEqual(owner.slug, manager.slug);
+
+  // Separate per recipient: an owner link must not open the manager numbers.
+  const adminSecret = BLUEPRINT.find((e) => e.slug === "wadmin_secret");
+  assert.notStrictEqual(owner.slug, adminSecret.slug,
+    "a statement token is never the admin secret -- that one can cancel bookings");
+  console.log("16) Owner and manager statement tokens are minted per account, separately, and marked sensitive");
+}
+
 // A GHL stand-in: custom values, object records, and the writes both make.
 function mockGhl(calls, { brand = "", failCustomValueWrite = false } = {}) {
   return async (url, init = {}) => {

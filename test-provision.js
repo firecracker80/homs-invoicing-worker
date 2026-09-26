@@ -156,5 +156,27 @@ console.log("10) GHL rejects the PIT/location -> that status code propagates, no
   console.log("11) invoiceSenderUserId is carried into the tenant, and its absence is reported as a broken invoice flow");
 }
 
+// ---- 12. statement tokens reach the tenant record ----------------------
+// The blueprint mints them into custom values; this is the other half -- they
+// have to arrive in KV, because statementAuthorized reads them from there.
+{
+  const cvs = [
+    { name: "WOwner Report Token", fieldKey: "{{ custom_values.wowner_report_token }}", value: "otok-123" },
+    { name: "WManager Report Token", fieldKey: "{{ custom_values.wmanager_report_token }}", value: "mtok-456" },
+    { name: "WBrand Name", fieldKey: "{{ custom_values.wbrand_name }}", value: "Casa Bonita" },
+  ];
+  const envT = { ...env1, TENANTS: { get: async () => null, put: async () => {} } };
+  globalThis.fetch = async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ customValues: cvs }) });
+
+  const out = await (await call(envT, "GET", "locationId=L9&ghlPit=pit9")).json();
+  assert.strictEqual(out.wouldWrite.ownerReportToken, "otok-123");
+  assert.strictEqual(out.wouldWrite.managerReportToken, "mtok-456");
+  assert.notStrictEqual(out.wouldWrite.ownerReportToken, out.wouldWrite.managerReportToken,
+    "one token per recipient -- an owner link must not open the manager numbers");
+  assert.notStrictEqual(out.wouldWrite.ownerReportToken, out.wouldWrite.adminSecret,
+    "and never the admin secret, which also gates /cancel");
+  console.log("12) Owner and manager statement tokens are carried into the tenant record, separately");
+}
+
 
 console.log("\nPASS — provision.js maps GHL's real fieldKey format, never copies the PayPal secret, never writes on GET, guards against clobbering, merges cleanly under &force=true.");

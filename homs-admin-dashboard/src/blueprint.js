@@ -59,6 +59,20 @@ export const BLUEPRINT = [
   { slug: "wlocation_id", name: "WLocation ID", policy: "derived", label: "Location ID" },
   { slug: "wadmin_secret", name: "WAdmin Secret", policy: "generated", label: "Admin secret", sensitive: true },
   { slug: "wwebhook_secret", name: "WWebhook Secret", policy: "generated", label: "Webhook secret", sensitive: true },
+  // Per-recipient tokens for the owner and manager statements. They belong in
+  // custom values for the same reason wadmin_secret does: the statement is
+  // opened from a GHL custom menu link, and that link has to carry the token.
+  //
+  // Deliberately NOT adminSecret, which also gates /cancel and /reschedule. A
+  // statement URL sits in an iframe src, browser history and possibly a
+  // referrer header -- leaking a report token exposes one recipient view;
+  // leaking adminSecret would let anyone cancel a booking.
+  //
+  // Separate per recipient so an owner link cannot be used to read the
+  // manager numbers, or the reverse. Without these, a client cannot open their
+  // own statement at all -- DEMO-HOMS had neither, found 2026-09-26.
+  { slug: "wowner_report_token", name: "WOwner Report Token", policy: "generated", label: "Owner statement token", sensitive: true },
+  { slug: "wmanager_report_token", name: "WManager Report Token", policy: "generated", label: "Manager statement token", sensitive: true },
 
   // --- Group D: NEVER WRITTEN. See policy note above. ---
   { slug: "wghl_payment_confirmation_url", name: "WGHL Payment Confirmation URL", policy: "manual", label: "Payment confirmation webhook" },
