@@ -8,6 +8,7 @@ import assert from "node:assert";
 
 const {
   settingsFrom, planProperties, blockersFor, checklistFor,
+  DEPLOYMENT_STEPS,
   planConfiguration, applyConfiguration, SETTINGS_SOURCES,
 } = await import("./src/configure-account.js");
 const { BLUEPRINT } = await import("./src/blueprint.js");
@@ -277,6 +278,35 @@ const intakeFor = (overrides = {}) => ({
   assert.strictEqual(second.status, 409, "a configured intake will not apply again");
   assert.ok((await second.json()).blockers.some((b) => b.code === "intake_not_ready"));
   console.log("11) Routes gated by PROVISION_KEY, client accounts only, and an intake applies exactly once");
+}
+
+// ---- 12. per-account deployment work is stated, never remembered ----------
+// A snapshot carries workflows, not users. Cleaning tasks assign dynamically so
+// the notification follows the assignee, which means it travels -- but only
+// once the crew exist as users in that account.
+{
+  assert.ok(DEPLOYMENT_STEPS.length, "there is always per-account work no API can do");
+  assert.ok(DEPLOYMENT_STEPS.every((d) => d.key && d.step && d.why),
+    "every step says what to do and why it cannot be automated");
+
+  const keys = DEPLOYMENT_STEPS.map((d) => d.key);
+  assert.ok(keys.includes("cleaning_crew_users"), "the crew have to be created as users");
+  assert.ok(keys.includes("confirm_notification_lands"),
+    "and somebody has to confirm a notification actually arrives -- no API can audit that");
+
+  const calls = [];
+  globalThis.fetch = mockGhl(calls, { brand: "" });
+
+  // On the PLAN, so they are visible before committing rather than only after.
+  const plan = await planConfiguration("pit", CLIENT, intakeFor(), { brandName: "Casa Bonita" });
+  assert.deepStrictEqual(plan.deploymentSteps, DEPLOYMENT_STEPS);
+
+  const out = await applyConfiguration("pit", CLIENT, intakeFor(), { brandName: "Casa Bonita" });
+  assert.deepStrictEqual(out.deploymentSteps, DEPLOYMENT_STEPS);
+  for (const d of DEPLOYMENT_STEPS) {
+    assert.ok(out.manualStepsRemaining.includes(d.step), d.key + " must appear in what is left to do");
+  }
+  console.log("12) Per-account deployment work appears on both the plan and the result");
 }
 
 // A GHL stand-in: custom values, object records, and the writes both make.

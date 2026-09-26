@@ -125,6 +125,30 @@ export function planProperties(rows, existingNames) {
   return { toCreate, skipped };
 }
 
+// ------------------------------------------------------ deployment steps ----
+//
+// Work every new client account needs that no API can do, and that a snapshot
+// does not carry. Stated on every plan and every apply rather than remembered,
+// because each of these has a symptom of silence: nothing errors, something
+// just never happens, and the first person to notice is the client.
+//
+// Three settings in three days were configured once and then quietly did not
+// travel -- the absent guest_request_notes field, the stale
+// wcancellation_policy, and a notification address buried in a workflow action.
+// This list is the standing answer to that pattern.
+export const DEPLOYMENT_STEPS = [
+  {
+    key: "cleaning_crew_users",
+    step: "Create the cleaning crew as users in this sub-account, and have them install the GHL mobile app.",
+    why: "Cleaning tasks assign dynamically, so the notification follows the assignee and needs no per-account editing -- but the users have to exist first. A snapshot carries workflows, never users.",
+  },
+  {
+    key: "confirm_notification_lands",
+    step: "Send one real cleaning submission and confirm the notification reaches the person this account holder named.",
+    why: "Workflow action config is unreadable by every API, so a recipient cannot be audited programmatically. A notification that does not arrive raises nothing.",
+  },
+];
+
 // ------------------------------------------------------------- refusals ----
 
 // The checklist parsePortfolio already produced, narrowed to the listings this
@@ -216,6 +240,7 @@ export async function planConfiguration(pit, locationId, intake, { brandName = n
       skipped: properties.skipped,
     },
     calendars: checklistFor(intake?.portfolio, properties.toCreate),
+    deploymentSteps: DEPLOYMENT_STEPS,
     plannedAt: new Date().toISOString(),
   };
 }
@@ -256,7 +281,9 @@ export async function applyConfiguration(pit, locationId, intake, opts = {}) {
         ? [`Create ${checklist.length} rental calendar${checklist.length === 1 ? "" : "s"} by hand -- no API can do it.`] : []),
       ...settingsResult.needsAttention.map((slug) => `Fill ${slug} by hand (webhook or form URL).`),
       ...settings.missing.map((m) => `${m.label} has no source yet (${m.note}).`),
+      ...DEPLOYMENT_STEPS.map((d) => d.step),
     ],
+    deploymentSteps: DEPLOYMENT_STEPS,
     appliedAt: new Date().toISOString(),
   };
 }
