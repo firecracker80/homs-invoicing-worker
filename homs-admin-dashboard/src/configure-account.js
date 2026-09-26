@@ -155,6 +155,11 @@ export function planProperties(rows, existingNames) {
 // This list is the standing answer to that pattern.
 export const DEPLOYMENT_STEPS = [
   {
+    key: "register_in_dashboard",
+    step: "Register the sub-account in the dashboard registry: a DASHBOARD_TENANTS entry keyed by locationId holding { label, ghlPitSecretName }, plus that named PIT as a Worker secret.",
+    why: "Every dashboard route resolves its PIT through that entry, so an unregistered account is unreachable -- configuration, provisioning and statements all stop at the same lookup. Nothing creates the entry as a side effect of anything else. Luminara ran live for weeks without one, found 2026-09-26, and the only symptom was a 404 naming a locationId that plainly exists.",
+  },
+  {
     key: "cleaning_crew_users",
     step: "Create the cleaning crew as users in this sub-account, and have them install the GHL mobile app.",
     why: "Cleaning tasks assign dynamically, so the notification follows the assignee and needs no per-account editing -- but the users have to exist first. A snapshot carries workflows, never users.",

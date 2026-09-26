@@ -74,7 +74,19 @@ async function resolveTenantPit(env, locationId) {
   }
   const tenant = await getTenant(env, locationId);
   if (!tenant) {
-    return { error: Response.json({ error: `Unknown locationId: ${locationId}` }, { status: 404 }) };
+    // "Unknown" reads as "that account does not exist", which sends you looking
+    // in GHL, where it plainly does. What is missing is the registry entry --
+    // and nothing creates one as a side effect of anything else, so the fix is
+    // worth stating rather than knowing.
+    return {
+      error: Response.json(
+        {
+          error: `No dashboard registry entry for locationId ${locationId}`,
+          fix: "Add a DASHBOARD_TENANTS entry keyed by this locationId holding { label, ghlPitSecretName }, and set that named PIT as a Worker secret. The account existing in GHL is not enough -- every route here resolves its PIT through that entry.",
+        },
+        { status: 404 }
+      ),
+    };
   }
   const pit = resolvePit(env, tenant);
   if (!pit) {

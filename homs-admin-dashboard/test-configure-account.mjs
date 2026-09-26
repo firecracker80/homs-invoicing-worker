@@ -290,6 +290,20 @@ const intakeFor = (overrides = {}) => ({
     "every step says what to do and why it cannot be automated");
 
   const keys = DEPLOYMENT_STEPS.map((d) => d.key);
+  // Luminara ran live for weeks with no registry entry. The only symptom was a
+  // 404 naming a locationId that plainly exists in GHL, so the account looked
+  // configured from every angle except the one that mattered.
+  assert.ok(keys.includes("register_in_dashboard"),
+    "the account has to be registered in DASHBOARD_TENANTS, or no dashboard route can reach it");
+  assert.deepStrictEqual(keys[0], "register_in_dashboard",
+    "and it comes first -- every other step assumes the account is already reachable");
+  const registerStep = DEPLOYMENT_STEPS.find((d) => d.key === "register_in_dashboard");
+  // Both halves, checked separately: "ghlPitSecretName" contains the word
+  // "secret", so a loose match on that alone passes even when the instruction
+  // to actually SET the secret has been dropped.
+  assert.ok(/ghlPitSecretName/.test(registerStep.step), "the entry names the secret it points at");
+  assert.ok(/Worker secret/i.test(registerStep.step),
+    "and the step says to set that secret -- an entry pointing at a secret nobody set fails at the next call, not this one");
   assert.ok(keys.includes("cleaning_crew_users"), "the crew have to be created as users");
   assert.ok(keys.includes("confirm_notification_lands"),
     "and somebody has to confirm a notification actually arrives -- no API can audit that");
