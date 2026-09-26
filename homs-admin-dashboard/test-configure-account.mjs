@@ -309,6 +309,48 @@ const intakeFor = (overrides = {}) => ({
   console.log("12) Per-account deployment work appears on both the plan and the result");
 }
 
+// ---- 13. the survey is a real source now ----------------------------------
+{
+  const quiz = {
+    others: {
+      organization: "Casa Bonita",
+      dCYsnLlIfJqTXDwSvu32: "Property Manager",
+      ot999AAZnO2FYCrOJ5du: "Carlos Mendoza",
+      wHSnykvGLEgHYaEVWviH: "Spanish",
+      "21jhueq2p7pNB9n06Y56": "80",
+      bQlvozqUaDDo2DfGrP9m: "Airbnb",
+    },
+  };
+  const withQuiz = { ...intakeFor(), quiz, quizContact: { firstName: "Rosa", lastName: "Jimenez" } };
+
+  const s = settingsFrom(withQuiz, { brandName: "Casa Bonita" });
+  assert.strictEqual(s.input.wlocale, "es-ES");
+  assert.strictEqual(s.input.wowner_revenue_split, "80%");
+  assert.strictEqual(s.input.wproperty_owner, "Carlos Mendoza");
+  assert.strictEqual(s.input.wmanager, "Rosa Jimenez");
+  // The workbook still owns what the workbook carries.
+  assert.strictEqual(s.input.wcurrency, "USD");
+  assert.ok(s.filled.some((f) => f.from === "quiz"), "and the source is recorded");
+  // A calendar answer must never become a setting.
+  assert.ok(!Object.values(s.input).includes("Airbnb"));
+  // Five fewer things reported missing than before the quiz existed.
+  const missingSlugs = s.missing.map((m) => m.slug);
+  assert.ok(!missingSlugs.includes("wlocale"));
+  assert.ok(!missingSlugs.includes("wowner_revenue_split"));
+
+  // A brand the client did not agree to blocks the whole run.
+  const mismatch = settingsFrom(withQuiz, { brandName: "Luminara" });
+  assert.ok(mismatch.disagreements.some((d) => d.slug === "wbrand_name"));
+
+  const calls = [];
+  globalThis.fetch = mockGhl(calls, { brand: "" });
+  const plan = await planConfiguration("pit", CLIENT, withQuiz, { brandName: "Luminara" });
+  assert.ok(plan.blockers.some((b) => b.code === "brand_disagreement"),
+    "configuring a client under a name they did not give is refused");
+  assert.strictEqual(writesIn(calls).length, 0);
+  console.log("13) Survey answers fill locale, split, owner and manager; a brand mismatch blocks");
+}
+
 // A GHL stand-in: custom values, object records, and the writes both make.
 function mockGhl(calls, { brand = "", failCustomValueWrite = false } = {}) {
   return async (url, init = {}) => {
