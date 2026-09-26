@@ -194,5 +194,70 @@ const CONTACT = { firstName: "Yari", lastName: "Velazquez" };
   assert.deepStrictEqual(overlap, [], "a field is a setting or a calendar answer, never both");
   console.log("10) No field targets two settings, and none is both a setting and a calendar answer");
 }
+// ---- 11. the second real submission: a self-managing owner ---------------
+// Verbatim from submission 6ab7f633dda16ec7f4d38cf0, 2026-09-26. It broke the
+// first version of this map: "Owner - Self Manage" read as plain "owner", so
+// it looked for a counterparty the survey correctly never asked for and left
+// the manager blank. One person is both sides here.
+const SELF_MANAGE = {
+  id: "6ab7f633dda16ec7f4d38cf0",
+  contactId: "zGGIiZhwBNWnrVJPNFwi",
+  surveyId: "4d3ykgx6DqasTydvt5zn",
+  others: {
+    organization: "Test Co",
+    dCYsnLlIfJqTXDwSvu32: "Owner - Self Manage",
+    phone: "+12295632945",
+    email: "yari@yvelazquez.com",
+    coJl5jBvIcf9qOrsE2OW: ["Stripe", "Manual/Transfer"],
+    AMDFCDpHhblNGnAiHnx1: "Yes",
+    h0UAbnJJPj6l8V4tIT33: "Yes",
+    "8NRzmmlRanL7h7PDPzR6": "yari@dt-cs.com",
+    X9UzaCzBdegJH6Os01is: "Yes, I have access",
+    website: "https://dt-cs.com",
+    ZtCaZ0VGjObwvPWAdi3W: "ghl",
+    cQYdrTqFa0ekByWHTUWI: "squarespace",
+    ZzxUsjxxOuZQWjByk26R: "2295632945",
+    E7w0ab96j8ovFWWJUpNO: "Date selector ONLY",
+    kga7cOUMVnxNPJhAeSAR: "1",
+    ijTLyUAIN8Z8iUPGDE1J: "120",
+    bQlvozqUaDDo2DfGrP9m: "Airbnb",
+    formId: "4d3ykgx6DqasTydvt5zn",
+    location_id: "dytwzgmOP5v0Jh7gop4y",
+    contact_id: "c31576bc-07e0-4789-aec4-92711d07a5df",
+    submissionId: "cfb01a7c-e4eb-4924-aef3-cd56be95d76c",
+  },
+};
+{
+  const out = settingsFromQuiz(SELF_MANAGE, { firstName: "Yari", lastName: "Velazquez" });
+  assert.strictEqual(out.accountHolderRole, "self");
+  assert.strictEqual(out.input.wproperty_owner, "Yari Velazquez");
+  assert.strictEqual(out.input.wmanager, "Yari Velazquez",
+    "a self-managing owner is the manager too -- this is what the first version got wrong");
+  assert.strictEqual(out.input.wbrand_name, "Test Co");
+
+  // No language and no split were asked, and neither absence is a problem.
+  assert.strictEqual(out.input.wlocale, undefined);
+  assert.strictEqual(out.input.wowner_revenue_split, undefined);
+  assert.deepStrictEqual(out.problems, [],
+    "a question the branch never asked is not a problem to report");
+
+  // The business-details branch is classified, not reported as unknown.
+  assert.deepStrictEqual(out.unmapped, [], "the tax-ID branch fields are known");
+  assert.strictEqual(out.context["Tax ID on file"], "Yes");
+  assert.strictEqual(out.context["Website platform"], "ghl");
+  console.log("11) The self-managing owner submission maps both sides to one person");
+}
+
+// ---- 12. one extra letter must not change who gets paid -----------------
+{
+  assert.strictEqual(roleFrom("Owner - Self Manage"), "self");
+  assert.strictEqual(roleFrom("Owner - Self Manager"), "self", "still self, not manager");
+  assert.strictEqual(roleFrom("owner-selfmanage"), "self");
+  assert.strictEqual(roleFrom("Property Manager"), "manager");
+  assert.strictEqual(roleFrom("Property Owner"), "owner");
+  assert.strictEqual(roleFrom("Co-host"), null);
+  console.log("12) Self-manage is recognised before manager, so a near-miss wording cannot invert the split");
+}
+
 
 console.log("\nPASS — quiz map: real submission maps, the revenue-split conditional cannot silently invert, and unknown ids are reported.");

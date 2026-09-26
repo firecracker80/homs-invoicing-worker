@@ -56,12 +56,19 @@ export const CALENDAR_FIELDS = {
   bQlvozqUaDDo2DfGrP9m: "Calendar platform",
   MZKVDgjJbSAQujTeUlRv: "Calendar export link (.ics)",
   UHV9X55PYOMYFBBJghk9: "Calendar setting",
-  AMDFCDpHhblNGnAiHnx1: "Calendar setting",
 };
 
 // Answers captured for context but with no account setting of their own.
 export const CONTEXT_FIELDS = {
   coJl5jBvIcf9qOrsE2OW: "Payment methods accepted",
+  // Only present when the business-details branch opens (second submission).
+  AMDFCDpHhblNGnAiHnx1: "Registered business",
+  h0UAbnJJPj6l8V4tIT33: "Tax ID on file",
+  bpNePKduq1FQw0765wHC: "Tax ID document",
+  "8NRzmmlRanL7h7PDPzR6": "Business email",
+  website: "Website",
+  ZtCaZ0VGjObwvPWAdi3W: "Website platform",
+  cQYdrTqFa0ekByWHTUWI: "Booking site platform",
   X9UzaCzBdegJH6Os01is: "Website",
   ZzxUsjxxOuZQWjByk26R: "WhatsApp number",
   "1XZhh7q5tlrlV36UgsCd": "WhatsApp same as phone",
@@ -72,7 +79,7 @@ export const CONTEXT_FIELDS = {
 // GHL adds its own bookkeeping to every submission. Not answers, and reporting
 // them as unmapped would bury the ids that actually matter.
 const PLUMBING = new Set([
-  "formId", "location_id", "eventData", "sessionFingerprint", "Timezone",
+  "formId", "location_id", "contact_id", "eventData", "sessionFingerprint", "Timezone",
   "fieldsOriSequance", "submissionId", "signatureHash", "ip", "name",
 ]);
 
@@ -93,8 +100,18 @@ export function splitFrom(answer) {
   return `${n}%`;
 }
 
+// Three roles, not two. The second test submission answered "Owner - Self
+// Manage", which the first version of this read as plain "owner": it then went
+// looking for a counterparty the conditional logic had correctly never asked
+// for, and left the manager blank. A self-managing owner is both sides.
+//
+// The order here is not interchangeable. "Owner - Self Manage" contains
+// "owner", and a near-miss wording like "Owner - Self Manager" would also
+// contain "manager", so self-manage has to be recognised first -- otherwise one
+// extra letter silently changes who gets paid.
 export function roleFrom(answer) {
   const s = String(answer ?? "").trim().toLowerCase();
+  if (/self[\s-]*manage/.test(s)) return "self";
   if (s.includes("manager")) return "manager";
   if (s.includes("owner")) return "owner";
   return null;
@@ -162,6 +179,11 @@ export function settingsFromQuiz(submission, contact = null) {
       answer: text(answers.dCYsnLlIfJqTXDwSvu32),
       reason: "account holder role not recognised, so neither name is written -- assigning them the wrong way round swaps the revenue split",
     });
+  } else if (role === "self") {
+    // One person on both sides, so the survey asks for no counterparty and
+    // collects no revenue split -- there is nothing being split.
+    take("wproperty_owner", holder, "contact");
+    take("wmanager", holder, "contact");
   } else if (role === "manager") {
     take("wproperty_owner", counterparty, "quiz");
     take("wmanager", holder, "contact");
