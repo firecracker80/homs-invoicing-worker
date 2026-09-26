@@ -78,6 +78,9 @@ function composeBooking(payload, tenantProfile) {
     propertyCode: payload.propertyCode || null,
     // Set only when the guard rejected a propertyCode for being the guest name.
     ...(payload.propertyCodeRejected ? { propertyCodeRejected: payload.propertyCodeRejected } : {}),
+    // Set only when a merge tag arrived unresolved, naming the fields. Absent
+    // otherwise: a key present on every booking stops being a signal.
+    ...(payload.unresolvedMergeTags?.length ? { unresolvedMergeTags: payload.unresolvedMergeTags } : {}),
     ghlBookingId: payload.ghlBookingId || null,
     ghlContactId: payload.ghlContactId || null,
     bookingSource: payload.bookingSource || "Direct",
