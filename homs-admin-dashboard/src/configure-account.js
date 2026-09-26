@@ -27,6 +27,7 @@ import { provision } from "./provision.js";
 import { BLUEPRINT } from "./blueprint.js";
 import { importProperties, loadExistingPropertyNames, listingNameKey } from "./portfolio-import.js";
 import { fetchCustomValues } from "./ghl.js";
+import { settingsFromQuiz } from "./quiz-map.js";
 
 const blank = (v) => v === null || v === undefined || String(v).trim() === "";
 
@@ -61,10 +62,19 @@ export function settingsFrom(intake, { brandName = null, extra = {} } = {}) {
   const account = intake?.portfolio?.accountSettings || {};
   const input = {};
   const filled = [];
+  const disagreements = [];
 
+  // Two sources giving different answers for the same setting is a question for
+  // a person, not something to resolve by write order. The first source wins so
+  // the run can continue, and the disagreement is reported.
   const take = (slug, value, from) => {
     if (blank(value)) return;
-    input[slug] = String(value);
+    const next = String(value);
+    if (slug in input) {
+      if (input[slug] !== next) disagreements.push({ slug, kept: input[slug], alsoSaid: next, from });
+      return;
+    }
+    input[slug] = next;
     filled.push({ slug, from });
   };
 
@@ -74,6 +84,13 @@ export function settingsFrom(intake, { brandName = null, extra = {} } = {}) {
   // Worker parses either, but storing the sentence keeps the account readable
   // without a lookup table.
   take("wcancellation_policy", account.cancellationPolicy, "workbook");
+
+  // The survey the client filled in. Its own problems (an unrecognised role, an
+  // unusable revenue split) travel with the plan rather than being swallowed --
+  // an account holder role nobody anticipated would otherwise silently leave
+  // both owner and manager blank.
+  const quiz = intake?.quiz ? settingsFromQuiz(intake.quiz, intake.quizContact || null) : null;
+  if (quiz) for (const [slug, value] of Object.entries(quiz.input)) take(slug, value, "quiz");
 
   // Anything the caller supplies by hand wins, and is recorded as hand-entered.
   for (const [slug, value] of Object.entries(extra)) {
@@ -97,7 +114,7 @@ export function settingsFrom(intake, { brandName = null, extra = {} } = {}) {
     return entry && entry.policy !== "input";
   });
 
-  return { input, filled, missing, refused };
+  return { input, filled, missing, refused, disagreements, quiz };
 }
 
 // ----------------------------------------------------- properties mapping --
@@ -218,8 +235,19 @@ export async function planConfiguration(pit, locationId, intake, { brandName = n
   const selected = rows || (intake?.portfolio?.rows || []).filter((r) => r.include && !r.blocked);
   const { existingNames, accountBrand } = await readAccount(pit, locationId);
 
-  const blockers = blockersFor(intake, { brandName, accountBrand, rows: selected });
   const settings = settingsFrom(intake, { brandName, extra });
+  const blockers = blockersFor(intake, { brandName, accountBrand, rows: selected });
+
+  // The operator named one client and the client named another. That is not a
+  // field to reconcile -- somebody is configuring the wrong account, which is
+  // the same mistake as a brand mismatch against the account itself.
+  for (const d of settings.disagreements) {
+    if (d.slug !== "wbrand_name") continue;
+    blockers.push({
+      code: "brand_disagreement",
+      detail: `You asked to configure "${d.kept}", but the client answered "${d.alsoSaid}" on the survey. Refusing until they agree.`,
+    });
+  }
   const properties = planProperties(selected, existingNames);
 
   // A dry run uses the same code path a real run does, so the preview cannot
