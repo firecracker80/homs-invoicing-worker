@@ -472,7 +472,7 @@ export async function handleCancel(request, env) {
       const transactionId = resolveTransactionId(snapshot);
       if (transactionId) {
         const pit = resolveSecret(tenant, env, "ghlPitSecretName", "ghlPit");
-        if (pit) await updateObjectRecord(pit, "custom_objects.transactions", transactionId, { payment_status: "refunded" });
+        if (pit) await updateObjectRecord(pit, snapshot.locationId, "custom_objects.transactions", transactionId, { payment_status: "refunded" });
       }
       if (!result.d1.ok || !result.ghl.ok) {
         snapshot.cancellationSyncFailed = true;
@@ -564,7 +564,7 @@ export async function handleDepositRefund(request, env) {
       const transactionId = resolveTransactionId(snapshot);
       if (transactionId && status === "refunded") {
         const pit = resolveSecret(tenant, env, "ghlPitSecretName", "ghlPit");
-        if (pit) await updateObjectRecord(pit, "custom_objects.transactions", transactionId, { payment_status: "refunded" });
+        if (pit) await updateObjectRecord(pit, snapshot.locationId, "custom_objects.transactions", transactionId, { payment_status: "refunded" });
       }
     }
   } catch (err) {
