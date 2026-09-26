@@ -63,6 +63,12 @@ function slugOf(cv) {
   return (m ? m[1] : raw).trim().toLowerCase();
 }
 
+// An empty Custom Value is not a value. GHL renders "never filled in" and
+// "deliberately cleared" identically, so the only safe reading of a blank is
+// that this account has nothing to say about the field -- and a field with
+// nothing to say must not overwrite one that is already right.
+const isBlankValue = (v) => v === undefined || v === null || String(v).trim() === "";
+
 // "85" or "85%" -> 0.85. Already-a-fraction ("0.85") passes through unchanged.
 function pctToFraction(raw) {
   const n = Number(String(raw).replace("%", "").trim());
@@ -77,7 +83,13 @@ const FIELD_MAP = {
   // wcleaning_fee is no longer mapped: cleaning is a GHL-native Additional Fee.
   wcurrency: { tenantField: "currency" },
   // Rent kept on a cancellation, e.g. "24h 50%, 5d 20%, check-in 100%". Blank = full refund.
-  wcancellation_policy: { tenantField: "cancellationPolicy", transform: parseCancellationPolicy },
+  //
+  // The one field where blank carries meaning, so it is exempt from the guard
+  // below: an empty policy parses to no tiers and checkedInChargePct 0, which
+  // is a real instruction -- refund everything, always. Skipping it would keep
+  // whatever restrictive policy KV happened to hold and charge guests under a
+  // policy the account has explicitly cleared.
+  wcancellation_policy: { tenantField: "cancellationPolicy", transform: parseCancellationPolicy, blankIsMeaningful: true },
   wghl_cancelation_url: { tenantField: "ghlCancellationUrl" },
   wghl_deposit_url: { tenantField: "ghlDepositRefundUrl" },
   wghl_payment_confirmation_url: { tenantField: "ghlPaymentConfirmedUrl" },
@@ -132,6 +144,7 @@ function buildTenantFromCustomValues(customValues, ghlPit, paypalSecretName) {
   const unmapped = [];
   const skippedSensitive = [];
   const policyProblems = [];
+  const blank = [];
 
   for (const cv of customValues) {
     const key = slugOf(cv);
@@ -139,6 +152,16 @@ function buildTenantFromCustomValues(customValues, ghlPit, paypalSecretName) {
     if (SKIPPED_SENSITIVE.has(key)) { skippedSensitive.push(key); continue; }
     const rule = FIELD_MAP[key];
     if (!rule) { unmapped.push({ fieldKey: cv.fieldKey, name: cv.name, value: cv.value }); continue; }
+    // Left unset rather than written blank, so the merge below keeps whatever
+    // the existing KV entry holds. Found on Luminara 2026-09-26: WProperty
+    // Owner and WManager are both empty there, and a force run would have
+    // written "" over "Yajahira Velazquez" and "Maguisthel Fabian" -- stripping
+    // the names off every owner and manager statement the account produces,
+    // with a clean 200 and nothing in the response to say it had happened.
+    if (isBlankValue(cv.value) && !rule.blankIsMeaningful) {
+      blank.push({ fieldKey: cv.fieldKey, name: cv.name, tenantField: rule.tenantField });
+      continue;
+    }
     const value = rule.transform ? rule.transform(cv.value) : cv.value;
     if (value?.unparsed) {
       for (const part of value.unparsed) policyProblems.push(`${cv.name || key}: could not read "${part}"`);
@@ -152,7 +175,7 @@ function buildTenantFromCustomValues(customValues, ghlPit, paypalSecretName) {
   // since guessing a payment processor wrong would misroute live payments.
   if (tenant.paypalClientId && tenant.paypalSecretName) tenant.gateway = "paypal";
 
-  return { tenant, mapped, unmapped, skippedSensitive, policyProblems };
+  return { tenant, mapped, unmapped, skippedSensitive, policyProblems, blank };
 }
 
 export async function handleProvisionTenant(request, env) {
@@ -184,7 +207,7 @@ export async function handleProvisionTenant(request, env) {
     return json({ error: err.message }, err.status || 502);
   }
 
-  const { tenant: provisioned, mapped, unmapped, skippedSensitive, policyProblems } = buildTenantFromCustomValues(customValues, ghlPit, paypalSecretName);
+  const { tenant: provisioned, mapped, unmapped, skippedSensitive, policyProblems, blank } = buildTenantFromCustomValues(customValues, ghlPit, paypalSecretName);
   if (invoiceSenderUserId) provisioned.invoiceSenderUserId = invoiceSenderUserId;
 
   // Names a secret that isn't set on this Worker -> payments would fail at
@@ -198,6 +221,18 @@ export async function handleProvisionTenant(request, env) {
   }
   const existing = await env.TENANTS.get(locationId, { type: "json" });
   const isWrite = request.method === "POST";
+
+  // A blank that shadows a populated KV field is the case worth saying out loud:
+  // GHL and the Worker now disagree about that field, and provisioning is the
+  // only moment anything is in a position to notice.
+  for (const b of blank) {
+    if (existing && !isBlankValue(existing[b.tenantField])) {
+      warnings.push(
+        `${b.name || b.fieldKey} is empty in GHL, so ${b.tenantField} keeps the value already in KV rather than being cleared. ` +
+        `GHL and the Worker disagree on this field -- fill it in GHL, or accept that KV is the source for it.`
+      );
+    }
+  }
 
   // Stated as a warning rather than a failure: an account with everything else
   // right is still worth provisioning. But it cannot send an invoice to a real
@@ -220,9 +255,9 @@ export async function handleProvisionTenant(request, env) {
   const finalTenant = existing ? { ...existing, ...provisioned } : provisioned;
 
   if (!isWrite) {
-    return json({ dryRun: true, locationId, wouldWrite: finalTenant, mappedFromCustomValues: mapped, unmappedCustomValues: unmapped, skippedSensitive, warnings, tenantAlreadyExists: Boolean(existing) });
+    return json({ dryRun: true, locationId, wouldWrite: finalTenant, mappedFromCustomValues: mapped, unmappedCustomValues: unmapped, blankCustomValues: blank, skippedSensitive, warnings, tenantAlreadyExists: Boolean(existing) });
   }
 
   await env.TENANTS.put(locationId, JSON.stringify(finalTenant));
-  return json({ dryRun: false, locationId, written: finalTenant, mappedFromCustomValues: mapped, unmappedCustomValues: unmapped, skippedSensitive, warnings, mergedWithExisting: Boolean(existing) });
+  return json({ dryRun: false, locationId, written: finalTenant, mappedFromCustomValues: mapped, unmappedCustomValues: unmapped, blankCustomValues: blank, skippedSensitive, warnings, mergedWithExisting: Boolean(existing) });
 }
