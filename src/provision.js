@@ -94,7 +94,11 @@ const FIELD_MAP = {
   wowner_paypal_email: { tenantField: "ownerPaypalEmail" },
   wmgr_paypal_email: { tenantField: "managerPaypalEmail" },
   wproperty_owner: { tenantField: "ownerName" },
-  wwebhook_secret: { tenantField: "webhookSecret" }
+  wwebhook_secret: { tenantField: "webhookSecret" },
+  // Per-recipient statement tokens. Scoped to one recipient each on purpose:
+  // an owner link must not open the manager numbers.
+  wowner_report_token: { tenantField: "ownerReportToken" },
+  wmanager_report_token: { tenantField: "managerReportToken" }
   // wlocation_id is the KV key itself, not a JSON field -- deliberately
   // not mapped. wpaypal_secret_key is deliberately not mapped either -- see
   // SKIPPED_SENSITIVE and the header comment.
