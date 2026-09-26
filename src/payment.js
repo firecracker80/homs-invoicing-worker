@@ -11,6 +11,7 @@
 import { getAccessToken } from "./paypal.js";
 import { settleRescheduleAdjustment } from "./reschedule.js";
 import { writeLedgerEntries } from "./ledger.js";
+import { notifyAndRecord } from "./cancellation.js";
 import { fetchInvoice, listContactInvoices, bookingIdOf, normStatus, findInvoiceTransactionId } from "./ghl-invoice.js";
 
 const round2 = n => Math.round(n * 100) / 100;
@@ -253,24 +254,16 @@ async function settle(env, tenant, snapshot, captures, { notify = true } = {}) {
   // Skipped when GHL itself told us about the payment (an invoice paid in
   // GHL): the workflow that called us is already the confirmation, and
   // posting back to its own inbound-webhook trigger would run it twice.
-  if (notify && tenant.ghlPaymentConfirmedUrl) {
-    try {
-      await fetch(tenant.ghlPaymentConfirmedUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(paymentConfirmedPayload({
-          bookingId: snapshot.bookingId,
-          contactId: snapshot.ghlContactId,
-          amountPaid: totalPaid,
-          depositTotal: dep?.gross || 0,
-          checkIn: snapshot.stay.checkIn,
-          checkOut: snapshot.stay.checkOut,
-          propertyName: snapshot.propertyCode || tenant.brandName,
-        }))
-      });
-    } catch (err) {
-      console.error(`GHL payment-confirmed notify failed for ${snapshot.bookingId}:`, err.message);
-    }
+  if (notify) {
+    await notifyAndRecord(env, snapshot, tenant.ghlPaymentConfirmedUrl, paymentConfirmedPayload({
+      bookingId: snapshot.bookingId,
+      contactId: snapshot.ghlContactId,
+      amountPaid: totalPaid,
+      depositTotal: dep?.gross || 0,
+      checkIn: snapshot.stay.checkIn,
+      checkOut: snapshot.stay.checkOut,
+      propertyName: snapshot.propertyCode || tenant.brandName,
+    }));
   }
 
   return { settled: true, totalPaid, ledgerOk, ghlOk };
