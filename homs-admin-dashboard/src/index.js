@@ -546,6 +546,10 @@ async function handleConfigure(request, env, { apply }) {
 
   const opts = {
     brandName: body.brandName ?? null,
+    // Ride along with the PIT handoff: send-invoice needs a userId and a rental
+    // booking has no user in context for {{user.id}} to resolve.
+    invoiceSenderUserId: body.invoiceSenderUserId ?? null,
+    paypalSecretName: body.paypalSecretName ?? null,
     extra: body.extra && typeof body.extra === "object" ? body.extra : {},
     overwrite: Boolean(body.overwrite),
     rows: Array.isArray(body.rows) ? body.rows : null,
@@ -553,7 +557,7 @@ async function handleConfigure(request, env, { apply }) {
 
   try {
     if (!apply) return Response.json(await planConfiguration(pit, body.locationId, intake, opts));
-    const result = await applyConfiguration(pit, body.locationId, intake, opts);
+    const result = await applyConfiguration(pit, body.locationId, intake, opts, env);
     // The intake is spent once it has been applied, so a second apply cannot
     // quietly run again against another account.
     await saveIntake(env.DASHBOARD_TENANTS, body.contactId, {

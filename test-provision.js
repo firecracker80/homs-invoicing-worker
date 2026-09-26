@@ -87,7 +87,7 @@ assert.ok(!JSON.stringify(dry).includes("secret_xyz"), "the secret value must no
 assert.deepEqual(dry.skippedSensitive, ["wpaypal_secret_key"]);
 assert.equal(dry.wouldWrite.paypalSecretName, "PAYPAL_SECRET_LUM");
 assert.equal(dry.wouldWrite.gateway, "paypal", "client ID + paypalSecretName -> gateway inferred");
-assert.deepEqual(dry.warnings, [], "named secret exists on this env -> no warning");
+assert.ok(!dry.warnings.some((w) => /paypalSecretName/.test(w)), "named secret exists on this env -> no PayPal warning");
 console.log("4) PayPal secret skipped and not echoed; paypalSecretName carried through; gateway inferred");
 
 // ---- 5. No paypalSecretName, or one that isn't set -> no gateway guess, explicit warning ----
@@ -136,5 +136,25 @@ console.log("9) &force=true merges: hand-set fields and the legacy inline secret
 const ghlErr = await call({ ADMIN_SECRET: "admin123", TENANTS: makeKv() }, "GET", "locationId=bad-pit-location&ghlPit=badpit");
 assert.equal(ghlErr.status, 403);
 console.log("10) GHL rejects the PIT/location -> that status code propagates, not a generic 500");
+// ---- 11. invoiceSenderUserId: carried, and its absence is loud -----------
+// send-invoice requires a userId. A rental booking has no user in context, so
+// {{user.id}} resolves to nothing every time -- three live bookings went out
+// unpriced on 2026-09-26 before this was understood. It cannot be derived here
+// (/users/search requires an agency companyId a location PIT does not carry),
+// so it rides along with the PIT and its absence is reported.
+{
+  const without = await (await call(env1, "GET", "locationId=L1&ghlPit=pit1&paypalSecretName=PAYPAL_SECRET_LUM")).json();
+  assert.strictEqual(without.wouldWrite.invoiceSenderUserId, undefined);
+  const warned = without.warnings.find((w) => /invoiceSenderUserId/.test(w));
+  assert.ok(warned, "an account with no invoice sender is warned about");
+  assert.match(warned, /every guest invoice will fail to send/,
+    "and the warning says what actually breaks, not just that a field is unset");
+
+  const withIt = await (await call(env1, "GET", "locationId=L1&ghlPit=pit1&invoiceSenderUserId=xHewhoAYlTTDYWcaH6RQ")).json();
+  assert.strictEqual(withIt.wouldWrite.invoiceSenderUserId, "xHewhoAYlTTDYWcaH6RQ");
+  assert.ok(!withIt.warnings.some((w) => /invoiceSenderUserId/.test(w)), "supplied -> no warning");
+  console.log("11) invoiceSenderUserId is carried into the tenant, and its absence is reported as a broken invoice flow");
+}
+
 
 console.log("\nPASS — provision.js maps GHL's real fieldKey format, never copies the PayPal secret, never writes on GET, guards against clobbering, merges cleanly under &force=true.");

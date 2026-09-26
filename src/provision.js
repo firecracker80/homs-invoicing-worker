@@ -159,6 +159,16 @@ export async function handleProvisionTenant(request, env) {
   const ghlPit = url.searchParams.get("ghlPit");
   const force = url.searchParams.get("force") === "true";
   const paypalSecretName = url.searchParams.get("paypalSecretName") || null;
+  // send-invoice requires a userId. A Rental Booking trigger has no user in
+  // context so the {{user.id}} merge tag resolves to nothing every time, and
+  // without a fallback the Worker cannot send an invoice for a real guest at
+  // all -- it threw on the first line and three live bookings went out unpriced
+  // on 2026-09-26.
+  //
+  // It is not derivable here: /users/search requires an agency companyId, which
+  // a location-scoped PIT does not carry. So it rides along with the PIT, which
+  // is already handed over exactly once, and its absence is reported loudly.
+  const invoiceSenderUserId = url.searchParams.get("invoiceSenderUserId") || null;
   if (!locationId) return json({ error: "locationId is required" }, 400);
   if (!ghlPit) return json({ error: "ghlPit is required -- can't fetch GHL's custom values without it, and it can't come from a custom value itself (see provision.js's header comment)" }, 400);
   if (!env.TENANTS) return json({ error: "TENANTS KV binding missing" }, 500);
@@ -171,6 +181,7 @@ export async function handleProvisionTenant(request, env) {
   }
 
   const { tenant: provisioned, mapped, unmapped, skippedSensitive, policyProblems } = buildTenantFromCustomValues(customValues, ghlPit, paypalSecretName);
+  if (invoiceSenderUserId) provisioned.invoiceSenderUserId = invoiceSenderUserId;
 
   // Names a secret that isn't set on this Worker -> payments would fail at
   // auth time. Surface it now rather than at the first guest checkout.
@@ -183,6 +194,17 @@ export async function handleProvisionTenant(request, env) {
   }
   const existing = await env.TENANTS.get(locationId, { type: "json" });
   const isWrite = request.method === "POST";
+
+  // Stated as a warning rather than a failure: an account with everything else
+  // right is still worth provisioning. But it cannot send an invoice to a real
+  // guest until this is set, and nothing else in the system will say so.
+  if (!invoiceSenderUserId && !existing?.invoiceSenderUserId) {
+    warnings.push(
+      "No invoiceSenderUserId. send-invoice requires a userId, and a rental booking has no user in context " +
+      "for {{user.id}} to resolve -- so every guest invoice will fail to send until this is set. " +
+      "Pass &invoiceSenderUserId=<a GHL user id in this location>."
+    );
+  }
 
   if (isWrite && existing && !force) {
     return json({
