@@ -241,7 +241,14 @@ async function settle(env, tenant, snapshot, captures, { notify = true } = {}) {
       console.error(`GHL ledger sync failed for ${snapshot.bookingId}: ${ledger.ghl.reason} ${ledger.ghl.error || ""}`);
       ghlOk = false;
     } else {
-      snapshot.ghl = { transactionId: ledger.ghl.transactionId, paymentIds: ledger.ghl.paymentIds };
+      snapshot.ghl = {
+        transactionId: ledger.ghl.transactionId,
+        paymentIds: ledger.ghl.paymentIds,
+        // Records the Transaction could not be joined to. A Transaction has no
+        // property name of its own, so an unlinked one reads as a booking with
+        // a blank property and nothing else to go on. Kept only when non-empty.
+        ...(ledger.ghl.unlinked?.length ? { unlinked: ledger.ghl.unlinked } : {}),
+      };
       await env.BOOKINGS.put(snapshot.bookingId, JSON.stringify(snapshot));
     }
   } catch (err) {
