@@ -9,8 +9,8 @@
 import assert from "node:assert";
 
 const {
-  settingsFromQuiz, localeFrom, splitFrom, roleFrom,
-  QUIZ_FIELDS, CALENDAR_FIELDS,
+  settingsFromQuiz, localeFrom, splitPercent, roleFrom, BRANCHES,
+  CALENDAR_FIELDS, CONTEXT_FIELDS,
 } = await import("./src/quiz-map.js");
 
 // Rogelio's submission, verbatim. Trimmed only of signatureHash and eventData,
@@ -77,11 +77,9 @@ const CONTACT = { firstName: "Yari", lastName: "Velazquez" };
   assert.strictEqual(asManager.input.wproperty_owner, "Rogelio Santana", "the counterparty is the owner");
   assert.strictEqual(asManager.input.wmanager, "Yari Velazquez", "and the holder is the manager, from the contact");
 
-  const asOwner = settingsFromQuiz(
-    { ...REAL, others: { ...REAL.others, dCYsnLlIfJqTXDwSvu32: "Property Owner" } }, CONTACT);
-  assert.strictEqual(asOwner.accountHolderRole, "owner");
-  assert.strictEqual(asOwner.input.wmanager, "Rogelio Santana", "an owner names the manager");
-  assert.strictEqual(asOwner.input.wproperty_owner, "Yari Velazquez");
+  // The owner branch is exercised against its own real submission below (13);
+  // the manager submission cannot simply be relabelled, because each role reads
+  // an entirely different set of field ids.
   console.log("2) Conditional logic assigns owner and manager by the holder's role, both directions");
 }
 
@@ -100,14 +98,14 @@ const CONTACT = { firstName: "Yari", lastName: "Velazquez" };
 
 // ---- 4. the revenue split refuses anything unusable ---------------------
 {
-  assert.strictEqual(splitFrom("80"), "80%");
-  assert.strictEqual(splitFrom("80%"), "80%");
-  assert.strictEqual(splitFrom("85.5"), "85.5%");
-  assert.strictEqual(splitFrom(""), null);
-  assert.strictEqual(splitFrom("most of it"), null, "prose is not a split");
-  assert.strictEqual(splitFrom("0"), null, "0 is a typo, not an intent");
-  assert.strictEqual(splitFrom("100"), null, "so is 100");
-  assert.strictEqual(splitFrom("800"), null, "and a stray zero must not become 800%");
+  assert.strictEqual(splitPercent("80"), 80);
+  assert.strictEqual(splitPercent("80%"), 80);
+  assert.strictEqual(splitPercent("85.5"), 85.5);
+  assert.strictEqual(splitPercent(""), null);
+  assert.strictEqual(splitPercent("most of it"), null, "prose is not a split");
+  assert.strictEqual(splitPercent("0"), null, "0 is a typo, not an intent");
+  assert.strictEqual(splitPercent("100"), null, "so is 100");
+  assert.strictEqual(splitPercent("800"), null, "and a stray zero must not become 800%");
 
   const out = settingsFromQuiz(
     { ...REAL, others: { ...REAL.others, "21jhueq2p7pNB9n06Y56": "800" } }, CONTACT);
@@ -186,13 +184,25 @@ const CONTACT = { firstName: "Yari", lastName: "Velazquez" };
   console.log("9) With no contact record the holder's name is left unset rather than guessed");
 }
 
-// ---- 10. the map itself is coherent ----------------------------------
+// ---- 10. the two branches are genuinely separate ----------------------
 {
-  const slugs = Object.values(QUIZ_FIELDS).map((f) => f.slug).filter(Boolean);
-  assert.deepStrictEqual([...new Set(slugs)], slugs, "no two quiz fields target the same setting");
-  const overlap = Object.keys(QUIZ_FIELDS).filter((k) => CALENDAR_FIELDS[k]);
-  assert.deepStrictEqual(overlap, [], "a field is a setting or a calendar answer, never both");
-  console.log("10) No field targets two settings, and none is both a setting and a calendar answer");
+  const ids = (b) => [b.counterpartyName, b.counterpartyEmail, b.counterpartyPhone, b.language, b.split].filter(Boolean);
+  const m = ids(BRANCHES.manager);
+  const o = ids(BRANCHES.owner);
+  assert.deepStrictEqual(m.filter((id) => o.includes(id)), [],
+    "the branches share no field id -- an answer belongs to exactly one of them");
+
+  // The polarity difference is the whole reason this is modelled as branches.
+  assert.strictEqual(BRANCHES.manager.splitIsOwnerShare, true);
+  assert.strictEqual(BRANCHES.owner.splitIsOwnerShare, false,
+    "the owner branch reports the manager cut and must be inverted");
+  assert.notStrictEqual(BRANCHES.manager.counterpartySlug, BRANCHES.owner.counterpartySlug);
+
+  for (const id of [...m, ...o]) {
+    assert.ok(!CALENDAR_FIELDS[id], id + " cannot be both a branch answer and a calendar answer");
+    assert.ok(!CONTEXT_FIELDS[id], id + " cannot be both a branch answer and context");
+  }
+  console.log("10) The two branches share no field ids and record opposite split polarity");
 }
 // ---- 11. the second real submission: a self-managing owner ---------------
 // Verbatim from submission 6ab7f633dda16ec7f4d38cf0, 2026-09-26. It broke the
@@ -237,7 +247,8 @@ const SELF_MANAGE = {
 
   // No language and no split were asked, and neither absence is a problem.
   assert.strictEqual(out.input.wlocale, undefined);
-  assert.strictEqual(out.input.wowner_revenue_split, undefined);
+  assert.strictEqual(out.input.wowner_revenue_split, "100%",
+    "nothing is being split when one person is both sides");
   assert.deepStrictEqual(out.problems, [],
     "a question the branch never asked is not a problem to report");
 
@@ -250,13 +261,82 @@ const SELF_MANAGE = {
 
 // ---- 12. one extra letter must not change who gets paid -----------------
 {
-  assert.strictEqual(roleFrom("Owner - Self Manage"), "self");
-  assert.strictEqual(roleFrom("Owner - Self Manager"), "self", "still self, not manager");
-  assert.strictEqual(roleFrom("owner-selfmanage"), "self");
+  // All three real answers contain a manager word, so substring matching on
+  // "manager" cannot tell them apart -- what the answer STARTS with can.
   assert.strictEqual(roleFrom("Property Manager"), "manager");
-  assert.strictEqual(roleFrom("Property Owner"), "owner");
+  assert.strictEqual(roleFrom("Owner - Self Manage"), "self");
+  assert.strictEqual(roleFrom("Owner - Have Manager"), "owner",
+    "the word manager appears here but the holder is the owner");
+  assert.strictEqual(roleFrom("Owner - Self Manager"), "self", "a near-miss wording is still self");
+  assert.strictEqual(roleFrom("owner-selfmanage"), "self");
+  // Wordings the survey does not currently use return null, which is the safe
+  // failure: neither name is written and the run reports why. Renaming an option
+  // in the survey therefore stops provisioning rather than mis-assigning it.
+  assert.strictEqual(roleFrom("Property Owner"), null, "not a real option today");
   assert.strictEqual(roleFrom("Co-host"), null);
-  console.log("12) Self-manage is recognised before manager, so a near-miss wording cannot invert the split");
+  console.log("12) All three roles are told apart even though every answer contains a manager word");
+}
+
+// ---- 13. the third real submission: an owner who has a manager ----------
+// Verbatim from 6ab7fc39dda16ec7f4d392f4. This is the branch that would have
+// been silently wrong: it uses a completely different set of field ids from the
+// manager branch, and it reports the MANAGER cut where the other reports the
+// OWNER share. Read with the manager branch polarity, this owner would have
+// been provisioned on 15% of their own rental income.
+const OWNER_WITH_MANAGER = {
+  id: "6ab7fc39dda16ec7f4d392f4",
+  contactId: "zGGIiZhwBNWnrVJPNFwi",
+  surveyId: "4d3ykgx6DqasTydvt5zn",
+  others: {
+    organization: "Test Co 2",
+    dCYsnLlIfJqTXDwSvu32: "Owner - Have Manager",
+    phone: "+18293679664",
+    email: "yari@yvelazquez.com",
+    DiUUoVQXYB2ICp5gyMDS: "Yari Test",
+    TP9vSWRPZcln5jidXqXs: "2295632945",
+    CRdAIfdRI5VNcmqClQlm: "Same above",
+    LWpi09sPbE2c5CJKfUmk: "15",
+    nGAANCuy0Gy7JHhgM7Ix: "English",
+    dHYU1FXsj3a5uNxyfYC2: ["User"],
+    coJl5jBvIcf9qOrsE2OW: ["Stripe"],
+    AMDFCDpHhblNGnAiHnx1: "No",
+    X9UzaCzBdegJH6Os01is: "I do not have a website",
+    ZzxUsjxxOuZQWjByk26R: "8293679364",
+    E7w0ab96j8ovFWWJUpNO: "Date selector ONLY",
+    bQlvozqUaDDo2DfGrP9m: "Airbnb",
+    formId: "4d3ykgx6DqasTydvt5zn",
+    location_id: "dytwzgmOP5v0Jh7gop4y",
+    contact_id: "c31576bc-07e0-4789-aec4-92711d07a5df",
+    submissionId: "95bcd771-13ae-4f3f-90b7-0379897a927e",
+  },
+};
+{
+  const out = settingsFromQuiz(OWNER_WITH_MANAGER, { firstName: "Yari", lastName: "Velazquez" });
+  assert.strictEqual(out.accountHolderRole, "owner");
+  assert.strictEqual(out.input.wmanager, "Yari Test", "an owner names their manager");
+  assert.strictEqual(out.input.wproperty_owner, "Yari Velazquez", "and is themselves the owner");
+  assert.strictEqual(out.input.wbrand_name, "Test Co 2");
+
+  // The inversion. 15 is what the manager charges, so the owner keeps 85.
+  assert.strictEqual(out.input.wowner_revenue_split, "85%",
+    "the owner branch reports the manager cut -- storing 15% here would be the bug");
+
+  // Language comes from this branch's own field, not the manager branch's.
+  assert.strictEqual(out.input.wlocale, "en-US");
+
+  assert.deepStrictEqual(out.problems, []);
+  assert.deepStrictEqual(out.unmapped, [], "every id in this branch is known");
+  console.log("13) The owner-with-manager branch maps, and its split is inverted to the owner share");
+}
+
+// ---- 14. the same number means opposite things on the two branches ------
+{
+  const managerSide = settingsFromQuiz(
+    { ...REAL, others: { ...REAL.others, "21jhueq2p7pNB9n06Y56": "15" } }, CONTACT);
+  const ownerSide = settingsFromQuiz(OWNER_WITH_MANAGER, { firstName: "Y", lastName: "V" });
+  assert.strictEqual(managerSide.input.wowner_revenue_split, "15%", "manager branch: 15 is the owner share");
+  assert.strictEqual(ownerSide.input.wowner_revenue_split, "85%", "owner branch: 15 is the manager cut");
+  console.log("14) An identical answer of 15 yields 15% on one branch and 85% on the other");
 }
 
 
