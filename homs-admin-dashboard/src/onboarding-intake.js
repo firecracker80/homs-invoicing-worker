@@ -198,6 +198,52 @@ export function crossCheck(quiz, portfolio) {
 
 export const intakeKey = (contactId) => `onboarding:${contactId}`;
 
+// The quiz is submitted FIRST, the workbook comes back days later (Yari,
+// 2026-09-26). So the workbook must MERGE into whatever is already on record,
+// never replace it -- an earlier version rebuilt the record from scratch on
+// every workbook arrival, which silently discarded the quiz answers and with
+// them the brand name, locale, revenue split and both party names.
+//
+// Explicit field list rather than a blind spread: a merge that keeps unknown
+// keys forever accumulates the debris of every past shape, and one that
+// overwrites with undefined is the bug this exists to prevent.
+const PRESERVED = ["quiz", "quizContact", "quizAt", "quizSubmissionId"];
+
+export function mergeIntake(existing, patch) {
+  const base = existing && typeof existing === "object" ? existing : {};
+  const merged = { ...base, ...patch };
+  for (const key of PRESERVED) {
+    // A patch may legitimately update these; it may never blank them by omission.
+    if (patch[key] === undefined && base[key] !== undefined) merged[key] = base[key];
+  }
+  return merged;
+}
+
+// Survey submissions are fetched from GHL rather than posted in by a workflow.
+// A Custom Webhook would need every answer mapped by hand into its body, and a
+// mapping that silently resolves to nothing is the single most common failure
+// in this system -- it has cost days this week alone. Reading the submission
+// back makes GHL the source of truth and removes the mapping entirely.
+export async function fetchLatestSubmission(pit, surveyId, contactId, { limit = 50 } = {}) {
+  const params = new URLSearchParams({ surveyId, limit: String(limit) });
+  const res = await fetch(`${BASE}/surveys/submissions?${params}`, {
+    headers: { Authorization: `Bearer ${pit}`, Version: VERSION, Accept: "application/json" },
+  });
+  const text = await res.text();
+  let json;
+  try { json = text ? JSON.parse(text) : {}; } catch { json = {}; }
+  if (!res.ok) {
+    const err = new Error(json.message || `Could not read survey submissions (${res.status})`);
+    err.status = res.status;
+    throw err;
+  }
+  const mine = (json.submissions || []).filter((sub) => sub.contactId === contactId);
+  if (!mine.length) return null;
+  // Newest wins: a client who fills the survey twice meant the second one.
+  mine.sort((a, b) => Date.parse(b.createdAt ?? 0) - Date.parse(a.createdAt ?? 0));
+  return mine[0];
+}
+
 export async function saveIntake(kv, contactId, record) {
   await kv.put(intakeKey(contactId), JSON.stringify(record));
   return record;

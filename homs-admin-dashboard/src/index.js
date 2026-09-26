@@ -16,7 +16,8 @@ import { handleVendorData } from "./vendor.js";
 import { mapCsvRows, loadExistingExpenses, importRows } from "./expenses-import.js";
 import { extractFromFile, rowsFromExtraction, estimateCost, resolveModel, MODELS, MAX_FILE_BYTES } from "./receipt-extract.js";
 import { parsePortfolio, loadExistingPropertyNames, importProperties } from "./portfolio-import.js";
-import { listContactEmails, findWorkbookReply, downloadWorkbook, crossCheck, saveIntake, loadIntake } from "./onboarding-intake.js";
+import { listContactEmails, findWorkbookReply, downloadWorkbook, crossCheck, saveIntake, loadIntake, mergeIntake, fetchLatestSubmission } from "./onboarding-intake.js";
+import { getContact } from "./ghl.js";
 import { planConfiguration, applyConfiguration } from "./configure-account.js";
 import { handleServiceEstimate, handleServiceInvoice, handleServiceSync, handleServiceAccepted, handleServiceDeclined, handleServicePaid, readClientCurrencySettings } from "./services.js";
 
@@ -364,6 +365,8 @@ async function handleOnboardingIntake(request, env) {
   const { pit, error } = await resolveTenantPit(env, body.locationId);
   if (error) return error;
 
+  const existing = await loadIntake(env.DASHBOARD_TENANTS, contactId);
+
   try {
     const messages = await listContactEmails(pit, contactId);
     const reply = findWorkbookReply(messages);
@@ -373,8 +376,8 @@ async function handleOnboardingIntake(request, env) {
         contactId, locationId: body.locationId, status: "waiting",
         reason: reply.reason, checkedAt: new Date().toISOString(),
       };
-      await saveIntake(env.DASHBOARD_TENANTS, contactId, record);
-      return Response.json(record, { status: 202 });
+      await saveIntake(env.DASHBOARD_TENANTS, contactId, mergeIntake(existing, record));
+      return Response.json(mergeIntake(existing, record), { status: 202 });
     }
 
     const buffer = await downloadWorkbook(reply.found.url, pit);
@@ -387,18 +390,21 @@ async function handleOnboardingIntake(request, env) {
         reply: reply.found, error: portfolio.error, sheets: portfolio.sheets || [],
         checkedAt: new Date().toISOString(),
       };
-      await saveIntake(env.DASHBOARD_TENANTS, contactId, record);
-      return Response.json(record, { status: 422 });
+      await saveIntake(env.DASHBOARD_TENANTS, contactId, mergeIntake(existing, record));
+      return Response.json(mergeIntake(existing, record), { status: 422 });
     }
 
-    const quiz = body.quiz && typeof body.quiz === "object" ? body.quiz : null;
+    // The quiz arrives FIRST and is already on the record. A body.quiz is still
+    // honoured so a caller can supply one, but it never has to.
+    const quiz = (body.quiz && typeof body.quiz === "object" ? body.quiz : null) || existing?.quiz || null;
     const record = {
       contactId, locationId: body.locationId, status: "ready_for_review",
       reply: reply.found, superseded: reply.superseded,
       quiz, crossCheck: crossCheck(quiz, portfolio),
       portfolio, checkedAt: new Date().toISOString(),
     };
-    await saveIntake(env.DASHBOARD_TENANTS, contactId, record);
+    const saved = mergeIntake(existing, record);
+    await saveIntake(env.DASHBOARD_TENANTS, contactId, saved);
 
     // The full portfolio is large and already stored; the webhook caller only
     // needs to know it landed and whether a human has to look.
@@ -406,6 +412,91 @@ async function handleOnboardingIntake(request, env) {
       contactId, status: record.status, reply: reply.found,
       summary: portfolio.summary, conflicts: record.crossCheck.conflicts,
       supersededCount: reply.superseded.length,
+    });
+  } catch (err) {
+    return Response.json(
+      { error: err.message || "Unknown error" },
+      { status: err.status && err.status >= 400 && err.status < 600 ? err.status : 502 }
+    );
+  }
+}
+
+// Called by a GHL workflow when the onboarding survey is submitted. This is the
+// FIRST step of onboarding -- the workbook comes back days later and merges
+// into whatever this leaves behind.
+//
+// It takes only contactId and reads the submission back from GHL itself. The
+// alternative, mapping twenty answers into a Custom Webhook body by hand, is
+// the exact failure mode that has cost days here: a merge tag that silently
+// resolves to nothing looks identical to a field the client left blank.
+async function handleOnboardingQuiz(request, env) {
+  const denied = await requireProvision(request, env);
+  if (denied) return denied;
+
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return Response.json({ error: "Invalid JSON body" }, { status: 400 });
+  }
+
+  const contactId = body.contactId;
+  if (!contactId) return Response.json({ error: "contactId is required" }, { status: 400 });
+
+  const surveyId = body.surveyId || env.ONBOARDING_SURVEY_ID;
+  if (!surveyId) {
+    return Response.json(
+      { error: "surveyId is required (pass it, or set ONBOARDING_SURVEY_ID)" },
+      { status: 400 }
+    );
+  }
+
+  // locationId is the account the SURVEY lives in (HOMS), not the client's
+  // sub-account -- which does not exist yet at this point in onboarding.
+  const { pit, error } = await resolveTenantPit(env, body.locationId);
+  if (error) return error;
+
+  try {
+    const submission = await fetchLatestSubmission(pit, surveyId, contactId);
+    if (!submission) {
+      return Response.json(
+        { error: `No submission on survey ${surveyId} for contact ${contactId}` },
+        { status: 404 }
+      );
+    }
+
+    // The account holder's own name is not in the survey -- it only asks about
+    // the other party -- so it comes off the contact. Failing to read it is not
+    // fatal: the quiz map leaves the holder's name unset and says so, which is
+    // better than losing the whole submission over a contact fetch.
+    let quizContact = null;
+    try {
+      quizContact = await getContact(pit, contactId);
+    } catch (err) {
+      console.error(`Could not read contact ${contactId} for the quiz:`, err.message);
+    }
+
+    const existing = await loadIntake(env.DASHBOARD_TENANTS, contactId);
+    const record = mergeIntake(existing, {
+      contactId,
+      locationId: body.locationId,
+      status: existing?.portfolio ? existing.status : "awaiting_workbook",
+      quiz: submission,
+      quizContact: quizContact ? { firstName: quizContact.firstName, lastName: quizContact.lastName, name: quizContact.name } : null,
+      quizAt: new Date().toISOString(),
+      quizSubmissionId: submission.id ?? null,
+    });
+    await saveIntake(env.DASHBOARD_TENANTS, contactId, record);
+
+    // The answers themselves are not echoed -- a survey carries names, emails
+    // and phone numbers, and this response lands in a GHL execution log.
+    return Response.json({
+      contactId,
+      status: record.status,
+      quizSubmissionId: record.quizSubmissionId,
+      quizAt: record.quizAt,
+      answersCaptured: Object.keys(submission.others || {}).length,
+      hasWorkbook: Boolean(existing?.portfolio),
     });
   } catch (err) {
     return Response.json(
@@ -535,6 +626,12 @@ export default {
     // Called by a "Customer Replied" workflow on HOMS when the client emails the
     // filled-in workbook back. Gated by PROVISION_KEY inside the handler, and
     // placed above the dashboard gate below because a webhook has no cookie.
+    // Step one of onboarding: the survey is submitted before the workbook comes
+    // back, so this usually creates the record the workbook later merges into.
+    if (url.pathname === "/api/onboarding/quiz" && request.method === "POST") {
+      return handleOnboardingQuiz(request, env);
+    }
+
     if (url.pathname === "/api/onboarding/intake" && request.method === "POST") {
       return handleOnboardingIntake(request, env);
     }
