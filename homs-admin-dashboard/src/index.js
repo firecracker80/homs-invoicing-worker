@@ -17,6 +17,7 @@ import { mapCsvRows, loadExistingExpenses, importRows } from "./expenses-import.
 import { extractFromFile, rowsFromExtraction, estimateCost, resolveModel, MODELS, MAX_FILE_BYTES } from "./receipt-extract.js";
 import { parsePortfolio, loadExistingPropertyNames, importProperties } from "./portfolio-import.js";
 import { listContactEmails, findWorkbookReply, downloadWorkbook, crossCheck, saveIntake, loadIntake } from "./onboarding-intake.js";
+import { planConfiguration, applyConfiguration } from "./configure-account.js";
 import { handleServiceEstimate, handleServiceInvoice, handleServiceSync, handleServiceAccepted, handleServiceDeclined, handleServicePaid, readClientCurrencySettings } from "./services.js";
 
 // Yari's own default accent color -- used whenever a tenant's KV entry has no
@@ -423,6 +424,60 @@ async function handleOnboardingGet(request, env, contactId) {
   return Response.json(record);
 }
 
+
+// ================================================= client configuration ====
+// Configures a CLIENT sub-account from its reviewed intake. Two calls, always:
+// plan writes nothing, apply writes only what a plan would have contained.
+//
+// Gated by PROVISION_KEY, not the dashboard cookie, for the same reason
+// /api/provision is: this rewrites a client account's configuration, and a
+// browser session must not be able to drive it.
+async function handleConfigure(request, env, { apply }) {
+  const denied = await requireProvision(request, env);
+  if (denied) return denied;
+
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return Response.json({ error: "Invalid JSON body" }, { status: 400 });
+  }
+  if (!body.contactId) return Response.json({ error: "contactId is required" }, { status: 400 });
+
+  const { tenant, pit, error } = await resolveTenantPit(env, body.locationId);
+  if (error) return error;
+  if (tenant.kind === "vendor") {
+    return Response.json({ error: "Not a client account -- a vendor book has no properties to configure" }, { status: 400 });
+  }
+
+  const intake = await loadIntake(env.DASHBOARD_TENANTS, body.contactId);
+  if (!intake) return Response.json({ error: `No intake recorded for contact ${body.contactId}` }, { status: 404 });
+
+  const opts = {
+    brandName: body.brandName ?? null,
+    extra: body.extra && typeof body.extra === "object" ? body.extra : {},
+    overwrite: Boolean(body.overwrite),
+    rows: Array.isArray(body.rows) ? body.rows : null,
+  };
+
+  try {
+    if (!apply) return Response.json(await planConfiguration(pit, body.locationId, intake, opts));
+    const result = await applyConfiguration(pit, body.locationId, intake, opts);
+    // The intake is spent once it has been applied, so a second apply cannot
+    // quietly run again against another account.
+    await saveIntake(env.DASHBOARD_TENANTS, body.contactId, {
+      ...intake, status: "configured",
+      configuredInto: body.locationId, configuredAt: result.appliedAt,
+    });
+    return Response.json(result);
+  } catch (err) {
+    return Response.json(
+      { error: err.message || "Unknown error", blockers: err.blockers || undefined },
+      { status: err.status && err.status >= 400 && err.status < 600 ? err.status : 502 }
+    );
+  }
+}
+
 // Reconciles a tenant's custom values against the blueprint. Requires PROVISION_KEY,
 // never the dashboard cookie -- this endpoint rewrites configuration and mints secrets.
 async function handleProvision(request, env) {
@@ -482,6 +537,16 @@ export default {
     // placed above the dashboard gate below because a webhook has no cookie.
     if (url.pathname === "/api/onboarding/intake" && request.method === "POST") {
       return handleOnboardingIntake(request, env);
+    }
+
+    // Both gated by PROVISION_KEY inside the handler, and placed above the
+    // dashboard gate below for the same reason as the intake webhook.
+    if (url.pathname === "/api/onboarding/configure/plan" && request.method === "POST") {
+      return handleConfigure(request, env, { apply: false });
+    }
+
+    if (url.pathname === "/api/onboarding/configure/apply" && request.method === "POST") {
+      return handleConfigure(request, env, { apply: true });
     }
 
     // Services flow: called by a vendor's GHL workflows, gated by SERVICES_WEBHOOK_KEY.

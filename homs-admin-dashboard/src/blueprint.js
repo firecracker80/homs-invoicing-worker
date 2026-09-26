@@ -1,8 +1,15 @@
 // The canonical HOMS client-account configuration surface.
 //
-// Verified 2026-09-10 against DEMO-HOMS (ZghxU8I60bEm39JUbtCm, all empty) and
-// Luminara (wLGDbGcQ4QSG3nlT3Sis, fully populated). Both carry this exact
-// 19-key set with identical names and fieldKeys. See homs-client-config-blueprint.md.
+// Verified 2026-09-10 against DEMO-HOMS (ZghxU8I60bEm39JUbtCm) and Luminara
+// (wLGDbGcQ4QSG3nlT3Sis), which both carried the same 19 keys.
+// See homs-client-config-blueprint.md.
+//
+// Re-checked 2026-09-25: DEMO-HOMS now carries four more (Group E below), added
+// since. Luminara still has only the original 19, which is correct -- it is the
+// legacy tenant whose cancellation policy lives in KV, not in a custom value.
+// The gap mattered: without wcancellation_policy here, the reconciler had
+// nowhere to put the policy the client picks in the intake workbook, so the
+// answer would have been collected and then quietly dropped.
 //
 // `policy` decides what the reconciler is allowed to do with each key:
 //
@@ -58,6 +65,18 @@ export const BLUEPRINT = [
   { slug: "wghl_deposit_url", name: "WGHL Deposit URL", policy: "manual", label: "Deposit webhook" },
   { slug: "wghl_cancelation_url", name: "WGHL Cancelation URL", policy: "manual", label: "Cancellation webhook" },
   { slug: "wghl_reschedule_url", name: "WGHL Reschedule URL", policy: "manual", label: "Reschedule webhook" },
+
+  // --- Group E: added after the original survey, confirmed on DEMO-HOMS 2026-09-25 ---
+  // The client's choice from the intake workbook, stored as the sentence
+  // parseCancellationPolicy reads. This decides real refunds, so it is written
+  // only from a reviewed answer and never guessed.
+  { slug: "wcancellation_policy", name: "WCancellation Policy", policy: "input", label: "Cancellation policy" },
+  { slug: "wservice_cost_currency", name: "WService Cost Currency", policy: "input", label: "Service cost currency" },
+  // Per-account GHL form URLs, minted when the snapshot loads. Same reasoning as
+  // Group D: not readable or mintable through any API, and severing one breaks a
+  // live flow silently.
+  { slug: "wghl_solicitud_del_huesped_url", name: "WGHL Solicitud del Huesped URL", policy: "manual", label: "Guest request form" },
+  { slug: "wghl_inspeccion_url", name: "WGHL Inspeccion URL", policy: "manual", label: "Inspection form" },
 ];
 
 // GHL returns fieldKey as "{{ custom_values.wbrand_name }}". Match on the slug
