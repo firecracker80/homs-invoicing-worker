@@ -72,6 +72,16 @@ export const BLUEPRINT = [
   // only from a reviewed answer and never guessed.
   { slug: "wcancellation_policy", name: "WCancellation Policy", policy: "input", label: "Cancellation policy" },
   { slug: "wservice_cost_currency", name: "WService Cost Currency", policy: "input", label: "Service cost currency" },
+  // Who operational notifications go to -- cleaning submissions, guest
+  // requests. Decided 2026-09-26: the account holder, or whoever the account
+  // holder names, settled per account during configuration.
+  //
+  // It has to live here rather than in the workflow. The address was written
+  // straight into a workflow email action, where no API can read it, so a
+  // cloned account kept the template address in silence and the real manager
+  // never heard about a cleaning submission. An email that does not arrive
+  // raises nothing. The workflow action points at this merge tag instead.
+  { slug: "wmanager_notification_email", name: "WManager Notification Email", policy: "input", label: "Manager notification email" },
   // Per-account GHL form URLs, minted when the snapshot loads. Same reasoning as
   // Group D: not readable or mintable through any API, and severing one breaks a
   // live flow silently.
