@@ -176,6 +176,7 @@ async function syncRowsToGHL(env, tenant, snapshot, rows, now) {
 
     let transactionId = snapshot.ghl?.transactionId || null;
     let associations = null;
+    const unlinked = [];
 
     if (!transactionId) {
       const [properties, otaChannels, assocs] = await Promise.all([
@@ -186,6 +187,35 @@ async function syncRowsToGHL(env, tenant, snapshot, rows, now) {
       associations = assocs;
       const property = findRecordByName(properties, "property_name", snapshot.propertyCode);
       const otaChannel = findRecordByName(otaChannels, "channel_name", snapshot.bookingSource);
+
+      // A Transaction carries no property NAME of its own -- the dashboard
+      // resolves it entirely through this relation. So a lookup that finds
+      // nothing shows up as a booking with a blank property and no other clue,
+      // and on 2026-09-26 that cost two sessions to trace back to a webhook
+      // sending the guest's name in the property field.
+      //
+      // Linking to a guessed property would be worse than not linking, so the
+      // behaviour is unchanged: it still skips. What changes is that it says so.
+      // The same value keys per-property owner and manager names, so a bad one
+      // also silently addresses statements to the account default instead.
+      if (!property) {
+        unlinked.push({
+          object: "custom_objects.properties",
+          lookedFor: snapshot.propertyCode ?? null,
+          field: "property_name",
+          reason: snapshot.propertyCode ? "no_property_record_with_that_name" : "no_propertyCode_on_booking",
+          consequence: "dashboard shows no property for this booking, and per-property owner/manager names fall back to the account default",
+        });
+      }
+      if (!otaChannel && snapshot.bookingSource) {
+        unlinked.push({
+          object: "custom_objects.ota_channels",
+          lookedFor: snapshot.bookingSource,
+          field: "channel_name",
+          reason: "no_ota_channel_record_with_that_name",
+          consequence: "booking is not attributed to a channel",
+        });
+      }
 
       // No OTA platform fee applies to a directly-booked, PayPal/Stripe-settled
       // reservation -- the guest-paid processing fee covers the gateway's own
@@ -236,7 +266,9 @@ async function syncRowsToGHL(env, tenant, snapshot, rows, now) {
       await linkIfPossible(pit, locationId, associations, "custom_objects.payments", payment.id, "custom_objects.transactions", transactionId);
     }
 
-    return { ok: true, transactionId, paymentIds };
+    // Reported alongside a successful sync, not instead of one: the rows were
+    // written and the Transaction exists. Something just is not joined to it.
+    return { ok: true, transactionId, paymentIds, unlinked };
   } catch (err) {
     return { ok: false, reason: "ghl_sync_failed", error: err.message };
   }
