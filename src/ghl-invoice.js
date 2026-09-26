@@ -280,6 +280,52 @@ export async function invoiceHasWorkerLines({ tenant, env, locationId, invoiceId
 // booking is off, so nothing has been paid on it yet. Matched by name, in
 // English or Spanish (policy.js isPetFeeName).
 const isCleaningFee = item => /clean|limpieza/i.test(String(item?.name || ""));
+// The property name, taken from what the guest is actually being charged for.
+//
+// The booking webhook cannot supply it: the inbound payload carries the guest's
+// name in that field and there is no merge tag that fixes it. But the invoice
+// GHL built already names the listing as a line item, beside the fees:
+//
+//   Test Villa 2   270.00   <- the listing
+//   Cleaning Fee    65.00
+//   Pet Fee        300.00
+//
+// So the property is the line that is not a fee. This is not a guess about what
+// property names look like -- it is the one item on the invoice that is not
+// something the system itself added or recognises as a charge.
+//
+// It refuses to choose when there is more than one candidate. A booking with an
+// add-on (Fridge Stock, Airport Shuttle) has two non-fee lines, and picking the
+// first would attribute revenue to whichever GHL happened to list first. A
+// wrong property is worse than none: it keys per-property owner names, so it
+// would address an owner statement to someone with no claim on the money.
+const FEE_LINE_PATTERNS = [
+  /clean|limpieza/i,
+  /\bpet\b|mascota/i,
+  /deposit|dep(ó|o)sito|garant(í|i)a/i,
+  /process|procesamiento|service fee|tarifa/i,
+  /\btax|impuesto|itbis/i,
+];
+
+export function isFeeLine(item, tenant) {
+  const name = String(item?.name ?? "").trim();
+  if (!name) return true;
+  if (isPetFeeName(name, tenant)) return true;
+  return FEE_LINE_PATTERNS.some((re) => re.test(name));
+}
+
+export function propertyNameFromInvoice(items, tenant) {
+  const candidates = (items || []).filter((i) => !isFeeLine(i, tenant));
+  if (candidates.length === 1) {
+    return { name: String(candidates[0].name).trim(), reason: null };
+  }
+  return {
+    name: null,
+    reason: candidates.length === 0
+      ? "no_non_fee_line_on_invoice"
+      : `ambiguous_${candidates.length}_non_fee_lines`,
+  };
+}
 
 export async function enrichAndSendInvoice(
   { tenant, env, locationId, invoiceId, snapshot, contact, userId, hasPets },
@@ -318,6 +364,19 @@ export async function enrichAndSendInvoice(
   if (nativeCleaning > 0) {
     snapshot.charges.cleaningFee = nativeCleaning;
     snapshot.charges.cleaningFeeSource = "ghl_native";
+  }
+
+  // Fill in the property from the invoice when the booking webhook could not
+  // supply it -- either it sent nothing, or it sent the guest name and the
+  // guard in index.js rejected it. Never overrides a value that arrived intact.
+  if (!snapshot.propertyCode) {
+    const { name, reason } = propertyNameFromInvoice(nativeItems, tenant);
+    if (name) {
+      snapshot.propertyCode = name;
+      snapshot.propertyCodeSource = "ghl_invoice";
+    } else {
+      snapshot.propertyCodeSource = `unresolved:${reason}`;
+    }
   }
 
   // GHL's own sequential number, untouched (guest-facing on the invoice page,
