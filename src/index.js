@@ -78,6 +78,33 @@ function normalizePayload(raw) {
   // ids: GHL vocabulary → internal vocabulary
   if (!p.ghlContactId && p.contactId) p.ghlContactId = p.contactId;
   if (!p.propertyCode && p.propertyName) p.propertyCode = p.propertyName;
+
+  // A property is not a person. Seen live from 2026-09-17 onward: an inbound
+  // webhook mapped the guest's name into the property field, so every booking
+  // arrived claiming to be at a property named after its own guest.
+  //
+  // That value is not merely useless, it is actively harmful. It keys
+  // propertyOwnerNames and propertyManagerNames, so owner statements quietly
+  // address the account default instead of the property's real owner; and it is
+  // sent onward as propertyName in the payment-confirmed, cancellation, deposit
+  // and reschedule payloads, which drive guest-facing messages. A guest reading
+  // their own name where the property should be is the worst version of this.
+  //
+  // This is not a guess about what property names look like -- a property may
+  // legitimately be called anything. It is an exact match against the guest on
+  // THIS booking, which cannot be a coincidence and can only mean the wrong
+  // field was mapped. Treated as absent, so the brand name is used instead and
+  // the ledger reports no_propertyCode_on_booking rather than hunting for a
+  // property named after a person.
+  const guestName = String(p.guest?.name ?? "").trim().toLowerCase();
+  if (guestName && String(p.propertyCode ?? "").trim().toLowerCase() === guestName) {
+    console.error(
+      `Booking ${p.bookingId ?? "(no id)"}: propertyCode "${p.propertyCode}" is the guest's own name -- ` +
+      "the inbound webhook is mapping the wrong field. Treating the property as unset."
+    );
+    p.propertyCodeRejected = p.propertyCode;
+    p.propertyCode = null;
+  }
   if (!p.language && raw.language) p.language = raw.language;
   return p;
 }
