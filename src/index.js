@@ -62,7 +62,19 @@ function toDateOnly(v) {
 
 function normalizePayload(raw) {
   const p = { ...raw };
-  for (const k of Object.keys(p)) if (typeof p[k] === "string" && isBlank(p[k])) p[k] = null;
+  // Nulled, not kept: every fallback in this Worker is written as
+  // `webhookValue || tenantConfig`, which only reaches the fallback when the
+  // webhook value is falsy. A surviving "{{user.id}}" is truthy, so it wins,
+  // and the fallback added on 2026-09-26 for exactly this failure was
+  // unreachable whenever the workflow still sent the tag. Proven by probe the
+  // same day: send-invoice was called with userId "{{user.id}}".
+  for (const k of Object.keys(p)) {
+    if (typeof p[k] === "string" && (isBlank(p[k]) || isUnresolvedTag(p[k]))) p[k] = null;
+  }
+  // Recorded so the cause is visible in the snapshot instead of inferred from
+  // an absence -- same reason propertyCodeRejected exists.
+  const unresolved = Object.keys(raw).filter((k) => isUnresolvedTag(raw[k]));
+  if (unresolved.length) p.unresolvedMergeTags = unresolved;
   // money: GHL sends stayTotal (often formatted: "$420.00")
   if (p.bookingTotal == null && p.stayTotal != null) p.bookingTotal = toMoney(p.stayTotal);
   if (typeof p.bookingTotal === "string") p.bookingTotal = toMoney(p.bookingTotal);
@@ -118,6 +130,16 @@ function isBlank(v) {
   const s = String(v).trim().toLowerCase();
   return s === "" || s === "null" || s === "undefined";
 }
+
+// A merge tag that arrived unresolved. Not only in the editor: a Rental Booking
+// trigger has no user in context, so {{user.id}} comes through as this literal
+// on a completely real booking with a real bookingId.
+//
+// It has to be its own check rather than part of isBlank, because isBlank is
+// what decides a value is absent -- and a literal tag is worse than absent. An
+// absent value falls through to the tenant fallback; a literal one is truthy,
+// wins the fallback, and gets sent to GHL as if it were an id.
+const isUnresolvedTag = (v) => typeof v === "string" && /\{\{[^}]*\}\}/.test(v);
 
 function isEditorTest(raw) {
   const keys = ["bookingId", "checkIn", "checkOut", "stayTotal", "bookingTotal", "contactId"];
