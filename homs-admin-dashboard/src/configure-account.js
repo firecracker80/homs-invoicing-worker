@@ -218,6 +218,61 @@ export function blockersFor(intake, { brandName, accountBrand, rows }) {
   return blockers;
 }
 
+// Step six: turn a configured account into a working one.
+//
+// Writing Custom Values is not the end of configuration. The invoicing Worker
+// reads none of them at booking time -- it reads a tenant record in its own KV,
+// built from those values by /admin/provision-tenant. Until that runs, the
+// account looks completely configured in GHL and the Worker does not know it
+// exists: no pricing, no policy, no split, no PIT.
+//
+// This was the seam. It was a step nobody had written down, which is the same
+// category as every other failure this week, so the agent now closes it itself.
+//
+// It deliberately does NOT fail the configuration when it cannot run. The
+// Custom Values and Property records are already written and correct by this
+// point; an account that is configured but not yet provisioned is recoverable
+// in one call, whereas throwing here would leave the caller unsure which of the
+// two halves had happened.
+export async function provisionTenantRecord(env, { locationId, pit, invoiceSenderUserId, paypalSecretName }) {
+  const base = env.INVOICING_WORKER_URL;
+  if (!base) {
+    return { ok: false, reason: "no_invoicing_worker_url", detail: "INVOICING_WORKER_URL is not set on this Worker, so the tenant record cannot be built." };
+  }
+  if (!env.INVOICING_ADMIN_SECRET) {
+    return { ok: false, reason: "no_admin_secret", detail: "INVOICING_ADMIN_SECRET is not set, and /admin/provision-tenant accepts nothing else." };
+  }
+
+  const params = new URLSearchParams({ locationId, ghlPit: pit, force: "true" });
+  if (invoiceSenderUserId) params.set("invoiceSenderUserId", invoiceSenderUserId);
+  if (paypalSecretName) params.set("paypalSecretName", paypalSecretName);
+
+  try {
+    const res = await fetch(`${base.replace(/\/$/, "")}/admin/provision-tenant?${params}`, {
+      method: "POST",
+      headers: { "X-Admin-Secret": env.INVOICING_ADMIN_SECRET },
+    });
+    const text = await res.text();
+    let body;
+    try { body = text ? JSON.parse(text) : {}; } catch { body = { raw: text.slice(0, 300) }; }
+
+    if (!res.ok) {
+      return { ok: false, reason: "provision_rejected", status: res.status, detail: body.error || text.slice(0, 300) };
+    }
+    // The PIT went in the query string, so nothing from this response is echoed
+    // wholesale -- only what a person needs to act on.
+    return {
+      ok: true,
+      mappedFromCustomValues: body.mappedFromCustomValues ?? null,
+      unmappedCustomValues: body.unmappedCustomValues ?? [],
+      warnings: body.warnings ?? [],
+      mergedWithExisting: Boolean(body.mergedWithExisting),
+    };
+  } catch (err) {
+    return { ok: false, reason: "provision_unreachable", detail: err.message };
+  }
+}
+
 // ------------------------------------------------------------ plan/apply ----
 
 async function readAccount(pit, locationId) {
@@ -273,7 +328,7 @@ export async function planConfiguration(pit, locationId, intake, { brandName = n
   };
 }
 
-export async function applyConfiguration(pit, locationId, intake, opts = {}) {
+export async function applyConfiguration(pit, locationId, intake, opts = {}, env = null) {
   const plan = await planConfiguration(pit, locationId, intake, opts);
   if (plan.blockers.length) {
     const err = new Error("Refusing to configure: " + plan.blockers.map((b) => b.detail).join(" "));
@@ -298,13 +353,25 @@ export async function applyConfiguration(pit, locationId, intake, opts = {}) {
   const { created, failed } = await importProperties(pit, locationId, toCreate);
   const checklist = checklistFor(intake?.portfolio, toCreate);
 
+  // Last, because it reads the Custom Values this run just wrote.
+  const tenantRecord = env
+    ? await provisionTenantRecord(env, {
+        locationId, pit,
+        invoiceSenderUserId: opts.invoiceSenderUserId,
+        paypalSecretName: opts.paypalSecretName,
+      })
+    : { ok: false, reason: "not_attempted", detail: "No env passed to applyConfiguration." };
+
   return {
     locationId, brandName: opts.brandName,
     settings: { ...settings, result: settingsResult },
     properties: { created, failed, skipped },
     calendars: checklist,
+    tenantRecord,
     // Said plainly, every time. The account is not finished when this returns.
     manualStepsRemaining: [
+      ...(tenantRecord.ok ? [] : [`The invoicing Worker still has no tenant record for this account (${tenantRecord.reason}) -- it cannot price a booking until /admin/provision-tenant runs. ${tenantRecord.detail || ""}`.trim()]),
+      ...(tenantRecord.warnings || []),
       ...(checklist.length
         ? [`Create ${checklist.length} rental calendar${checklist.length === 1 ? "" : "s"} by hand -- no API can do it.`] : []),
       ...settingsResult.needsAttention.map((slug) => `Fill ${slug} by hand (webhook or form URL).`),

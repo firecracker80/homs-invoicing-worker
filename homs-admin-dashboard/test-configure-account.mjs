@@ -351,6 +351,57 @@ const intakeFor = (overrides = {}) => ({
   console.log("13) Survey answers fill locale, split, owner and manager; a brand mismatch blocks");
 }
 
+// ---- 15. configuration ends with a WORKING account, not a configured one --
+// Custom Values are not what the invoicing Worker reads at booking time. It
+// reads a tenant record in its own KV, built from them by
+// /admin/provision-tenant. Until that runs the account looks perfect in GHL
+// and the Worker does not know it exists.
+{
+  const calls = [];
+  const ghl = mockGhl(calls, { brand: "" });
+  let provisionUrl = null; let provisionHeaders = null;
+  globalThis.fetch = async (url, init = {}) => {
+    const u = String(url);
+    if (u.includes("/admin/provision-tenant")) {
+      provisionUrl = u; provisionHeaders = init.headers || {};
+      return { ok: true, status: 200, text: async () => JSON.stringify({ warnings: [], mergedWithExisting: false, mappedFromCustomValues: 7 }) };
+    }
+    return ghl(url, init);
+  };
+
+  const env = { INVOICING_WORKER_URL: "https://worker.dev/", INVOICING_ADMIN_SECRET: "adm" };
+  const out = await applyConfiguration("pit-1", CLIENT, intakeFor(), {
+    brandName: "Casa Bonita", invoiceSenderUserId: "user-1",
+  }, env);
+
+  assert.strictEqual(out.tenantRecord.ok, true, "the tenant record is built as part of apply");
+  const q = new URL(provisionUrl).searchParams;
+  assert.strictEqual(q.get("locationId"), CLIENT);
+  assert.strictEqual(q.get("ghlPit"), "pit-1");
+  assert.strictEqual(q.get("invoiceSenderUserId"), "user-1");
+  assert.strictEqual(q.get("force"), "true", "a re-run must merge rather than 409");
+  assert.strictEqual(provisionHeaders["X-Admin-Secret"], "adm");
+  assert.ok(!out.manualStepsRemaining.some((m) => /tenant record/i.test(m)), "nothing left to say about it");
+
+  // Unreachable: the account is still configured, and apply still returns.
+  globalThis.fetch = async (url, init = {}) => {
+    if (String(url).includes("/admin/provision-tenant")) throw new Error("connect ECONNREFUSED");
+    return ghl(url, init);
+  };
+  const degraded = await applyConfiguration("pit-1", CLIENT, intakeFor(), { brandName: "Casa Bonita" }, env);
+  assert.strictEqual(degraded.tenantRecord.ok, false);
+  assert.strictEqual(degraded.tenantRecord.reason, "provision_unreachable");
+  assert.strictEqual(degraded.properties.created.length, 2, "the properties were still written");
+  assert.ok(degraded.manualStepsRemaining.some((m) => /cannot price a booking/i.test(m)),
+    "and what is now broken is stated, not just that a step failed");
+
+  // No config at all: reported, never silently skipped.
+  globalThis.fetch = ghl;
+  const unconfigured = await applyConfiguration("pit-1", CLIENT, intakeFor(), { brandName: "Casa Bonita" }, {});
+  assert.strictEqual(unconfigured.tenantRecord.reason, "no_invoicing_worker_url");
+  console.log("15) Apply builds the tenant record too, and says plainly when it could not");
+}
+
 // A GHL stand-in: custom values, object records, and the writes both make.
 function mockGhl(calls, { brand = "", failCustomValueWrite = false } = {}) {
   return async (url, init = {}) => {
