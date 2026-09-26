@@ -315,4 +315,47 @@ for (const [st, items] of [
 mockInvoiceStatus = undefined; mockInvoiceItems = null;
 console.log("10) Stale 'sending' claim: no Worker lines on the invoice -> finished once; our lines already there or paid -> left alone");
 
+// ---- the invoice sender fallback ------------------------------------------
+// A Rental Booking trigger has no user in context, so {{user.id}} resolves to
+// nothing every time. Before 2026-09-26 that threw, and three real bookings
+// went out unpriced: no processing fee, no deposit, and the Pet Fee still on
+// an invoice for a guest who said they had no pet.
+{
+  const sent = [];
+  const fakeFetch = async (url, init = {}) => {
+    const u = String(url);
+    const method = init.method || "GET";
+    if (u.includes("/send")) { sent.push(JSON.parse(init.body || "{}")); return { ok: true, status: 200, text: async () => "{}" }; }
+    if (u.includes("/invoices/") && method === "GET") {
+      return { ok: true, status: 200, text: async () => JSON.stringify({
+        invoiceItems: [{ name: "Test Villa 2", amount: 270, qty: 1 }, { name: "Pet Fee", amount: 300, qty: 1 }],
+        invoiceNumber: "000010", name: "n", currency: "USD", issueDate: "2026-09-26", dueDate: "2026-09-30",
+      }) };
+    }
+    return { ok: true, status: 200, text: async () => "{}" };
+  };
+  const base = {
+    env: {}, locationId: "loc1", invoiceId: "inv1",
+    snapshot: { bookingId: "b1", stay: { nights: 2, nightlyRate: 135, checkIn: "2026-09-28", checkOut: "2026-09-30" },
+      charges: { rentTotal: 270, cleaningFee: 0, processingFee: 0, grandTotal: 270 },
+      securityDeposit: { total: 0, blocks: [] }, payout: {} },
+    contact: { id: "c1", name: "G", email: "g@x.com" },
+  };
+
+  sent.length = 0;
+  await enrichAndSendInvoice({ ...base, tenant: { ghlPit: "p", invoiceSenderUserId: "tenant-user" }, userId: "webhook-user", hasPets: "No" }, fakeFetch);
+  assert.equal(sent[0].userId, "webhook-user", "a resolved {{user.id}} still wins");
+
+  sent.length = 0;
+  await enrichAndSendInvoice({ ...base, tenant: { ghlPit: "p", invoiceSenderUserId: "tenant-user" }, userId: undefined, hasPets: "No" }, fakeFetch);
+  assert.equal(sent[0].userId, "tenant-user", "an unresolved merge tag must not stop the invoice");
+
+  await assert.rejects(
+    () => enrichAndSendInvoice({ ...base, tenant: { ghlPit: "p" }, userId: undefined, hasPets: "No" }, fakeFetch),
+    (e) => /invoiceSenderUserId/.test(e.message) && /Rental Booking trigger/.test(e.message),
+    "and a bare failure names both what did not resolve and what to set");
+
+  console.log("11) Invoice sender: webhook userId wins, tenant fallback saves it, bare failure names both");
+}
+
 console.log("\nPASS — all end-to-end assertions held. Existing PayPal-URL flow is provably untouched by this change.");
