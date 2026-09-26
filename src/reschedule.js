@@ -15,6 +15,7 @@ import { createCheckoutSession } from "./stripe.js";
 import { writeAndSyncRows } from "./ledger.js";
 import { updateObjectRecord } from "./ghl.js";
 import { adminAuthorized, notifyGHL, cancellationTier } from "./cancellation.js";
+import { paymentConfirmedPayload } from "./payment.js";
 import { updateGhlBookingDates } from "./ghl-calendar.js";
 
 function resolveSecret(tenant, env, nameKey, inlineKey) {
@@ -589,17 +590,17 @@ export async function settleRescheduleAdjustment(env, tenant, snapshot, capture)
   }
 
   // Reuse the EXISTING "Payment Confirmed" workflow -- no new GHL build needed.
-  await notifyGHL(tenant.ghlPaymentConfirmedUrl, {
-    event: "payment_confirmed",
+  await notifyGHL(tenant.ghlPaymentConfirmedUrl, paymentConfirmedPayload({
     bookingId: snapshot.bookingId,
-    contactId: snapshot.ghlContactId || "",
-    status: "paid",
-    amountPaid: capture.gross.toFixed(2),
-    depositTotal: (snapshot.depositDelta > 0 ? snapshot.depositDelta : 0).toFixed(2),
-    checkIn: parent?.stay?.checkIn || "",
-    checkOut: parent?.stay?.checkOut || "",
-    propertyName: snapshot.propertyCode || tenant.brandName
-  });
+    contactId: snapshot.ghlContactId,
+    amountPaid: capture.gross,
+    depositTotal: snapshot.depositDelta > 0 ? snapshot.depositDelta : 0,
+    // The PARENT booking dates -- this is a delta charge on an existing stay,
+    // and the workflow cares which stay, not which adjustment record.
+    checkIn: parent?.stay?.checkIn,
+    checkOut: parent?.stay?.checkOut,
+    propertyName: snapshot.propertyCode || tenant.brandName,
+  }));
 
   return { settled: true, ledgerOk, ghlOk };
 }
