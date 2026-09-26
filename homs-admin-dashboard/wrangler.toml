@@ -7,6 +7,18 @@ name = "homs-admin-dashboard"
 main = "src/index.js"
 compatibility_date = "2025-01-01"
 
+# The invoicing Worker this dashboard provisions tenant records into. Not a
+# secret -- it is a public URL, and keeping it here means it is version
+# controlled and deploys with the code rather than being re-entered by hand.
+#
+# Its companion INVOICING_ADMIN_SECRET is the invoicing Worker of the same
+# environment ADMIN_SECRET, and IS a secret -- set it with
+#   wrangler secret put INVOICING_ADMIN_SECRET
+# Without both, /api/onboarding/configure/apply still succeeds and reports
+# no_invoicing_worker_url; the tenant record simply is not built.
+[vars]
+INVOICING_WORKER_URL = "https://homs-invoicing-worker-0e0e.yari-058.workers.dev"
+
 [assets]
 directory = "./public"
 binding = "ASSETS"
