@@ -161,6 +161,47 @@ async function verifyStripeWebhook(tenant, env, request, rawBody) {
   return expected === parts.v1;
 }
 
+// A payment is confirmed by one of two routes, and GHL has to be able to read
+// both with ONE field mapping:
+//
+//   guest pays a PayPal/Stripe link, or a reschedule delta  -> the Worker POSTs
+//     to tenant.ghlPaymentConfirmedUrl, because GHL has no other way to know
+//   guest pays a GHL invoice -> GHL already knows; its own workflow calls
+//     /ghl-invoice-paid and reads our RESPONSE. We must not post back to the
+//     inbound-webhook trigger there, or we re-run the workflow that called us.
+//
+// Those two shapes drifted. The webhook carried status/contactId/checkIn; the
+// response carried ok/invoiceId/settled, and the only fields in common were
+// bookingId and amountPaid. An Update Contact Field mapped to `status` worked
+// on one route and silently wrote nothing on the other -- which is exactly how
+// a payment-confirmed tag failed to apply on DEMO-HOMS on 2026-09-26.
+//
+// So both routes build their payload here. Adding a field to one now adds it to
+// both, and they cannot drift apart again.
+export function paymentConfirmedPayload({
+  bookingId, contactId, amountPaid, depositTotal, checkIn, checkOut, propertyName,
+}) {
+  return {
+    event: "payment_confirmed",
+    bookingId: bookingId || "",
+    contactId: contactId || "",
+    status: "paid",
+    amountPaid: Number(amountPaid || 0).toFixed(2),
+    depositTotal: Number(depositTotal || 0).toFixed(2),
+    checkIn: checkIn || "",
+    checkOut: checkOut || "",
+    propertyName: propertyName || "",
+  };
+}
+
+// Every other answer /ghl-invoice-paid can give. A workflow branching on
+// `status` needs a value in all of them -- if a skip response simply omitted
+// it, GHL would leave whatever the contact field already held, so a booking
+// that was cancelled after a previous paid run would still read "paid".
+export function paymentSkippedPayload(status, bookingId = "") {
+  return { event: "payment_not_confirmed", bookingId, status, amountPaid: "0.00" };
+}
+
 // ------------------------------------------------------------- Settlement ----
 
 // Idempotent settlement: updates snapshot, writes the D1 + GHL ledger, notifies GHL.
@@ -217,17 +258,15 @@ async function settle(env, tenant, snapshot, captures, { notify = true } = {}) {
       await fetch(tenant.ghlPaymentConfirmedUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          event: "payment_confirmed",
+        body: JSON.stringify(paymentConfirmedPayload({
           bookingId: snapshot.bookingId,
-          contactId: snapshot.ghlContactId || "",
-          status: "paid",
-          amountPaid: totalPaid.toFixed(2),
-          depositTotal: (dep?.gross || 0).toFixed(2),
+          contactId: snapshot.ghlContactId,
+          amountPaid: totalPaid,
+          depositTotal: dep?.gross || 0,
           checkIn: snapshot.stay.checkIn,
           checkOut: snapshot.stay.checkOut,
-          propertyName: snapshot.propertyCode || tenant.brandName
-        })
+          propertyName: snapshot.propertyCode || tenant.brandName,
+        }))
       });
     } catch (err) {
       console.error(`GHL payment-confirmed notify failed for ${snapshot.bookingId}:`, err.message);
@@ -290,7 +329,7 @@ export async function handleGhlInvoicePaid(request, env) {
   const invoiceId = unresolved(body.invoiceId) ? null : String(body.invoiceId).trim();
   const invoiceNumber = unresolved(body.invoiceNumber) ? null : String(body.invoiceNumber).trim();
   const contactId = unresolved(body.contactId) ? null : String(body.contactId).trim();
-  if (!invoiceId && !invoiceNumber) return json({ ok: true, skipped: "no_invoice_in_request" });
+  if (!invoiceId && !invoiceNumber) return json({ ok: true, skipped: "no_invoice_in_request", ...paymentSkippedPayload("no_invoice") });
 
   // Find the invoice. Merge tags can hand over the NUMBER instead of the id
   // (seen live on RL Santana), so an id that doesn't load is tried as a number.
@@ -308,14 +347,14 @@ export async function handleGhlInvoicePaid(request, env) {
   if (!invoice) return json({ error: "Invoice not found", invoiceId, invoiceNumber, contactId }, 404);
 
   const bookingId = bookingIdOf(invoice);
-  if (!bookingId) return json({ ok: true, skipped: "not_a_booking_invoice", invoiceId: invoice._id });
+  if (!bookingId) return json({ ok: true, skipped: "not_a_booking_invoice", invoiceId: invoice._id, ...paymentSkippedPayload("not_a_booking") });
   const status = normStatus(invoice.status);
-  if (status !== "paid") return json({ ok: true, skipped: `invoice_${status || "unknown"}`, invoiceId: invoice._id, bookingId });
+  if (status !== "paid") return json({ ok: true, skipped: `invoice_${status || "unknown"}`, invoiceId: invoice._id, ...paymentSkippedPayload(status || "unknown", bookingId) });
 
   const snapshot = await findSnapshot(env, bookingId);
   if (!snapshot) return json({ error: `No booking ${bookingId} on record for invoice ${invoice.invoiceNumber || invoice._id}` }, 404);
   if (snapshot.locationId !== locationId) return json({ error: "Invoice and booking belong to different accounts" }, 409);
-  if (snapshot.settled) return json({ ok: true, alreadySettled: true, bookingId });
+  if (snapshot.settled) return json({ ok: true, alreadySettled: true, ...paymentSkippedPayload("paid", bookingId) });
 
   // GHL cancels an unpaid booking when its payment window closes, but the invoice
   // link already sitting in the guest's inbox keeps working. Money arriving after
@@ -335,7 +374,7 @@ export async function handleGhlInvoicePaid(request, env) {
       "Payment of " + amount + " received on CANCELLED booking " + bookingId +
       " (invoice " + (invoice.invoiceNumber || invoice._id) + ") -- owed back to the guest, or the booking has to be reinstated"
     );
-    return json({ ok: true, skipped: "booking_cancelled", refundOwed: amount, bookingId, invoiceId: invoice._id });
+    return json({ ok: true, skipped: "booking_cancelled", refundOwed: amount, invoiceId: invoice._id, ...paymentSkippedPayload("cancelled", bookingId) });
   }
 
   const paid = Number(invoice.amountPaid ?? invoice.total ?? 0);
@@ -350,7 +389,21 @@ export async function handleGhlInvoicePaid(request, env) {
     ...(depositHeld > 0 ? { DEP: { ...common, gross: depositHeld } } : {})
   };
   const result = await settle(env, tenant, snapshot, captures, { notify: false });
-  return json({ ok: true, bookingId, invoiceId: invoice._id, amountPaid: round2(paid), ...result });
+  // Same fields the webhook route sends, so one GHL mapping reads both. The
+  // route-specific keys (ok, invoiceId, settled, ledgerOk) come after and are
+  // additive -- nothing that already consumes them changes.
+  return json({
+    ...paymentConfirmedPayload({
+      bookingId,
+      contactId: snapshot.ghlContactId,
+      amountPaid: paid,
+      depositTotal: depositHeld,
+      checkIn: snapshot.stay?.checkIn,
+      checkOut: snapshot.stay?.checkOut,
+      propertyName: snapshot.propertyCode || tenant.brandName,
+    }),
+    ok: true, invoiceId: invoice._id, ...result,
+  });
 }
 
 export async function handlePayPalReturn(request, env) {
