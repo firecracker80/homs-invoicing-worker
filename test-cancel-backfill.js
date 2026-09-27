@@ -177,15 +177,75 @@ const reset = async (snap = paidSnapshot(), withSettlement = false) => {
 }
 
 // ---- 5. the manual refund is reported, not silently swallowed ----------------
+// Under manualRefunds, not refundFailures: on the ghl_invoice gateway refunds
+// are issued by hand GHL-side, so this is the ordinary path and not a fault.
+// Filing it as a failure made every normal cancellation look broken -- and
+// would have made a genuinely failed refund look normal.
 {
   const snap = JSON.parse(store.get(BOOKING));
-  const failures = snap.cancellation.refundFailures || [];
-  assert.ok(failures.some((f) => f.type === "rent_refund_needed_manual" && Math.abs(f.amount - 173) < 0.01),
-    "173 owed back to the guest, by hand: " + JSON.stringify(failures));
+  const manual = snap.cancellation.manualRefunds || [];
+  assert.ok(manual.some((f) => f.type === "rent_refund_needed_manual" && Math.abs(f.amount - 173) < 0.01),
+    "173 owed back to the guest, by hand: " + JSON.stringify(manual));
+  assert.deepStrictEqual(snap.cancellation.refundFailures, [],
+    "and nothing failed -- no refund was attempted, so there is nothing to have failed");
   assert.equal(notified.length, 1, "GHL is told once");
   assert.equal(notified[0].chargeTotal, "27.00");
   assert.equal(notified[0].refundTotal, "173.00");
   console.log("5) $173 owed to the guest is recorded on the booking and sent to GHL, not dropped");
+}
+
+// ---- 5b. a refund that was attempted and refused is a failure --------------
+// The other side of the split. Same shape of entry, opposite meaning: here a
+// capture existed, an automated refund was tried, and the gateway said no.
+// Nobody has been told to go and do it by hand, and nobody will unless this
+// reads as the fault it is.
+{
+  const withCapture = {
+    ...paidSnapshot(),
+    gateway: "stripe",
+    captures: { RENT: { gross: 212, captureId: "ch_live_1", source: "stripe" } },
+  };
+  await reset(withCapture);
+  // The gateway refuses, the way a real one does: a 4xx, not a thrown socket.
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url, opts = {}) => {
+    if (String(url).includes("stripe.com")) {
+      const payload = { error: { message: "charge already refunded" } };
+      return { ok: false, status: 402, text: async () => JSON.stringify(payload), json: async () => payload };
+    }
+    return realFetch(url, opts);
+  };
+  const out = await post({ asOf: "2026-09-21T12:47:00Z", reason: "Gateway refuses the refund" });
+  globalThis.fetch = realFetch;
+
+  const snap = JSON.parse(store.get(BOOKING));
+  assert.deepStrictEqual(snap.cancellation.manualRefunds, [],
+    "nothing here is waiting on a person -- the system tried and failed, which is different");
+  const failed = snap.cancellation.refundFailures;
+  assert.equal(failed.length, 1, "the refusal is recorded: " + JSON.stringify(failed));
+  assert.equal(failed[0].type, "rent_refund_failed");
+  assert.match(failed[0].error, /already refunded/, "carrying what the gateway actually said, so it can be acted on");
+  assert.equal(out.body.cancelled, true, "and the cancellation still stands -- the booking is cancelled either way");
+  console.log("5b) A refund the gateway refused is a failure, and is not mixed in with the manual ones");
+}
+
+// ---- 5c. the deposit takes the same route as the rent ---------------------
+// Its own case because every other snapshot in this file has a zero deposit,
+// so the deposit branch never runs and a misfiling there would go unseen.
+{
+  const withDeposit = {
+    ...paidSnapshot(),
+    securityDeposit: { total: 490, blocks: [], status: "held" },
+  };
+  await reset(withDeposit);
+  await post({ asOf: "2026-09-21T12:47:00Z", reason: "Deposit held, no capture to refund against" });
+
+  const snap = JSON.parse(store.get(BOOKING));
+  const manual = snap.cancellation.manualRefunds || [];
+  assert.ok(manual.some((f) => f.type === "deposit_refund_needed_manual" && f.amount === 490),
+    "the whole deposit is owed back by hand: " + JSON.stringify(manual));
+  assert.deepStrictEqual(snap.cancellation.refundFailures, [], "and nothing failed");
+  console.log("5c) A deposit with no capture is a manual refund too, not a failure");
 }
 
 // ---- 6. an unpaid booking voids cleanly, and dates itself too ----------------
