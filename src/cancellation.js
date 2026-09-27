@@ -354,11 +354,24 @@ export async function handleCancel(request, env) {
     const rentCaptureId = snapshot.captures?.RENT?.captureId;
   const depCaptureId = snapshot.captures?.DEP?.captureId;
   const refundIds = {};
+  // Two different things, kept apart on purpose.
+  //
+  // manualRefunds: there is no capture to refund against, so no automated path
+  // exists and a person has to issue it. Normal and expected on the ghl_invoice
+  // gateway, where refunds are manual GHL-side by design.
+  //
+  // refundFailures: an automated refund was attempted and the gateway refused.
+  // That is a fault, and something is wrong that was not wrong a moment ago.
+  //
+  // They were one list until 2026-09-26, which made every ordinary ghl_invoice
+  // cancellation look like a failed one -- and would have made a genuinely
+  // failed refund look ordinary.
+  const manualRefunds = [];
   const refundFailures = [];
 
   if (calc.rentUnitRefund > 0) {
     if (!rentCaptureId) {
-      refundFailures.push({ type: "rent_refund_needed_manual", amount: calc.rentUnitRefund });
+      manualRefunds.push({ type: "rent_refund_needed_manual", amount: calc.rentUnitRefund });
     } else {
       try {
         refundIds.rent = await gatewayRefund(tenant, env, snapshot, rentCaptureId, calc.rentUnitRefund, note);
@@ -371,7 +384,7 @@ export async function handleCancel(request, env) {
 
   if (calc.depositRefund > 0) {
     if (!depCaptureId) {
-      refundFailures.push({ type: "deposit_refund_needed_manual", amount: calc.depositRefund });
+      manualRefunds.push({ type: "deposit_refund_needed_manual", amount: calc.depositRefund });
     } else {
       try {
         refundIds.deposit = await gatewayRefund(tenant, env, snapshot, depCaptureId,
@@ -388,7 +401,7 @@ export async function handleCancel(request, env) {
   snapshot.cancellation = {
     at: new Date(effectiveNow).toISOString(), reason: body.reason || "",
     ...(asOf.backfilled ? { backfilled: true, recordedAt: new Date(now).toISOString() } : {}),
-    ...calc, refundIds, refundFailures
+    ...calc, refundIds, manualRefunds, refundFailures
   };
   snapshot.securityDeposit.status = "refunded";
   snapshot.securityDeposit.refundedAmount = calc.depositRefund;
@@ -500,6 +513,7 @@ export async function handleCancel(request, env) {
 
     return json({
     cancelled: true, paid: true, calculation: calc, refundIds,
+    manualRefunds: manualRefunds.length ? manualRefunds : null,
     refundFailures: refundFailures.length ? refundFailures : null,
     ledgerSync: snapshot.cancellationSyncFailed ? "failed" : "ok",
     ledgerSyncError: snapshot.cancellationSyncError || null
