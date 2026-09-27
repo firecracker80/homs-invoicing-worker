@@ -469,7 +469,7 @@ async function handleOnboardingQuiz(request, env) {
   if (error) return error;
 
   try {
-    const submission = await fetchLatestSubmission(pit, surveyId, contactId);
+    const submission = await fetchLatestSubmission(pit, body.locationId, surveyId, contactId);
     if (!submission) {
       return Response.json(
         { error: `No submission on survey ${surveyId} for contact ${contactId}` },
