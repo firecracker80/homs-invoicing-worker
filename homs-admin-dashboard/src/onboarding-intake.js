@@ -224,8 +224,13 @@ export function mergeIntake(existing, patch) {
 // mapping that silently resolves to nothing is the single most common failure
 // in this system -- it has cost days this week alone. Reading the submission
 // back makes GHL the source of truth and removes the mapping entirely.
-export async function fetchLatestSubmission(pit, surveyId, contactId, { limit = 50 } = {}) {
-  const params = new URLSearchParams({ surveyId, limit: String(limit) });
+// locationId is required by GHL here even though the PIT is already scoped to
+// one account. Without it the call comes back 422 "locationId must be a string"
+// -- which reads as a type complaint about something the caller sent, not as a
+// parameter that was never sent at all.
+export async function fetchLatestSubmission(pit, locationId, surveyId, contactId, { limit = 50 } = {}) {
+  if (!locationId) throw new Error("fetchLatestSubmission: locationId is required -- GHL rejects the call without it");
+  const params = new URLSearchParams({ locationId, surveyId, limit: String(limit) });
   const res = await fetch(`${BASE}/surveys/submissions?${params}`, {
     headers: { Authorization: `Bearer ${pit}`, Version: VERSION, Accept: "application/json" },
   });

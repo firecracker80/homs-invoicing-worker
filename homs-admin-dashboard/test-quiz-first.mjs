@@ -69,15 +69,39 @@ const submission = (over = {}) => ({
       submission({ id: "newest", createdAt: "2026-09-26T16:14:14Z" }),
     ] }),
   });
-  const got = await fetchLatestSubmission("pit", SURVEY, CONTACT);
+  const got = await fetchLatestSubmission("pit", HOMS, SURVEY, CONTACT);
   assert.strictEqual(got.id, "newest", "newest for THIS contact, not newest overall");
 
   globalThis.fetch = async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ submissions: [] }) });
-  assert.strictEqual(await fetchLatestSubmission("pit", SURVEY, CONTACT), null);
+  assert.strictEqual(await fetchLatestSubmission("pit", HOMS, SURVEY, CONTACT), null);
 
   globalThis.fetch = async () => ({ ok: false, status: 401, text: async () => JSON.stringify({ message: "bad token" }) });
-  await assert.rejects(() => fetchLatestSubmission("pit", SURVEY, CONTACT), /bad token/);
+  await assert.rejects(() => fetchLatestSubmission("pit", HOMS, SURVEY, CONTACT), /bad token/);
   console.log("4) Fetching picks this contact's newest submission and surfaces errors");
+}
+
+// ---- 4b. the account is on the request ---------------------------------
+// GHL requires locationId here even though the PIT is already scoped to one
+// account. Without it: 422 "locationId must be a string" -- which reads as a
+// complaint about a value the caller sent, not about one never sent at all.
+// Seen live 2026-09-27, the last thing standing between a rescoped PIT and a
+// working quiz route.
+{
+  let seen = null;
+  globalThis.fetch = async (url) => {
+    seen = new URL(String(url));
+    return { ok: true, status: 200, text: async () => JSON.stringify({ submissions: [submission()] }) };
+  };
+  await fetchLatestSubmission("pit", HOMS, SURVEY, CONTACT);
+  assert.strictEqual(seen.searchParams.get("locationId"), HOMS, "the survey's own account is named");
+  assert.strictEqual(seen.searchParams.get("surveyId"), SURVEY);
+  assert.strictEqual(seen.pathname, "/surveys/submissions");
+
+  // And it refuses rather than sending a request GHL will reject, so a caller
+  // that forgets gets told which argument it missed instead of a type error
+  // about a parameter it believes it supplied.
+  await assert.rejects(() => fetchLatestSubmission("pit", "", SURVEY, CONTACT), /locationId is required/);
+  console.log("4b) The submission fetch names its account, and refuses to call without one");
 }
 
 // ---- 5. the route: quiz first, then workbook, nothing lost --------------
