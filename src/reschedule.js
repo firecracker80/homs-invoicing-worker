@@ -486,7 +486,7 @@ export async function handleReschedule(request, env) {
 
     if (transactionId) {
       const pit = resolveSecret(tenant, env, "ghlPitSecretName", "ghlPit");
-      if (pit) await updateObjectRecord(pit, "custom_objects.transactions", transactionId, {
+      if (pit) await updateObjectRecord(pit, snapshot.locationId, "custom_objects.transactions", transactionId, {
         checkin_date: newCheckIn, checkout_date: newCheckOut,
       });
     }
@@ -580,7 +580,7 @@ export async function settleRescheduleAdjustment(env, tenant, snapshot, capture)
       const transactionId = parent.ghl?.transactionId;
       if (transactionId) {
         const pit = resolveSecret(tenant, env, "ghlPitSecretName", "ghlPit");
-        if (pit) await updateObjectRecord(pit, "custom_objects.transactions", transactionId, { payment_status: "paid" });
+        if (pit) await updateObjectRecord(pit, parent.locationId, "custom_objects.transactions", transactionId, { payment_status: "paid" });
       }
     }
   } catch (err) {

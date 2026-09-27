@@ -52,8 +52,18 @@ export async function createObjectRecord(pit, locationId, objectKey, properties)
   return res.record;
 }
 
-export async function updateObjectRecord(pit, objectKey, recordId, properties) {
-  const res = await ghlRequest(pit, "PUT", `/objects/${objectKey}/records/${recordId}`, { properties });
+// locationId is required, despite not appearing in GHL's published parameter
+// list for this endpoint. Without it the schema lookup has nothing to scope to
+// and GHL answers "Custom Object (custom_objects.transactions) not found" --
+// an object that demonstrably exists, since createObjectRecord had just written
+// four records into it with this same PIT. Seen live on DEMO-HOMS booking
+// 5LJInecEx6XApoXe19Qn, 2026-09-26: the cancellation computed correctly, the
+// guest notification went out, and the Transaction kept saying paid.
+//
+// This was the only object call in the file that did not pass locationId.
+export async function updateObjectRecord(pit, locationId, objectKey, recordId, properties) {
+  const qs = locationId ? `?locationId=${encodeURIComponent(locationId)}` : "";
+  const res = await ghlRequest(pit, "PUT", `/objects/${objectKey}/records/${recordId}${qs}`, { properties });
   return res.record;
 }
 
