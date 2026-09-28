@@ -74,6 +74,17 @@ export const BLUEPRINT = [
   { slug: "wowner_report_token", name: "WOwner Report Token", policy: "generated", label: "Owner statement token", sensitive: true },
   { slug: "wmanager_report_token", name: "WManager Report Token", policy: "generated", label: "Manager statement token", sensitive: true },
 
+  // Gates the manager executing a cancellation or reschedule from the guest
+  // request form. Until now it was the literal "12345", compared inside a
+  // workflow If/Else -- the same five digits on every account, written down in
+  // a test note. Minted per account here so the workflow can compare against
+  // {{ custom_values.wauthorization_pin }} instead of a number in its own
+  // config, which also means rotating it is editing one field rather than
+  // hunting through workflow steps.
+  //
+  // format "pin" because a person types this one. See generatePin.
+  { slug: "wauthorization_pin", name: "WAuthorization PIN", policy: "generated", format: "pin", label: "Manager authorization PIN", sensitive: true },
+
   // --- Group D: NEVER WRITTEN. See policy note above. ---
   { slug: "wghl_payment_confirmation_url", name: "WGHL Payment Confirmation URL", policy: "manual", label: "Payment confirmation webhook" },
   { slug: "wghl_deposit_url", name: "WGHL Deposit URL", policy: "manual", label: "Deposit webhook" },
@@ -120,6 +131,25 @@ export function generateSecret() {
     .replace(/\+/g, "-")
     .replace(/\//g, "_")
     .replace(/=+$/, "");
+}
+
+// A secret a person types, so it cannot be the 43-character base64 above.
+//
+// Eight characters rather than the four or six a "PIN" suggests: the form that
+// asks for it is publicly reachable, so this is not a phone keypad protected by
+// three attempts and a lockout. Four digits is ten thousand guesses. Eight of
+// this alphabet is about three trillion, and is still one short line to type.
+//
+// I, l, 1, O and 0 are excluded -- a manager reading this off a screen and
+// typing it into a form should not have to guess which character it is.
+const PIN_ALPHABET = "abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+
+export function generatePin(length = 8) {
+  const bytes = new Uint8Array(length);
+  crypto.getRandomValues(bytes);
+  // Modulo bias is negligible at this alphabet size and irrelevant at this
+  // threat model; uniformity here is not what this is defending.
+  return Array.from(bytes, (b) => PIN_ALPHABET[b % PIN_ALPHABET.length]).join("");
 }
 
 export function derivedValue(slug, { locationId }) {

@@ -13,7 +13,7 @@
 //      existing one - otherwise every run would rotate the client's secrets.
 //   4. Missing input means "leave alone", never "blank it".
 
-import { BLUEPRINT, slugFromFieldKey, generateSecret, derivedValue } from "./blueprint.js";
+import { BLUEPRINT, slugFromFieldKey, generateSecret, generatePin, derivedValue } from "./blueprint.js";
 import { fetchCustomValues, createCustomValue, updateCustomValue } from "./ghl.js";
 
 const isBlank = (v) => v === undefined || v === null || String(v).trim() === "";
@@ -95,7 +95,9 @@ export function planReconcile(existing, { locationId, input = {}, overwrite = fa
         plan.push({ ...base, action: "unchanged", reason: "secret already set - never rotated automatically" });
         continue;
       }
-      desired = generateSecret();
+      // Some generated values are read by machines and some are typed by
+      // people. The blueprint says which; this is the only place that cares.
+      desired = entry.format === "pin" ? generatePin() : generateSecret();
     } else {
       const supplied = input[entry.slug];
       if (isBlank(supplied)) {
