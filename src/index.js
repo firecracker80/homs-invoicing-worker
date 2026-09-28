@@ -1,6 +1,7 @@
 // index.js (v2) — Cloudflare Worker entry
 // POST /booking-created ← GHL Webhook action (after Calcular Reserva)
 import { composeBooking } from "./booking-composer.js";
+import { listingsFrom, composeMultiListing } from "./multi-listing.js";
 import { createOrder } from "./paypal.js";
 import { createCheckoutSession } from "./stripe.js";
 import { handlePayPalReturn, handlePayPalWebhook, handleStripeReturn, handleStripeWebhook, handleGhlInvoicePaid } from "./payment.js";
@@ -254,6 +255,31 @@ async function handleBookingCreated(request, env) {
       gateway: existing.gateway || "paypal",
       gatewayRef: existing.paypal?.orderId || existing.stripe?.sessionId || existingInvoiceId || "",
       idempotent: true
+    });
+  }
+
+  // A bundled booking is several stays under one reservation, and a snapshot
+  // holds exactly one. It becomes one child snapshot per listing plus a parent
+  // that owns the money side -- see multi-listing.js for why that shape and not
+  // a snapshot that holds two properties.
+  //
+  // Returns early: the invoice and gateway work below is per-reservation, and
+  // the parent is what the guest paid against. Wiring that up needs the real
+  // bundled payload in front of us, so for now the reservation is recorded
+  // correctly and priced per listing, and says plainly that it stopped there.
+  const listings = listingsFrom(payload);
+  if (listings) {
+    const { parent, children } = composeMultiListing(payload, tenant, listings);
+    for (const child of children) await env.BOOKINGS.put(child.bookingId, JSON.stringify(child));
+    await env.BOOKINGS.put(parent.bookingId, JSON.stringify(parent));
+    console.log(`Multi-listing booking ${parent.bookingId}: ${children.length} listings recorded`);
+    return json({
+      bookingId: parent.bookingId,
+      mode: "multi_listing_recorded",
+      listingCount: children.length,
+      childBookingIds: parent.childBookingIds,
+      rentTotal: parent.charges.rentTotal.toFixed(2),
+      pending: "invoice_and_payment_not_wired_for_bundled_bookings",
     });
   }
 
