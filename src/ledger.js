@@ -38,6 +38,14 @@ import {
 const toMinor = n => Math.round(Number(n) * 100);
 const round2 = n => Math.round(n * 100) / 100;
 
+// Airbnb's host-only service fee, and the rate the shadow commission line is
+// reckoned against for every tenant that has not set its own. See the comment
+// at the row itself for why this is a default rather than a per-client field.
+export const OTA_RATE_DEFAULT = 0.155;
+
+// "15.5%", and "15%" rather than "15.0%". This is read by prospects.
+const formatPct = (rate) => `${Number((rate * 100).toFixed(1))}%`;
+
 // What the Transaction record's booking_total and net_payout hold.
 //
 // Rent plus cleaning, and deliberately NOT the processing fee or the deposit:
@@ -113,14 +121,32 @@ export async function writeLedgerEntries(env, tenant, snapshot, captures) {
     });
   }
 
-  // 6. Shadow OTA commission -- informational only, no real money moved.
-  // Skipped entirely unless the tenant has actually configured a rate --
-  // never guess a commission percentage on a client's behalf.
-  if (tenant.otaRate > 0) {
+  // 6. Shadow OTA commission -- informational only, no real money moved, and
+  // excluded from incomeTotal on every statement.
+  //
+  // It used to be skipped unless a tenant had configured a rate, on the
+  // reasoning that guessing a commission percentage for a client would be
+  // worse than showing nothing. In practice no tenant ever had one: otaRate
+  // lives only in KV, is not a custom value, and is not in the provisioning
+  // blueprint -- so the number the marketing leans on had never been written
+  // for anybody, and could not be turned on through onboarding at all.
+  //
+  // Yari's call, 2026-09-28: 15.5% across the board. It is Airbnb's current
+  // host-only fee, Airbnb is the majority channel, and it is the best
+  // documented number to defend if a prospect pushes back. It does not vary by
+  // client, so a default beats a field nobody fills in.
+  //
+  // Still overridable: a tenant with a different channel mix can set its own,
+  // and setting it to 0 turns the line off entirely.
+  const otaRate = tenant.otaRate ?? OTA_RATE_DEFAULT;
+  if (otaRate > 0) {
     rows.push({
       recipient: "owner", recipientName: ownerName, category: "shadow", entry_type: "shadow_ota_commission",
-      amount: round2(tenant.otaRate * basis), source: "payment_confirmed",
-      description: `What a ${Math.round(tenant.otaRate * 100)}% OTA commission would have cost on this booking`
+      amount: round2(otaRate * basis), source: "payment_confirmed",
+      // Math.round rendered 0.155 as "16%" beside an amount computed at 15.5%
+      // -- a line arguing with itself, on the one figure meant to be shown to
+      // prospects. One decimal, and no trailing ".0" on a whole number.
+      description: `What a ${formatPct(otaRate)} OTA commission would have cost on this booking`
     });
   }
 
