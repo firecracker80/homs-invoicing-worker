@@ -327,6 +327,110 @@ export function propertyNameFromInvoice(items, tenant) {
   };
 }
 
+// Reprice the guest's existing invoice after a stay changed length.
+//
+// A booking settled by GHL invoice has no capture to charge against, so the
+// old code fell through to createOrder and raised a PayPal order for the
+// difference -- on DEMO-HOMS, against a sandbox account, for a guest who had
+// paid by invoice and would never see it. Found 2026-09-28 on booking
+// SiKoozWmXBEFIaiIqOkO: the Transaction record repriced correctly, the invoice
+// still read paid, and the extra two nights were collectible nowhere.
+//
+// PUTting new items onto a paid invoice is the supported move: GHL recomputes
+// the total, works out amountDue itself, and flips status to partially_paid.
+// The guest pays from the link they already have.
+//
+// Deliberately does NOT re-send the invoice. That would email every guest on
+// every date change, and whether they hear about it is a decision for a
+// workflow that can see the reason, not a side effect of repricing.
+export async function updateInvoiceForReschedule(
+  { tenant, env, locationId, invoiceId, snapshot, previousNights },
+  fetchImpl = fetch
+) {
+  const existing = await ghlFetch(
+    tenant, env, `/invoices/${invoiceId}?altId=${encodeURIComponent(locationId)}&altType=location`, {}, fetchImpl
+  );
+
+  // Our own lines are rebuilt from the new totals rather than edited, the same
+  // way enrichAndSendInvoice treats them.
+  const nativeItems = (existing.invoiceItems || []).filter((i) => !OUR_LINES.has(i?.name));
+  if (!nativeItems.length) {
+    return { ok: false, reason: "no_native_items", detail: `Invoice ${invoiceId} has no stay line to reprice.` };
+  }
+
+  // The first native line is the stay, by the same convention repriceFromInvoice
+  // reads it back with. Keep the shape the guest is already looking at: a line
+  // billed per night stays per night with a new quantity, and a line billed as
+  // one lump stays one lump with a new amount. Rewriting a "9 x 135" line into
+  // a single "1215" is a worse invoice even though the total matches.
+  const [stayLine, ...otherNative] = nativeItems;
+  const billedPerNight = previousNights > 1 && Number(stayLine.qty) === previousNights;
+  const newStayLine = billedPerNight
+    ? { ...stayLine, qty: snapshot.stay.nights }
+    : { ...stayLine, amount: round2(snapshot.charges.rentTotal), qty: 1 };
+
+  // The processing fee is recomputed from the invoice's own new subtotal rather
+  // than read off the snapshot.
+  //
+  // The gateway path charges a fee on the DELTA and leaves
+  // snapshot.charges.processingFee at whatever the guest already paid, which is
+  // right when the difference is a separate order. An invoice is not a
+  // difference -- it is the whole bill, and a fee line still reading the
+  // original stay's amount understates what the guest owes. Same basis
+  // repriceFromInvoice used when the invoice was first built: the fee applies to
+  // everything on it, plus any deposit.
+  const cur = tenant.currency || "USD";
+  const nativeSubtotal = round2([newStayLine, ...otherNative]
+    .reduce((s, i) => s + Number(i.amount || 0) * Number(i.qty || 1), 0));
+  const deposit = round2(snapshot.securityDeposit?.total || 0);
+  const feePct = snapshot.charges.feePct ?? tenant.processingFeePct ?? 0.06;
+  const processingFee = round2(feePct * (nativeSubtotal + deposit));
+
+  const ourLines = [];
+  if (deposit > 0) ourLines.push({ name: DEPOSIT_LINE, currency: cur, amount: deposit, qty: 1 });
+  if (processingFee > 0) ourLines.push({ name: FEE_LINE, currency: cur, amount: processingFee, qty: 1 });
+
+  const invoiceItems = [newStayLine, ...otherNative, ...ourLines];
+
+  const updated = await ghlFetch(
+    tenant, env, `/invoices/${invoiceId}`,
+    {
+      method: "PUT",
+      body: {
+        altId: locationId,
+        altType: "location",
+        name: existing.name || `Reserva ${snapshot.bookingId}`,
+        title: existing.title,
+        currency: existing.currency || tenant.currency || "USD",
+        invoiceNumber: existing.invoiceNumber || snapshot.bookingId,
+        contactDetails: existing.contactDetails,
+        invoiceItems,
+        issueDate: dateOnly(existing.issueDate) || dateOnly(new Date().toISOString()),
+        dueDate: dateOnly(existing.dueDate) || dateOnly(new Date().toISOString()),
+        // Both of these 422 if omitted, and neither is marked required. Same
+        // two traps enrichAndSendInvoice already pays for; kept in step here.
+        discount: existing.discount || { value: 0, type: "percentage" },
+        businessDetails: existing.businessDetails
+      }
+    },
+    fetchImpl
+  );
+
+  // GHL computes amountDue, so report what it decided rather than what we
+  // expected it to decide -- those disagreeing is worth seeing, not hiding.
+  const after = updated?.invoice || updated || {};
+  return {
+    ok: true,
+    invoiceId,
+    invoiceNumber: existing.invoiceNumber || null,
+    status: after.status ?? null,
+    processingFee,
+    nativeSubtotal,
+    amountDue: after.amountDue ?? null,
+    total: after.total ?? null,
+  };
+}
+
 export async function enrichAndSendInvoice(
   { tenant, env, locationId, invoiceId, snapshot, contact, userId, hasPets },
   fetchImpl = fetch
