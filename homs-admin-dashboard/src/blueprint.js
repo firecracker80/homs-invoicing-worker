@@ -135,21 +135,26 @@ export function generateSecret() {
 
 // A secret a person types, so it cannot be the 43-character base64 above.
 //
-// Eight characters rather than the four or six a "PIN" suggests: the form that
-// asks for it is publicly reachable, so this is not a phone keypad protected by
-// three attempts and a lockout. Four digits is ten thousand guesses. Eight of
-// this alphabet is about three trillion, and is still one short line to type.
+// Digits, by Yari's call on 2026-09-28: a PIN that is actually a PIN. Nobody
+// has to ask whether a character is upper or lower case, it types on a phone
+// keypad, and it reads aloud over the phone without spelling anything.
 //
-// I, l, 1, O and 0 are excluded -- a manager reading this off a screen and
-// typing it into a form should not have to guess which character it is.
-const PIN_ALPHABET = "abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+// Eight of them rather than the four a keypad suggests, because the form that
+// asks for it is publicly reachable -- this is not a lock screen with three
+// attempts and a lockout. Four digits is ten thousand guesses; eight is a
+// hundred million, and still one short line to type.
+const PIN_ALPHABET = "0123456789";
 
 export function generatePin(length = 8) {
-  const bytes = new Uint8Array(length);
-  crypto.getRandomValues(bytes);
-  // Modulo bias is negligible at this alphabet size and irrelevant at this
-  // threat model; uniformity here is not what this is defending.
-  return Array.from(bytes, (b) => PIN_ALPHABET[b % PIN_ALPHABET.length]).join("");
+  // Uint32 rather than Uint8, which is the whole trick. 256 is not a multiple
+  // of 10, so taking a byte mod 10 makes the digits 0-5 about 4% likelier than
+  // 6-9. Over 2^32 the same remainder leaves a skew of six values in four
+  // billion. The alternative was rejection sampling, which removes the bias
+  // and adds a refill loop nothing can meaningfully test -- this removes it
+  // and adds nothing.
+  const values = new Uint32Array(length);
+  crypto.getRandomValues(values);
+  return Array.from(values, (v) => PIN_ALPHABET[v % 10]).join("");
 }
 
 export function derivedValue(slug, { locationId }) {
