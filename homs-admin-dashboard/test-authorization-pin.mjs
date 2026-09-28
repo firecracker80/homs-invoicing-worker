@@ -33,9 +33,8 @@ const entry = BLUEPRINT.find((e) => e.slug === "wauthorization_pin");
 {
   const pin = generatePin();
   assert.strictEqual(pin.length, 8, "short enough to type");
-  assert.match(pin, /^[a-zA-Z2-9]{8}$/, "and nothing in it needs explaining");
-  assert.doesNotMatch(pin, /[Il1O0]/,
-    "no character anyone has to squint at -- a PIN misread is a PIN retyped");
+  assert.match(pin, /^[0-9]{8}$/, "digits only -- no case to get wrong, types on a keypad, reads aloud");
+  assert.doesNotMatch(pin, /[a-zA-Z]/, "nothing to spell out over the phone");
   assert.notStrictEqual(pin.length, generateSecret().length,
     "deliberately not the machine-readable secret shape");
   console.log("2) A generated PIN is eight unambiguous characters, not a 43-character token");
@@ -55,7 +54,7 @@ const entry = BLUEPRINT.find((e) => e.slug === "wauthorization_pin");
   const plan = planReconcile([], { locationId: LOC }).plan;
   const step = plan.find((p) => p.slug === "wauthorization_pin");
   assert.strictEqual(step.action, "create", "a fresh account gets one without being asked");
-  assert.match(step.desired, /^[a-zA-Z2-9]{8}$/, "and what it mints is a PIN, not a token");
+  assert.match(step.desired, /^[0-9]{8}$/, "and what it mints is a PIN, not a token");
   console.log("4) Provisioning a new account mints a PIN-shaped value for it");
 }
 
@@ -85,6 +84,9 @@ const entry = BLUEPRINT.find((e) => e.slug === "wauthorization_pin");
 {
   const existing = [{
     id: "cv1", name: "WAuthorization PIN",
+    // Deliberately the OLD alphanumeric shape: the accounts provisioned before
+    // the switch to digits hold one of these, and changing the alphabet must
+    // not become a reason to rotate a PIN a manager already has written down.
     fieldKey: "{{ custom_values.wauthorization_pin }}", value: "Kp7mR2xQ",
   }];
   const plan = planReconcile(existing, { locationId: LOC }).plan;
