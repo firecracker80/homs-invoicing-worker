@@ -17,6 +17,7 @@ import { updateObjectRecord } from "./ghl.js";
 import { adminAuthorized, notifyAndRecord, cancellationTier } from "./cancellation.js";
 import { paymentConfirmedPayload } from "./payment.js";
 import { updateGhlBookingDates } from "./ghl-calendar.js";
+import { updateInvoiceForReschedule } from "./ghl-invoice.js";
 
 function resolveSecret(tenant, env, nameKey, inlineKey) {
   if (tenant[nameKey] && env[tenant[nameKey]]) return env[tenant[nameKey]];
@@ -307,8 +308,22 @@ export async function handleReschedule(request, env) {
       items: adjustmentItems
     }];
 
+    // Which gateway settles the difference is a fact about THIS booking, not
+    // about the account. snapshot.gateway records how the guest actually paid;
+    // tenant.gateway is only what the account is configured with today. Reading
+    // the tenant here handed a GHL-invoice guest a PayPal sandbox order for two
+    // extra nights -- real intent, instrument they have no relationship with,
+    // and no workflow surfacing the link. DEMO-HOMS, 2026-09-28.
+    const settleVia = snapshot.gateway || tenant.gateway || "paypal";
+    const rescheduleInvoiceId = snapshot.ghlInvoice?.invoiceId;
+
     let approveUrl, gatewayRef;
-    if ((tenant.gateway || "paypal") === "stripe") {
+    if (settleVia === "ghl_invoice" && rescheduleInvoiceId) {
+      // Nothing to create: the guest already has an invoice. It is repriced
+      // further down, once the snapshot carries the new totals, and GHL turns
+      // the difference into a balance due on the link they already hold.
+      settlement = { type: "invoice_balance_due", amount: chargeAmount, invoiceId: rescheduleInvoiceId };
+    } else if ((tenant.gateway || "paypal") === "stripe") {
       const fakeSnap = {
         bookingId: childId, locationId: snapshot.locationId, gateway: "stripe",
         stay: { nights: newNights, nightlyRate: rate },
@@ -324,6 +339,10 @@ export async function handleReschedule(request, env) {
       gatewayRef = orderId;
     }
 
+    // Only the gateway paths raise a separate charge to be settled later. The
+    // invoice path has already decided what it is doing and has no child order
+    // to track -- writing one would leave an adjustment nobody can ever settle.
+    if (settlement.type !== "invoice_balance_due") {
     settlement = { type: "additional_charge_pending", amount: chargeAmount, approveUrl, gatewayRef, childId };
 
     // Store a lightweight snapshot so /paypal/return or the webhook can find
@@ -344,6 +363,7 @@ export async function handleReschedule(request, env) {
       propertyCode: snapshot.propertyCode,
       settled: false
     }));
+    }
 
   } else if (totalDelta < 0) {
     // Refund rent-portion and deposit-portion SEPARATELY, against the capture
@@ -418,6 +438,36 @@ export async function handleReschedule(request, env) {
   snapshot.charges.grandTotal = round2(
     newRent + snapshot.charges.cleaningFee + snapshot.charges.processingFee + newDeposit
   );
+  // Reprice the guest's invoice now that the snapshot holds the new totals --
+  // buildAppendItems reads them, so this cannot run back in the settlement
+  // branch where the charges are still the old stay's.
+  //
+  // A failure here does not fail the reschedule: the dates have moved, the
+  // ledger is about to be written, and an invoice that could not be repriced is
+  // one call to recover. Throwing would leave the caller unsure which half
+  // happened, which is the same trap provisionTenantRecord avoids.
+  if (settlement.type === "invoice_balance_due") {
+    try {
+      const result = await updateInvoiceForReschedule({
+        tenant, env, locationId: snapshot.locationId,
+        invoiceId: settlement.invoiceId, snapshot, previousNights: oldStay.nights,
+      });
+      settlement = { ...settlement, ...result };
+      // The guest is now billed a larger fee, so the booking has to say so --
+      // the invoice and the snapshot disagreeing about what was charged is the
+      // same class of drift #61 closed on the Transaction record.
+      if (result.ok && result.processingFee != null) {
+        snapshot.charges.processingFee = result.processingFee;
+        snapshot.charges.grandTotal = round2(
+          newRent + snapshot.charges.cleaningFee + result.processingFee + newDeposit
+        );
+      }
+    } catch (err) {
+      console.error(`Reschedule invoice reprice failed for ${snapshot.bookingId}: ${err.message}`);
+      settlement = { ...settlement, ok: false, reason: "invoice_update_failed", detail: err.message };
+    }
+  }
+
   snapshot.reschedules = [...(snapshot.reschedules || []), {
     at: new Date().toISOString(),
     from: oldStay,
@@ -524,6 +574,10 @@ export async function handleReschedule(request, env) {
     totalDelta: totalDelta.toFixed(2),
     settlementType: settlement.type,
     approveUrl: settlement.approveUrl || "",
+    // Balance now owed on the guest's existing invoice, when the difference
+    // went there instead of onto a new payment link.
+    balanceDue: settlement.amountDue != null ? Number(settlement.amountDue).toFixed(2) : "",
+    invoiceNumber: settlement.invoiceNumber || "",
     adminFeeRetained: (cancellationInfo?.adminFee ?? 0).toFixed(2),
     cancellationTier: cancellationInfo?.tier || "",
     propertyName: snapshot.propertyCode || tenant.brandName,
