@@ -47,6 +47,13 @@ export { adminAuthorized };
 // booking has no gateway capture to refund against. Greppable on purpose: this
 // is the list of refunds someone still owes a guest.
 export const MANUAL_REFUND_REF = "manual_refund_pending";
+
+// Read by a person in a notification, so it says what to pay rather than which
+// branch of the code produced it.
+const MANUAL_REFUND_LABELS = {
+  rent_refund_needed_manual: "Rent",
+  deposit_refund_needed_manual: "Deposit",
+};
 const MANUAL_SUFFIX = " — refund to be issued manually";
 
 // ---- tier math ----
@@ -500,14 +507,41 @@ export async function handleCancel(request, env) {
     await env.BOOKINGS.put(snapshot.bookingId, JSON.stringify(snapshot));
   }
 
+  // What the manager has to DO, not just what happened.
+  //
+  // On the ghl_invoice gateway there is no capture to refund against, so every
+  // refund is issued by hand -- by design, and GHL's own native cancellation
+  // keeps it that way on purpose. Which means a cancellation is not finished
+  // when this fires; it is finished when a person has moved the money.
+  //
+  // manualRefunds only ever existed on the HTTP response, and nothing reads
+  // that: this notify is a separate outbound POST to GHL's inbound webhook. So
+  // a notification workflow could say a booking was cancelled and could not say
+  // the guest is owed 132.50, which is the only part anyone has to act on.
+  //
+  // Flat strings, like the rest of this payload -- GHL merge fields and If/Else
+  // conditions both work on strings, and a workflow branching on "yes" is
+  // easier to get right than one branching on a number that might be "0.00".
+  const manualRefundTotal = round2(manualRefunds.reduce((sum, r) => sum + (Number(r.amount) || 0), 0));
+
   await notifyAndRecord(env, snapshot, tenant.ghlCancellationUrl, {
     event: "booking_cancelled", bookingId: snapshot.bookingId,
     contactId: snapshot.ghlContactId || "",
     email: snapshot.guest?.email || "", paid: true,
+    guestName: snapshot.guest?.name || "",
     tier: calc.tier, chargePct: String(Math.round(calc.chargePct * 100)),
     chargeTotal: calc.charge.toFixed(2),
     refundTotal: calc.totalRefund.toFixed(2),
     depositRefund: calc.depositRefund.toFixed(2),
+    manualRefundRequired: manualRefundTotal > 0 ? "yes" : "no",
+    manualRefundTotal: manualRefundTotal.toFixed(2),
+    manualRefundDetail: manualRefunds.length
+      ? manualRefunds.map((r) => `${MANUAL_REFUND_LABELS[r.type] || r.type} ${Number(r.amount).toFixed(2)}`).join(", ")
+      : "",
+    // Separate from the above on purpose: a refund the gateway REFUSED is a
+    // fault, not a task, and a manager reading one as the other would either
+    // pay twice or not at all.
+    refundFailed: refundFailures.length ? "yes" : "no",
     checkIn: snapshot.stay.checkIn, propertyName: snapshot.propertyCode || tenant.brandName
   });
 
