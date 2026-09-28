@@ -38,6 +38,19 @@ import {
 const toMinor = n => Math.round(Number(n) * 100);
 const round2 = n => Math.round(n * 100) / 100;
 
+// What the Transaction record's booking_total and net_payout hold.
+//
+// Rent plus cleaning, and deliberately NOT the processing fee or the deposit:
+// the fee is the guest paying the gateway's cut and the deposit is the guest's
+// own money held, so neither is revenue.
+//
+// Exported because a reschedule has to recompute it and settlement has to write
+// it, and those two being separate expressions of the same rule is exactly how
+// the record went stale in the first place -- a duration change moved the dates
+// on the Transaction and left the money at whatever the original booking cost.
+export const bookingTotalOf = (snapshot) =>
+  round2(snapshot.charges.rentTotal + snapshot.charges.cleaningFee);
+
 function resolveSecret(tenant, env, nameKey, inlineKey) {
   if (tenant[nameKey] && env[tenant[nameKey]]) return env[tenant[nameKey]];
   return tenant[inlineKey];
@@ -220,7 +233,7 @@ async function syncRowsToGHL(env, tenant, snapshot, rows, now) {
       // No OTA platform fee applies to a directly-booked, PayPal/Stripe-settled
       // reservation -- the guest-paid processing fee covers the gateway's own
       // cut, so net payout to the business is the full rent+cleaning total.
-      const bookingTotal = round2(snapshot.charges.rentTotal + snapshot.charges.cleaningFee);
+      const bookingTotal = bookingTotalOf(snapshot);
       const transaction = await createObjectRecord(pit, locationId, "custom_objects.transactions", {
         transaction_name: `${snapshot.guest?.name || "Guest"} — ${snapshot.stay.checkIn}`,
         guest_name: snapshot.guest?.name || "",

@@ -12,7 +12,7 @@ import { calcSecurityDeposit, round2 } from "./deposit-engine.js";
 import { depositConfigFor } from "./policy.js";
 import { createOrder, getAccessToken } from "./paypal.js";
 import { createCheckoutSession } from "./stripe.js";
-import { writeAndSyncRows } from "./ledger.js";
+import { writeAndSyncRows, bookingTotalOf } from "./ledger.js";
 import { updateObjectRecord } from "./ghl.js";
 import { adminAuthorized, notifyAndRecord, cancellationTier } from "./cancellation.js";
 import { paymentConfirmedPayload } from "./payment.js";
@@ -486,8 +486,19 @@ export async function handleReschedule(request, env) {
 
     if (transactionId) {
       const pit = resolveSecret(tenant, env, "ghlPitSecretName", "ghlPit");
+      // The money moves with the dates. A stay extended by two nights was
+      // writing its new checkout to the Transaction and leaving booking_total
+      // at the original three nights, so the CRM under-reported the booking for
+      // as long as anyone cared to look -- found on DEMO-HOMS 2026-09-27.
+      //
+      // platform_fee is not written: it is 0 at creation and nothing about a
+      // date change earns a platform its own cut.
+      const bookingTotal = bookingTotalOf(snapshot);
       if (pit) await updateObjectRecord(pit, snapshot.locationId, "custom_objects.transactions", transactionId, {
-        checkin_date: newCheckIn, checkout_date: newCheckOut,
+        checkin_date: newCheckIn,
+        checkout_date: newCheckOut,
+        booking_total: { value: bookingTotal, currency: "default" },
+        net_payout: { value: bookingTotal, currency: "default" },
       });
     }
   } catch (err) {
