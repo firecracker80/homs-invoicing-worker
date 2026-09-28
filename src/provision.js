@@ -118,7 +118,7 @@ const FIELD_MAP = {
 
 // Present in GHL but never copied into KV. Reported by slug only, value
 // withheld, so the response doesn't echo a credential back either.
-const SKIPPED_SENSITIVE = new Set(["wpaypal_secret_key"]);
+const SKIPPED_SENSITIVE = new Set(["wpaypal_secret_key", "wauthorization_pin"]);
 
 // Still present in older client accounts, no longer read by the Worker.
 const RETIRED = new Set(["wcleaning_fee"]);
