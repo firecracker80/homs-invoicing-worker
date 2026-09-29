@@ -22,6 +22,7 @@
 //   notice period.
 
 import { getAccessToken } from "./paypal.js";
+import { isMultiListingParent } from "./multi-listing.js";
 import { writeAndSyncRows } from "./ledger.js";
 import { updateObjectRecord } from "./ghl.js";
 import { isLegacyPolicy, nativeCancellationPolicy } from "./policy.js";
@@ -322,10 +323,83 @@ export function resolveAsOf(rawAsOf, nowMs) {
   return { ms, backfilled: true };
 }
 
+// Cancel every listing on a bundled reservation, by running the ordinary
+// single-listing cancellation against each child in turn.
+//
+// Deliberately re-enters handleCancel per child rather than lifting the pricing
+// out into something shared. Every guard that path has -- already-cancelled,
+// unpaid, asOf bounds, the tier maths, the ledger write, the notify -- applies
+// per listing and is easy to get subtly wrong in a second implementation.
+//
+// One child failing does not stop the rest. A reservation half-cancelled and
+// silent is the worst outcome available here, so each result is reported and
+// the totals are summed from what actually happened.
+async function handleCancelMultiListing(request, env, parent, body) {
+  const results = [];
+  for (const childId of parent.childBookingIds || []) {
+    const childRequest = {
+      method: request.method,
+      url: request.url,
+      headers: request.headers,
+      json: async () => ({ ...body, bookingId: childId }),
+    };
+    try {
+      const res = await handleCancel(childRequest, env);
+      const outcome = await res.json();
+      results.push({ bookingId: childId, status: res.status, ...outcome });
+    } catch (err) {
+      console.error(`Multi-listing cancel failed for ${childId}: ${err.message}`);
+      results.push({ bookingId: childId, status: 500, error: err.message });
+    }
+  }
+
+  const priced = results.filter((r) => r.calculation);
+  const sumOf = (pick) => round2(priced.reduce((s, r) => s + (Number(pick(r)) || 0), 0));
+
+  parent.cancelled = true;
+  parent.cancellation = {
+    at: new Date().toISOString(),
+    reason: body.reason || "",
+    listings: results.map((r) => ({
+      bookingId: r.bookingId, status: r.status,
+      tier: r.calculation?.tier ?? null,
+      charge: r.calculation?.charge ?? null,
+      refund: r.calculation?.totalRefund ?? null,
+    })),
+    chargeTotal: sumOf((r) => r.calculation.charge),
+    refundTotal: sumOf((r) => r.calculation.totalRefund),
+    manualRefundTotal: round2(results
+      .flatMap((r) => r.manualRefunds || [])
+      .reduce((s, m) => s + (Number(m.amount) || 0), 0)),
+  };
+  await env.BOOKINGS.put(parent.bookingId, JSON.stringify(parent));
+
+  const failed = results.filter((r) => r.status >= 400);
+  return json({
+    cancelled: true,
+    multiListing: true,
+    listingCount: results.length,
+    cancellation: parent.cancellation,
+    // Named rather than counted: "1 of 2 failed" tells nobody which guest to
+    // go and sort out.
+    failedListings: failed.map((r) => ({ bookingId: r.bookingId, status: r.status, error: r.error || null })),
+  }, failed.length ? 207 : 200);
+}
+
 export async function handleCancel(request, env) {
   const ctx = await loadContext(request, env);
   if (ctx.error) return ctx.error;
   const { body, snapshot, tenant } = ctx;
+
+  // A bundled booking cancels as a unit -- GHL gives the guest no way to drop
+  // one listing and keep the other -- so cancelling the parent cancels every
+  // child. Each one prices against its OWN check-in date, which is the case
+  // that makes this worth doing properly: a guest who has already checked into
+  // the first listing and not yet started the second lands in the checked-in
+  // tier for one and an ordinary tier for the other, with no branch knowing it.
+  if (isMultiListingParent(snapshot)) {
+    return handleCancelMultiListing(request, env, snapshot, body);
+  }
 
   if (snapshot.cancelled) return json({ alreadyCancelled: true, cancellation: snapshot.cancellation });
 
