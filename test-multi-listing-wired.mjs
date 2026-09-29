@@ -369,9 +369,9 @@ const WITH_PET = [...INVOICE_ITEMS, { name: "Pet Fee", amount: 300, qty: 1 }];
 
   // One pet fee across two listings cannot be attributed, so it is kept whole
   // on the first and flagged rather than split on a guess.
-  assert.strictEqual(a.charges.otherFees, 300);
-  assert.strictEqual(b.charges.otherFees, undefined, "the second listing earns none of it");
-  assert.strictEqual(JSON.parse(store.get(BOOKING)).feePairing.reason, "fee_line_count_mismatch",
+  assert.strictEqual(a.charges.petFee, 300);
+  assert.strictEqual(b.charges.petFee, undefined, "the second listing earns none of it");
+  assert.strictEqual(JSON.parse(store.get(BOOKING)).petFeePairing.reason, "pet_fee_line_count_mismatch",
     "and the reservation records that the attribution is a fallback, not a pairing");
 
   // The processing fee follows it, because the guest paid a percentage of the
@@ -384,10 +384,10 @@ const WITH_PET = [...INVOICE_ITEMS, { name: "Pet Fee", amount: 300, qty: 1 }];
   // divides the payment by the children, so a parent that did not carry what
   // they carry would describe a different reservation from the one being paid.
   const parent = JSON.parse(store.get(BOOKING));
-  assert.strictEqual(parent.charges.otherFees, 300);
+  assert.strictEqual(parent.charges.petFee, 300);
   assert.strictEqual(
     Math.round((parent.charges.rentTotal + parent.charges.cleaningFee
-      + parent.charges.otherFees + parent.charges.processingFee) * 100) / 100,
+      + parent.charges.petFee + parent.charges.processingFee) * 100) / 100,
     1584.7,
     "and the reservation adds up to the invoice the guest was sent"
   );
@@ -407,20 +407,40 @@ const WITH_PET = [...INVOICE_ITEMS, { name: "Pet Fee", amount: 300, qty: 1 }];
   console.log("14) A bundled reservation with a pet fee settles whole, with no variance left over");
 }
 
-// ---- 15. and none of it is quietly turned into income ---------------
-// No ledger row credits a pet fee to anyone on a single-listing booking --
-// cleaning is the only native fee that is split -- so a bundled booking
-// inventing one would pay somebody money their own single bookings do not.
-// Whether these fees SHOULD be income, and whose, is a question about the
-// business rather than about bundling.
+// ---- 15. the pet fee is split like the rent it is part of -----------
+// Yari, 2026-09-29: the pet fee is part of the rent price. So the listing that
+// earned it splits it on the same terms as its rent -- 405 of rent plus 300 of
+// pet fee is a 705 basis, not 405.
 {
   await book({ items: WITH_PET });
   const a = JSON.parse(store.get(`${BOOKING}#1`));
+  const b = JSON.parse(store.get(`${BOOKING}#2`));
+
+  assert.strictEqual(a.payout.basis, 705, "rent plus the pet fee it carries");
+  assert.strictEqual(a.payout.owner, 599.25, "85% of 705, not of 405");
+  assert.strictEqual(a.payout.manager, 105.75);
+  assert.strictEqual(Math.round((a.payout.owner + a.payout.manager) * 100) / 100, a.payout.basis,
+    "and the two shares are the whole of it");
+
+  assert.strictEqual(b.payout.basis, b.charges.rentTotal,
+    "the listing with no pet fee splits its rent alone");
+
+  // The stay's own price is untouched. rentTotal divides by nights to give
+  // nightlyRate, which sizes the deposit and drives the nights-based
+  // cancellation tiers -- and a pet fee does not buy a night.
+  assert.strictEqual(a.charges.rentTotal, 405, "the pet fee is not folded into the rent itself");
+  assert.strictEqual(a.stay.nightlyRate, 135, "so the nightly rate is still the nightly rate");
+  console.log("15) The pet fee is split like rent, without being mistaken for it");
+}
+
+// ---- 16. a tax is not, and neither is a fee nobody has classified ---
+{
+  await book({ items: [...INVOICE_ITEMS, { name: "ITBIS", amount: 100, qty: 1 }] });
+  const a = JSON.parse(store.get(`${BOOKING}#1`));
+  assert.strictEqual(a.charges.otherFees, 100, "attributed, so the reservation still adds up");
   assert.strictEqual(a.payout.basis, a.charges.rentTotal,
-    "the split is still on rent alone, with the pet fee outside it");
-  assert.strictEqual(a.payout.owner + a.payout.manager, a.charges.rentTotal,
-    "so nobody is credited with the fee, the same as on a single booking");
-  console.log("15) The fee is attached to a listing without being made income nobody else earns");
+    "but not split -- a tax is remitted, not earned");
+  console.log("16) A tax is attached to a listing without being paid to anybody");
 }
 
 console.log("\nPASS — a bundled reservation is invoiced once, split into its listings, and settles as each of them.");

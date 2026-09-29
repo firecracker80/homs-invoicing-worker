@@ -16,7 +16,7 @@
 // nothing. Invoice line order is chronological order.
 import assert from "node:assert";
 
-const { pairListings, pairCleaning, pairOtherFees } = await import("./src/multi-listing.js");
+const { pairListings, pairCleaning, pairOtherFees, pairPetFees } = await import("./src/multi-listing.js");
 
 const tenant = { currency: "USD" };
 
@@ -222,15 +222,18 @@ const TWO = [{ propertyCode: "Test Villa 2" }, { propertyCode: "Test Villa 3" }]
     { name: "Cleaning Fee", amount: 65, qty: 1 },
     { name: "Pet Fee", amount: 200, qty: 1 },
   ];
-  const fees = pairOtherFees(items, TWO, tenant);
-  assert.strictEqual(fees.ok, true);
-  assert.deepStrictEqual(fees.perListing, [150, 200], "paired in line order, like everything else");
-  assert.strictEqual(fees.total, 350);
+  const pets = pairPetFees(items, TWO, tenant);
+  assert.strictEqual(pets.ok, true);
+  assert.deepStrictEqual(pets.perListing, [150, 200], "paired in line order, like everything else");
+  assert.strictEqual(pets.total, 350);
 
-  // And the two do not double-count each other.
+  // Three buckets, and none of them counts another's money. The pet fee is
+  // split like rent; cleaning has its own recipient; the rest is neither.
   assert.deepStrictEqual(pairCleaning(items, TWO).perListing, [65, 65],
-    "cleaning is still cleaning, and is not counted again as an other fee");
-  console.log("12) Pet fees pair per listing, separately from the cleaning beside them");
+    "cleaning is still cleaning");
+  assert.strictEqual(pairOtherFees(items, TWO, tenant).total, 0,
+    "and neither of them is counted again as a leftover fee");
+  console.log("12) Pet fees pair per listing, apart from the cleaning and the leftovers");
 }
 
 {
@@ -244,7 +247,28 @@ const TWO = [{ propertyCode: "Test Villa 2" }, { propertyCode: "Test Villa 3" }]
   const fees = pairOtherFees(items, TWO, tenant);
   assert.deepStrictEqual(fees.perListing, [72.9, 118.8]);
   assert.strictEqual(fees.total, 191.7, "the whole of it, not the part somebody remembered to name");
-  console.log("13) A tax line is attributed too, because the definition is what is left over");
+  assert.strictEqual(pairPetFees(items, TWO, tenant).total, 0,
+    "and a tax is not revenue anybody earns -- it is remitted, so it stays out of the split");
+
+  // Names with "pet" in them that are not the pet fee. isPetFeeName is exact
+  // for this reason -- it would be splitting somebody's money on a substring.
+  // Each still lands somewhere, because what is left over is what makes the
+  // listings add up to the invoice.
+  const lookalikes = [
+    { name: "Test Villa 2", amount: 405, qty: 1 },
+    { name: "Pet Cleaning", amount: 40, qty: 1 },
+    { name: "Pet Insurance", amount: 25, qty: 1 },
+    { name: "Test Villa 3", amount: 660, qty: 1 },
+    { name: "Pet Cleaning", amount: 40, qty: 1 },
+    { name: "Pet Insurance", amount: 25, qty: 1 },
+  ];
+  assert.strictEqual(pairPetFees(lookalikes, TWO, tenant).total, 0,
+    "neither is split as a pet fee, on a name that merely contains the word");
+  assert.deepStrictEqual(pairCleaning(lookalikes, TWO).perListing, [40, 40],
+    "pet CLEANING is cleaning, and goes to whoever the cleaning goes to");
+  assert.deepStrictEqual(pairOtherFees(lookalikes, TWO, tenant).perListing, [25, 25],
+    "and the one that is neither is still attributed, so no money is lost");
+  console.log("13) A tax, and names containing \"pet\" that are not the pet fee, land without being split");
 }
 
 {
@@ -256,11 +280,11 @@ const TWO = [{ propertyCode: "Test Villa 2" }, { propertyCode: "Test Villa 3" }]
     { name: "Test Villa 3", amount: 660, qty: 1 },
     { name: "Pet Fee", amount: 300, qty: 1 },
   ];
-  const fees = pairOtherFees(items, TWO, tenant);
-  assert.strictEqual(fees.ok, false);
-  assert.strictEqual(fees.reason, "fee_line_count_mismatch");
-  assert.deepStrictEqual(fees.perListing, [300, 0]);
-  assert.strictEqual(fees.perListing.reduce((s, n) => s + n, 0), fees.total,
+  const pets = pairPetFees(items, TWO, tenant);
+  assert.strictEqual(pets.ok, false);
+  assert.strictEqual(pets.reason, "pet_fee_line_count_mismatch");
+  assert.deepStrictEqual(pets.perListing, [300, 0]);
+  assert.strictEqual(pets.perListing.reduce((s, n) => s + n, 0), pets.total,
     "nothing is lost, which is the whole point");
 
   // Nothing to attribute is a real answer, not a missing one.
