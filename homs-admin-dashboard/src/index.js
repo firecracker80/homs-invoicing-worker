@@ -696,6 +696,16 @@ export default {
           ? await handleVendorData(pit, locationId)
           : await handleData(pit, locationId);
         data.tenantLabel = tenant.label || locationId;
+        // OTA Channels are hidden unless a client has asked for them (Yari,
+        // 2026-09-29). The object and its records stay exactly where they are
+        // -- each listing holds the iCal links for the platforms it is on, and
+        // deleting that would cost real configuration -- but nothing about it
+        // is shown. Turning it back on for one account is one field in KV.
+        //
+        // Off by default rather than on, because nobody has asked. An account
+        // that had it visible yesterday loses a tab it was not using; an
+        // account that wants it gets it back without a deploy.
+        data.showOtaChannels = tenant.showOtaChannels === true;
         data.branding = tenant.branding?.primary ? tenant.branding : DEFAULT_BRANDING;
         return Response.json(data);
       } catch (err) {

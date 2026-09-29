@@ -217,6 +217,11 @@ async function apiFetch(url, opts = {}, allowPrompt = true) {
   return apiFetch(url, opts, false);
 }
 
+// Whether this account shows OTA Channels at all. The records are always
+// fetched -- the reports and the transaction joins read them for property and
+// commission names either way -- this only decides what is put on screen.
+const showOta = () => DATA?.showOtaChannels === true;
+
 async function loadData() {
   $("#loading").hidden = false;
   $("#error").hidden = true;
@@ -238,6 +243,15 @@ async function loadData() {
     if (!res.ok) throw new Error(json.error || "Failed to load data");
     DATA = json;
     applyBranding(json.branding);
+    // Hidden rather than removed, so turning the flag on needs no deploy.
+    const otaTab = document.querySelector('.tab[data-tab="ota"]');
+    if (otaTab) otaTab.hidden = !showOta();
+    const otaPanel = $("#panel-ota");
+    if (otaPanel && !showOta()) otaPanel.hidden = true;
+    const search = $("#search");
+    if (search && !showOta()) {
+      search.placeholder = search.placeholder.replace(/,\s*OTA channel/i, "");
+    }
     $("#fetchedAt").textContent = "Updated " + new Date(json.fetchedAt).toLocaleTimeString();
     // The header used to carry a hardcoded "DEMO" pill from when this only ran
     // against DEMO-HOMS -- it showed on every tenant regardless of account.
@@ -1171,7 +1185,7 @@ function renderOverview() {
   $("#panel-overview").innerHTML = `
     <div class="card-grid">
       <div class="stat-card"><div class="num">${properties.length}</div><div class="label">Properties</div></div>
-      <div class="stat-card"><div class="num">${otaChannels.length}</div><div class="label">OTA Channels</div></div>
+      ${showOta() ? `<div class="stat-card"><div class="num">${otaChannels.length}</div><div class="label">OTA Channels</div></div>` : ""}
       <div class="stat-card"><div class="num">${transactions.length}</div><div class="label">Transactions</div></div>
       <div class="stat-card"><div class="num">${checklists.length}</div><div class="label">Cleaning Checklists</div></div>
       <div class="stat-card"><div class="num">${inventoryItems.length}</div><div class="label">Inventory Items</div></div>
@@ -1227,6 +1241,7 @@ function renderProperties() {
 
 // ---------- OTA Channels ----------
 function renderOta() {
+  if (!showOta()) return;
   renderFilterableTab({
     tabKey: "ota", panelId: "#panel-ota", list: DATA.otaChannels,
     filterDefs: [
@@ -1459,7 +1474,7 @@ function renderReports() {
     byPaymentStatus[k] = (byPaymentStatus[k] || 0) + 1;
   }
 
-  const byOta = otaChannels.map((o) => {
+  const byOta = !showOta() ? [] : otaChannels.map((o) => {
     const txs = transactions.filter((t) => t.otaChannelId === o.id);
     const total = txs.reduce((sum, t) => sum + (Number(t.bookingTotal) || 0), 0);
     return { name: o.name, bookings: txs.length, total, commissionRate: o.commissionRate };
@@ -1478,11 +1493,12 @@ function renderReports() {
       revenueByProperty.map((r) => `<tr><td>${dash(r.name)}</td><td>${r.bookings}</td><td>${money(r.total)}</td><td>${money(r.payout)}</td></tr>`).join("") || emptyRow(4, "No data"),
       null)}
 
+    ${!showOta() ? "" : `
     <div class="toolbar"><div class="section-title" style="margin:0">Bookings by OTA channel</div>
       <button class="btn export-btn" data-export="bookings-by-ota">Export CSV</button></div>
     ${table(["Channel", "Bookings", "Booking Total", "Commission Rate"],
       byOta.map((r) => `<tr><td>${dash(r.name)}</td><td>${r.bookings}</td><td>${money(r.total)}</td><td>${r.commissionRate ?? "—"}${r.commissionRate !== null ? "%" : ""}</td></tr>`).join("") || emptyRow(4, "No data"),
-      null)}
+      null)}`}
 
     <div class="section-title">Transactions by payment status</div>
     <div class="card-grid">
@@ -1747,7 +1763,7 @@ function runSearch(query) {
 
   const groups = [
     ["Properties", DATA.properties, (p) => `${dash(p.name)} — ${dash(p.address)}`],
-    ["OTA Channels", DATA.otaChannels, (o) => `${dash(o.name)} — ${dash(o.propertyName)}`],
+    ...(showOta() ? [["OTA Channels", DATA.otaChannels, (o) => `${dash(o.name)} — ${dash(o.propertyName)}`]] : []),
     ["Transactions", DATA.transactions, (t) => `${dash(t.name)} — ${dash(t.guestName)} — ${dash(t.bookingReference)}`],
     ["Cleaning Checklists", DATA.checklists, (c) => `${dash(c.name)} — ${dash(c.propertyName)} — cleaner ${dash(c.cleanerContactName || c.cleanerNameService)}`],
     ["Expenses", DATA.expenses, (e) => `${dash(e.name)} — ${dash(e.propertyName)} — ${dash(e.category)}`],
