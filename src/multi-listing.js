@@ -29,6 +29,7 @@
 
 import { composeBooking } from "./booking-composer.js";
 import { isFeeLine, isCleaningFee } from "./ghl-invoice.js";
+import { isPetFeeName } from "./policy.js";
 
 export const MULTI_PARENT_TYPE = "multi_listing_parent";
 
@@ -56,6 +57,7 @@ export async function splitBookedReservation({ tenant, env, snapshot, nativeItem
   if (!paired.ok) return { split: false, reason: paired.reason, ...paired };
 
   const cleaning = pairCleaning(nativeItems, paired.listings);
+  const petFees = pairPetFees(nativeItems, paired.listings, tenant);
   const otherFees = pairOtherFees(nativeItems, paired.listings, tenant);
 
   const { parent, children } = composeMultiListing(
@@ -70,7 +72,7 @@ export async function splitBookedReservation({ tenant, env, snapshot, nativeItem
     paired.listings
   );
 
-  applyFees(children, cleaning, otherFees, tenant);
+  applyFees(children, cleaning, petFees, otherFees, tenant);
 
   // The reservation-level facts stay on the parent: the guest pays one invoice
   // and one payment arrives against it, so that is where they belong. The
@@ -85,6 +87,7 @@ export async function splitBookedReservation({ tenant, env, snapshot, nativeItem
   // DEMO-HOMS booking that found this -- and settlement divides the payment by
   // the children.
   parent.charges.cleaningFee = sum(children.map((c) => c.charges.cleaningFee));
+  parent.charges.petFee = sum(children.map((c) => c.charges.petFee ?? 0));
   parent.charges.otherFees = sum(children.map((c) => c.charges.otherFees ?? 0));
   // Summed from the children rather than copied from the reservation-level
   // snapshot. The two agree on every booking seen so far, because
@@ -95,6 +98,7 @@ export async function splitBookedReservation({ tenant, env, snapshot, nativeItem
   // its children would be describing a reservation nobody was paid for.
   parent.charges.processingFee = sum(children.map((c) => c.charges.processingFee));
   if (!cleaning.ok) parent.cleaningPairing = cleaning;
+  if (!petFees.ok) parent.petFeePairing = petFees;
   if (!otherFees.ok) parent.feePairing = otherFees;
 
   return { split: true, parent, children };
@@ -218,9 +222,25 @@ export function pairCleaning(invoiceItems, listings) {
   return pairAmounts(lineTotals(invoiceItems, isCleaningFee), listings, "cleaning_line_count_mismatch");
 }
 
-// Everything else the guest was charged: a pet fee, a tax, a tourist levy, an
-// airport transfer -- whatever the account has configured as an Additional Fee
-// that is neither the stay itself nor its cleaning.
+// The pet fee, which is part of the rent price (Yari, 2026-09-29) and so is
+// split like rent. Paired per listing like everything else, and then folded
+// into that listing's payout basis by applyFees.
+//
+// Matched with isPetFeeName rather than the looser pattern isFeeLine screens
+// with, because "Pet Cleaning" matches that pattern and is not the pet fee.
+// What the precise test does not recognise falls through to pairOtherFees and
+// is attributed without being paid to anyone -- unrecognised money is still
+// collected, it is simply not handed to somebody on a guess.
+export function pairPetFees(invoiceItems, listings, tenant) {
+  return pairAmounts(
+    lineTotals(invoiceItems, (i) => isPetFeeName(i?.name, tenant)),
+    listings, "pet_fee_line_count_mismatch"
+  );
+}
+
+// Everything else the guest was charged: a tax, a tourist levy, an airport
+// transfer -- whatever the account has configured as an Additional Fee that is
+// none of the stay, its cleaning, or its pet fee.
 //
 // Defined as what is left over rather than by name, which is the only
 // definition that makes the listings add up to the invoice. A fee nobody
@@ -229,15 +249,13 @@ export function pairCleaning(invoiceItems, listings) {
 // invoice belonged to no listing, and turned up as a 318.00 variance (the fee
 // plus the 6% charged on it) on a reservation with nothing actually wrong.
 //
-// NOT income, and deliberately not made income here. No ledger row credits a
-// pet fee to anyone on a single-listing booking either -- cleaning is the only
-// native fee that is split -- so a bundled booking inventing one would pay
-// somebody money their own single bookings do not. Whether these fees should
-// be income, and whose, is a question about the business rather than about
-// bundling. This only makes sure the money is attached to the listing the
-// guest was charged it for, so that when the answer comes it is answerable.
+// NOT income, and deliberately not made income. A tax is remitted, not earned,
+// and a fee nobody has classified is not something to start paying out on a
+// guess. They are attached to the listing the guest was charged them for so
+// that the reservation adds up, and left there. The pet fee used to be in here
+// with them; it is revenue, and now has its own pairing above.
 export function pairOtherFees(invoiceItems, listings, tenant) {
-  const isOther = (i) => isFeeLine(i, tenant) && !isCleaningFee(i);
+  const isOther = (i) => isFeeLine(i, tenant) && !isCleaningFee(i) && !isPetFeeName(i?.name, tenant);
   return pairAmounts(lineTotals(invoiceItems, isOther), listings, "fee_line_count_mismatch");
 }
 
@@ -279,23 +297,35 @@ function pairAmounts(amounts, listings, mismatchReason) {
 // with a cleaning fee of 0 everywhere else too (booking-composer, and
 // repriceFromInvoice on the single-listing path), because a deposit is sized
 // against the stay rather than against the fees on it.
-function applyFees(children, cleaning, other, tenant) {
+function applyFees(children, cleaning, pet, other, tenant) {
   children.forEach((child, index) => {
     const cleaningAmt = cleaning.perListing?.[index] ?? 0;
+    const petAmt = pet.perListing?.[index] ?? 0;
     const otherAmt = other.perListing?.[index] ?? 0;
     if (cleaningAmt > 0) {
       child.charges.cleaningFee = cleaningAmt;
       child.charges.cleaningFeeSource = cleaning.ok ? "ghl_native" : "ghl_native_unattributed";
     }
+    if (petAmt > 0) {
+      child.charges.petFee = petAmt;
+      child.charges.petFeeSource = pet.ok ? "ghl_native" : "ghl_native_unattributed";
+      // Part of the rent price, so it joins the basis the split is taken on --
+      // the same thing repriceFromInvoice does for a single-listing booking.
+      // composeBooking sized this listing's payout on rent alone, because the
+      // fee lines had not been paired yet when it ran.
+      child.payout.basis = round2(child.charges.rentTotal + petAmt);
+      child.payout.owner = round2(child.payout.basis * child.payout.ownerPct);
+      child.payout.manager = round2(child.payout.basis - child.payout.owner);
+    }
+    if (!(cleaningAmt > 0) && !(petAmt > 0) && !(otherAmt > 0)) return;
     if (otherAmt > 0) {
       child.charges.otherFees = otherAmt;
       child.charges.otherFeesSource = other.ok ? "ghl_native" : "ghl_native_unattributed";
     }
-    if (!(cleaningAmt > 0) && !(otherAmt > 0)) return;
 
     const deposit = child.securityDeposit?.total ?? 0;
     const feePct = child.charges.feePct ?? tenant.processingFeePct ?? 0.06;
-    const charged = round2(child.charges.rentTotal + cleaningAmt + otherAmt);
+    const charged = round2(child.charges.rentTotal + cleaningAmt + petAmt + otherAmt);
     child.charges.processingFee = round2(feePct * (charged + deposit));
     child.charges.grandTotal = round2(charged + child.charges.processingFee + deposit);
   });

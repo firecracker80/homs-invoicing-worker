@@ -140,7 +140,15 @@ export function cancellationTier(checkInDateStr, nowMs, tenant, override, stay) 
 }
 
 export function calcCancellation(snapshot, nowMs, tenant, override) {
-  const rent = snapshot.charges.rentTotal;
+  // The pet fee rides with the rent: part of the rent price, so charged and
+  // refunded at whatever share of it the tier keeps. It used to sit outside
+  // the calculation entirely, so a cancelled booking refunded the guest their
+  // rent and kept their pet fee without crediting anyone with it.
+  //
+  // Feeding it through rentBasis rather than as a separate term is what makes
+  // the nights tiers stay right: "one night plus half the rest" now counts the
+  // pet fee as part of the rest, which is what being part of the price means.
+  const rent = round2(snapshot.charges.rentTotal + (snapshot.charges.petFee || 0));
   const { tier, chargePct, hoursUntil } = cancellationTier(snapshot.stay.checkIn, nowMs, tenant, override, {
     nights: snapshot.stay?.nights,
     nightlyRate: snapshot.stay?.nightlyRate,
