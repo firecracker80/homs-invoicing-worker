@@ -184,4 +184,55 @@ const cancel = async (snapshot = paidSnapshot(), body = {}) => {
   console.log("7) A refund the gateway refused reports as a fault, and never as money to go and pay");
 }
 
+// ---- 8..10 one payload shape, whichever route sent it ---------------
+// Three routes -- unpaid, paid, bundled -- carried three different field sets.
+// The unpaid one was thinnest by a long way: nine fields and no tier at all.
+// So a workflow branching on tier "unpaid_void" fired on a bundled
+// cancellation and silently did nothing on a single-listing one, which is
+// nearly every booking. Yari is building the manager notification for unpaid
+// cancellations now (2026-09-29), and that is the route it would have hit.
+{
+  const unpaid = paidSnapshot({ settled: false, captures: undefined, ghl: undefined });
+  const out = await cancel(unpaid);
+
+  assert.strictEqual(out.sent.tier, "unpaid_void",
+    "the route that sent no tier at all now names one, which is the only thing to branch on");
+  assert.strictEqual(out.sent.guestName, "Native Cancel Test", "and names the guest, for an email that reads like one");
+  assert.strictEqual(out.sent.checkOut, "2026-10-02", "and the dates the property is free again");
+  assert.strictEqual(out.sent.chargePct, "0");
+  assert.strictEqual(out.sent.manualRefundRequired, "no", "present and answered, rather than absent");
+  assert.strictEqual(out.sent.refundFailed, "no");
+  console.log("8) An unpaid cancellation carries everything a manager notification needs");
+}
+
+{
+  // The drift guard. Every route builds through cancellationNotifyPayload, so
+  // a field added to one is added to all three -- which is the thing that
+  // cannot be left to discipline, because nothing fails when it drifts. A GHL
+  // field mapped on one route just silently writes nothing on the other.
+  const paid = await cancel();
+  const unpaid = await cancel(paidSnapshot({ settled: false, captures: undefined, ghl: undefined }));
+
+  assert.deepStrictEqual(
+    Object.keys(paid.sent).sort(), Object.keys(unpaid.sent).sort(),
+    "a paid and an unpaid cancellation present exactly the same fields"
+  );
+  console.log("9) A paid and an unpaid cancellation send identical field sets");
+}
+
+{
+  // paid stays a boolean because workflows already read it. wasPaid is the
+  // same fact as a string, because GHL If/Else works on strings and every
+  // other field on this payload is one for that reason.
+  const paid = await cancel();
+  assert.strictEqual(paid.sent.paid, true, "unchanged, so nothing already built on it breaks");
+  assert.strictEqual(paid.sent.wasPaid, "yes");
+
+  const unpaid = await cancel(paidSnapshot({ settled: false, captures: undefined, ghl: undefined }));
+  assert.strictEqual(unpaid.sent.paid, false);
+  assert.strictEqual(unpaid.sent.wasPaid, "no",
+    "so a condition can branch on a string instead of on a boolean that reads as text");
+  console.log("10) paid is still a boolean, and wasPaid is the same fact a condition can use");
+}
+
 console.log("\nPASS — the cancellation notification tells the manager what to pay, to whom, and whether anything went wrong.");

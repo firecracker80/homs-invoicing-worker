@@ -433,11 +433,12 @@ async function handleCancelMultiListing(request, env, parent, body, tenant) {
   const tiers = [...new Set(parent.cancellation.listings.map((l) => l.tier).filter(Boolean))];
   const pcts = [...new Set(priced.map((r) => Math.round(r.calculation.chargePct * 100)))];
 
-  await notifyAndRecord(env, parent, tenant.ghlCancellationUrl, {
-    event: "booking_cancelled", bookingId: parent.bookingId,
-    contactId: parent.ghlContactId || "",
-    email: parent.guest?.email || "", paid: anyPaid,
-    guestName: parent.guest?.name || "",
+  await notifyAndRecord(env, parent, tenant.ghlCancellationUrl, cancellationNotifyPayload({
+    bookingId: parent.bookingId,
+    contactId: parent.ghlContactId,
+    email: parent.guest?.email,
+    guestName: parent.guest?.name,
+    paid: anyPaid,
     // Listings can land in different tiers -- a guest already checked into the
     // first and not yet started the second is the case the per-listing
     // snapshots exist for -- so this names every tier the reservation is in.
@@ -446,29 +447,28 @@ async function handleCancelMultiListing(request, env, parent, body, tenant) {
     // merged into an email would be wrong for at least one of them, and the
     // money is in chargeTotal either way.
     chargePct: pcts.length === 1 ? String(pcts[0]) : "",
-    chargeTotal: chargeTotal.toFixed(2),
-    refundTotal: refundTotal.toFixed(2),
-    depositRefund: sumOf((r) => r.calculation.depositRefund).toFixed(2),
-    manualRefundRequired: manualRefundTotal > 0 ? "yes" : "no",
-    manualRefundTotal: manualRefundTotal.toFixed(2),
-    manualRefundDetail: manualRefunds.length
-      ? manualRefunds.map((r) => `${MANUAL_REFUND_LABELS[r.type] || r.type} ${Number(r.amount).toFixed(2)}`).join(", ")
-      : "",
-    refundFailed: results.some((r) => (r.refundFailures || []).length > 0) ? "yes" : "no",
-    checkIn: parent.stayRange?.checkIn || "",
-    propertyName: results.map((r) => r.propertyCode).filter(Boolean).join(" + ") || tenant.brandName || "",
-    multiListing: "yes",
-    listingCount: String(results.length),
-    // What a person reading it has to know: which property, from when, in which
-    // tier, and what is owed on it.
-    listingDetail: results
-      .map((r) => `${r.propertyCode || r.bookingId} ${r.checkIn || ""}: ` +
-        `${r.calculation?.tier ?? (r.cancelled ? "unpaid_void" : "not cancelled")}, ` +
-        `refund ${Number(r.calculation?.totalRefund || 0).toFixed(2)}`)
-      .join("; "),
-    // Named rather than counted, the same way the HTTP response names them.
-    failedListings: failed.map((r) => r.propertyCode || r.bookingId).join(", "),
-  });
+    chargeTotal,
+    refundTotal,
+    depositRefund: sumOf((r) => r.calculation.depositRefund),
+    manualRefunds,
+    refundFailed: results.some((r) => (r.refundFailures || []).length > 0),
+    checkIn: parent.stayRange?.checkIn,
+    checkOut: parent.stayRange?.checkOut,
+    propertyName: results.map((r) => r.propertyCode).filter(Boolean).join(" + ") || tenant.brandName,
+    multiListing: {
+      multiListing: "yes",
+      listingCount: String(results.length),
+      // What a person reading it has to know: which property, from when, in
+      // which tier, and what is owed on it.
+      listingDetail: results
+        .map((r) => `${r.propertyCode || r.bookingId} ${r.checkIn || ""}: ` +
+          `${r.calculation?.tier ?? (r.cancelled ? "unpaid_void" : "not cancelled")}, ` +
+          `refund ${Number(r.calculation?.totalRefund || 0).toFixed(2)}`)
+        .join("; "),
+      // Named rather than counted, the same way the HTTP response names them.
+      failedListings: failed.map((r) => r.propertyCode || r.bookingId).join(", "),
+    },
+  }));
   return json({
     cancelled: true,
     multiListing: true,
@@ -486,6 +486,64 @@ async function handleCancelMultiListing(request, env, parent, body, tenant) {
 // holds it). Deliberately a parameter rather than a field on the body: the body
 // arrives from outside, and nothing outside gets to switch off a guest's
 // cancellation notice.
+// Every cancellation notification, built in one place.
+//
+// There are three routes -- an unpaid booking, a paid one, and a bundled
+// reservation -- and they carried three different field sets. The unpaid one
+// was the thinnest by a long way: nine fields, and no `tier` at all. So a
+// workflow branching on tier "unpaid_void" would fire on a bundled
+// cancellation and silently do nothing on a single-listing one, which is
+// almost every booking.
+//
+// That is the same drift paymentConfirmedPayload was written to end, and it
+// cost a payment-confirmed tag on DEMO-HOMS on 2026-09-26: a field mapped on
+// one route wrote nothing on the other, and nothing failed. Adding a field
+// here now adds it to all three, and they cannot come apart again.
+//
+// Everything is a flat string apart from `paid`. GHL merge fields and If/Else
+// conditions both work on strings, and a workflow branching on "yes" is easier
+// to get right than one branching on a number that might be "0.00". `paid`
+// stays a boolean because workflows already read it; `wasPaid` is the same
+// fact as a string, for conditions that want one.
+export function cancellationNotifyPayload({
+  bookingId, contactId, email, guestName, paid, tier, chargePct,
+  chargeTotal, refundTotal, depositRefund,
+  manualRefunds = [], refundFailed = false,
+  checkIn, checkOut, propertyName, multiListing = null,
+}) {
+  const manualRefundTotal = round2(manualRefunds.reduce((s, r) => s + (Number(r.amount) || 0), 0));
+  return {
+    event: "booking_cancelled",
+    bookingId: bookingId || "",
+    contactId: contactId || "",
+    email: email || "",
+    guestName: guestName || "",
+    paid: !!paid,
+    wasPaid: paid ? "yes" : "no",
+    tier: tier || "",
+    chargePct: chargePct ?? "",
+    chargeTotal: Number(chargeTotal || 0).toFixed(2),
+    refundTotal: Number(refundTotal || 0).toFixed(2),
+    depositRefund: Number(depositRefund || 0).toFixed(2),
+    // What somebody has to DO, kept apart from what merely happened.
+    manualRefundRequired: manualRefundTotal > 0 ? "yes" : "no",
+    manualRefundTotal: manualRefundTotal.toFixed(2),
+    manualRefundDetail: manualRefunds.length
+      ? manualRefunds.map((r) => `${MANUAL_REFUND_LABELS[r.type] || r.type} ${Number(r.amount).toFixed(2)}`).join(", ")
+      : "",
+    // Separate from the above on purpose: a refund the gateway REFUSED is a
+    // fault, not a task, and a manager reading one as the other would either
+    // pay twice or not at all.
+    refundFailed: refundFailed ? "yes" : "no",
+    checkIn: checkIn || "",
+    checkOut: checkOut || "",
+    propertyName: propertyName || "",
+    // Only on a bundled reservation, and additive: a workflow that ignores
+    // these behaves exactly as it does on a single-listing cancellation.
+    ...(multiListing || {}),
+  };
+}
+
 export async function handleCancel(request, env, { notify = true, voidInvoice: shouldVoid = true } = {}) {
   const ctx = await loadContext(request, env);
   if (ctx.error) return ctx.error;
@@ -548,13 +606,20 @@ export async function handleCancel(request, env, { notify = true, voidInvoice: s
     // No Transaction record exists yet for an unpaid booking, and no money
     // moved -- nothing to write to D1 or GHL here.
     if (notify) {
-      await notifyAndRecord(env, snapshot, tenant.ghlCancellationUrl, {
-        event: "booking_cancelled", bookingId: snapshot.bookingId,
-        contactId: snapshot.ghlContactId || "",
-        email: snapshot.guest?.email || "", paid: false,
-        refundTotal: "0.00", chargeTotal: "0.00",
-        checkIn: snapshot.stay.checkIn, propertyName: snapshot.propertyCode || tenant.brandName
-      });
+      await notifyAndRecord(env, snapshot, tenant.ghlCancellationUrl, cancellationNotifyPayload({
+        bookingId: snapshot.bookingId,
+        contactId: snapshot.ghlContactId,
+        email: snapshot.guest?.email,
+        guestName: snapshot.guest?.name,
+        paid: false,
+        // Named, where before this route sent no tier at all. A manager
+        // notification on an unpaid cancellation has nothing else to branch on.
+        tier: "unpaid_void",
+        chargePct: "0",
+        checkIn: snapshot.stay.checkIn,
+        checkOut: snapshot.stay.checkOut,
+        propertyName: snapshot.propertyCode || tenant.brandName,
+      }));
     }
     return json({ cancelled: true, paid: false, refunds: null });
   }
@@ -723,32 +788,23 @@ export async function handleCancel(request, env, { notify = true, voidInvoice: s
   // that: this notify is a separate outbound POST to GHL's inbound webhook. So
   // a notification workflow could say a booking was cancelled and could not say
   // the guest is owed 132.50, which is the only part anyone has to act on.
-  //
-  // Flat strings, like the rest of this payload -- GHL merge fields and If/Else
-  // conditions both work on strings, and a workflow branching on "yes" is
-  // easier to get right than one branching on a number that might be "0.00".
-  const manualRefundTotal = round2(manualRefunds.reduce((sum, r) => sum + (Number(r.amount) || 0), 0));
-
-  if (notify) await notifyAndRecord(env, snapshot, tenant.ghlCancellationUrl, {
-    event: "booking_cancelled", bookingId: snapshot.bookingId,
-    contactId: snapshot.ghlContactId || "",
-    email: snapshot.guest?.email || "", paid: true,
-    guestName: snapshot.guest?.name || "",
-    tier: calc.tier, chargePct: String(Math.round(calc.chargePct * 100)),
-    chargeTotal: calc.charge.toFixed(2),
-    refundTotal: calc.totalRefund.toFixed(2),
-    depositRefund: calc.depositRefund.toFixed(2),
-    manualRefundRequired: manualRefundTotal > 0 ? "yes" : "no",
-    manualRefundTotal: manualRefundTotal.toFixed(2),
-    manualRefundDetail: manualRefunds.length
-      ? manualRefunds.map((r) => `${MANUAL_REFUND_LABELS[r.type] || r.type} ${Number(r.amount).toFixed(2)}`).join(", ")
-      : "",
-    // Separate from the above on purpose: a refund the gateway REFUSED is a
-    // fault, not a task, and a manager reading one as the other would either
-    // pay twice or not at all.
-    refundFailed: refundFailures.length ? "yes" : "no",
-    checkIn: snapshot.stay.checkIn, propertyName: snapshot.propertyCode || tenant.brandName
-  });
+  if (notify) await notifyAndRecord(env, snapshot, tenant.ghlCancellationUrl, cancellationNotifyPayload({
+    bookingId: snapshot.bookingId,
+    contactId: snapshot.ghlContactId,
+    email: snapshot.guest?.email,
+    guestName: snapshot.guest?.name,
+    paid: true,
+    tier: calc.tier,
+    chargePct: String(Math.round(calc.chargePct * 100)),
+    chargeTotal: calc.charge,
+    refundTotal: calc.totalRefund,
+    depositRefund: calc.depositRefund,
+    manualRefunds,
+    refundFailed: refundFailures.length > 0,
+    checkIn: snapshot.stay.checkIn,
+    checkOut: snapshot.stay.checkOut,
+    propertyName: snapshot.propertyCode || tenant.brandName,
+  }));
 
     return json({
     cancelled: true, paid: true, calculation: calc, refundIds,
