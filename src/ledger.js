@@ -49,16 +49,19 @@ const formatPct = (rate) => `${Number((rate * 100).toFixed(1))}%`;
 
 // What the Transaction record's booking_total and net_payout hold.
 //
-// Rent plus cleaning, and deliberately NOT the processing fee or the deposit:
-// the fee is the guest paying the gateway's cut and the deposit is the guest's
-// own money held, so neither is revenue.
+// Rent, the pet fee and cleaning, and deliberately NOT the processing fee or
+// the deposit: the fee is the guest paying the gateway's cut and the deposit is
+// the guest's own money held, so neither is revenue. The pet fee is (Yari,
+// 2026-09-29: it is part of the rent price), and was missing from this for as
+// long as this existed -- a booking with one reported a total lower than the
+// guest had paid, on the record everybody reads.
 //
 // Exported because a reschedule has to recompute it and settlement has to write
 // it, and those two being separate expressions of the same rule is exactly how
 // the record went stale in the first place -- a duration change moved the dates
 // on the Transaction and left the money at whatever the original booking cost.
 export const bookingTotalOf = (snapshot) =>
-  round2(snapshot.charges.rentTotal + snapshot.charges.cleaningFee);
+  round2(snapshot.charges.rentTotal + (snapshot.charges.petFee || 0) + snapshot.charges.cleaningFee);
 
 function resolveSecret(tenant, env, nameKey, inlineKey) {
   if (tenant[nameKey] && env[tenant[nameKey]]) return env[tenant[nameKey]];

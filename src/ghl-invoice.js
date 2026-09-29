@@ -175,17 +175,40 @@ export function repriceFromInvoice(snapshot, tenant, nativeItems) {
   const feePct = snapshot.charges.feePct ?? tenant.processingFeePct ?? 0.06;
   const processingFee = round2(feePct * (nativeSubtotal + deposit.totalDeposit));
 
+  // The pet fee is part of the rent price (Yari, 2026-09-29), so it is split
+  // like rent rather than kept aside. It was split like nothing at all: no
+  // ledger row named it, bookingTotalOf did not count it, and no statement
+  // showed it -- the guest paid it, the processing fee was charged on it, and
+  // it reached neither the owner nor the manager.
+  //
+  // Kept OUT of charges.rentTotal on purpose. That field divides by nights to
+  // give nightlyRate, which sizes the deposit and drives the nights-based
+  // cancellation tiers, and a pet fee does not buy a night. It is a separate
+  // amount that happens to be split on the same terms.
+  //
+  // isPetFeeName, not the looser pattern isFeeLine screens with: "Pet
+  // Cleaning" matches that pattern and is not the pet fee. Anything the
+  // precise test does not recognise stays out of the split, which is the
+  // safe way round -- unrecognised money is still collected and still on the
+  // invoice, it is simply not handed to anybody.
+  const petFee = round2(nativeItems.filter(i => isPetFeeName(i?.name, tenant)).reduce((s, i) => s + lineTotal(i), 0));
+  const basis = round2(rent + petFee);
+
   snapshot.stay.nightlyRate = nightlyRate;
   snapshot.charges.rentTotal = rent;
+  if (petFee > 0) {
+    snapshot.charges.petFee = petFee;
+    snapshot.charges.petFeeSource = "ghl_native";
+  }
   snapshot.charges.processingFee = processingFee;
   snapshot.charges.grandTotal = round2(nativeSubtotal + processingFee + deposit.totalDeposit);
   snapshot.charges.amountsSource = "ghl_invoice";
   snapshot.securityDeposit.total = deposit.totalDeposit;
   snapshot.securityDeposit.blocks = deposit.blocks;
   if (snapshot.payout) {
-    snapshot.payout.basis = rent;
-    snapshot.payout.owner = round2(rent * snapshot.payout.ownerPct);
-    snapshot.payout.manager = round2(rent - snapshot.payout.owner);
+    snapshot.payout.basis = basis;
+    snapshot.payout.owner = round2(basis * snapshot.payout.ownerPct);
+    snapshot.payout.manager = round2(basis - snapshot.payout.owner);
   }
 }
 
