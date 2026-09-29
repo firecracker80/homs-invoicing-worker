@@ -29,15 +29,41 @@ async function ghlRequest(pit, method, path, body) {
 }
 
 // Fetch every record for a custom/standard object, paginated, capped for safety.
+// An object a client's account does not have is not an error -- it has no
+// records, which is exactly what an empty list says.
+//
+// Yari is dropping ota_channels from the provisioning snapshot (2026-09-29),
+// now that the dashboard no longer displays it. Without this, every account
+// provisioned from that snapshot breaks in two places, both quietly:
+//
+//   the dashboard   /api/data throws on the first missing object, so the WHOLE
+//                   dashboard goes down -- properties, transactions, everything
+//                   -- not merely the part that was dropped
+//
+//   the Worker      syncRowsToGHL catches its own throw, so settlement still
+//                   succeeds and the D1 ledger is still written, but NO
+//                   Transaction record is ever created. The money is real and
+//                   nothing in GHL shows it, which is the failure this whole
+//                   codebase keeps having to find.
+//
+// Only 404 is swallowed, and only for this search. GHL answers a missing
+// object with 404 and "Custom Object (key) not found" -- verified live against
+// DEMO-HOMS on 2026-09-29. An expired PIT is 401 and an outage is 5xx, and
+// both must still surface: an empty dashboard that reads "you have no
+// properties" is worse than one that says it could not reach GHL.
 export async function fetchAllObjectRecords(pit, locationId, objectKey, { cap = 1000, pageLimit = 100 } = {}) {
   const all = [];
   let page = 1;
   while (all.length < cap) {
-    const res = await ghlRequest(pit, "POST", `/objects/${objectKey}/records/search`, {
-      locationId,
-      page,
-      pageLimit,
-    });
+    let res;
+    try {
+      res = await ghlRequest(pit, "POST", `/objects/${objectKey}/records/search`, { locationId, page, pageLimit });
+    } catch (err) {
+      // `all` and not `[]`: on the first page they are the same thing, and on
+      // any later one the pages already read are real records in hand.
+      if (err?.status === 404) return all;
+      throw err;
+    }
     const records = res.records || [];
     all.push(...records);
     if (records.length < pageLimit) break;
