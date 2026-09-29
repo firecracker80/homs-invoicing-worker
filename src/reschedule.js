@@ -18,6 +18,7 @@ import { adminAuthorized, notifyAndRecord, cancellationTier } from "./cancellati
 import { paymentConfirmedPayload } from "./payment.js";
 import { updateGhlBookingDates } from "./ghl-calendar.js";
 import { updateInvoiceForReschedule } from "./ghl-invoice.js";
+import { isMultiListingParent } from "./multi-listing.js";
 
 function resolveSecret(tenant, env, nameKey, inlineKey) {
   if (tenant[nameKey] && env[tenant[nameKey]]) return env[tenant[nameKey]];
@@ -59,6 +60,135 @@ function isBlank(v) {
   return s === "" || s === "null" || s === "undefined";
 }
 
+const DAY_MS = 86400000;
+const dayOnly = (s) => String(s || "").slice(0, 10);
+const addDays = (isoDate, days) =>
+  new Date(Date.parse(`${dayOnly(isoDate)}T00:00:00.000Z`) + days * DAY_MS).toISOString().slice(0, 10);
+const daysBetweenDates = (a, b) =>
+  Math.round((Date.parse(`${dayOnly(b)}T00:00:00.000Z`) - Date.parse(`${dayOnly(a)}T00:00:00.000Z`)) / DAY_MS);
+
+// Move a whole bundled reservation.
+//
+// Only a SHIFT is accepted: every listing moves by the same number of days and
+// keeps its own length, which is what "we are coming a week later" means for a
+// trip with several legs. The listings stay chained in the order they were
+// booked and nobody has to decide anything.
+//
+// A parent whose span also CHANGES length is refused, on purpose. "Two nights
+// longer" on a two-leg trip does not say which leg grew, and the two answers
+// bill different properties and pay different owners. Guessing the last listing
+// would be a coin flip dressed up as a default -- the same reasoning that makes
+// propertyNameFromInvoice refuse two candidates and listingsFrom refuse a shape
+// it cannot price. The refusal names the child ids so the caller can say which.
+async function handleRescheduleMultiListing(request, env, parent, body) {
+  const oldCheckIn = parent.stayRange?.checkIn;
+  const oldCheckOut = parent.stayRange?.checkOut;
+  const newCheckIn = dayOnly(body.newCheckIn);
+  const newCheckOut = dayOnly(body.newCheckOut);
+
+  if (!oldCheckIn || !oldCheckOut) {
+    return json({ error: "This reservation has no recorded date range to move.", bookingId: parent.bookingId }, 422);
+  }
+  if (!newCheckIn || !newCheckOut) {
+    return json({ error: "newCheckIn and newCheckOut are both required." }, 400);
+  }
+
+  const shiftDays = daysBetweenDates(oldCheckIn, newCheckIn);
+  const oldSpan = daysBetweenDates(oldCheckIn, oldCheckOut);
+  const newSpan = daysBetweenDates(newCheckIn, newCheckOut);
+
+  if (newSpan !== oldSpan) {
+    return json({
+      error:
+        "A bundled reservation can only be moved as a whole, not lengthened or shortened. " +
+        "Its span would change from " + oldSpan + " nights to " + newSpan + ", and that does not say which " +
+        "listing changed -- different answers bill different properties and pay different owners. " +
+        "Reschedule the listing itself instead.",
+      bookingId: parent.bookingId,
+      listings: (parent.childBookingIds || []).map((id) => ({ bookingId: id })),
+    }, 422);
+  }
+
+  if (shiftDays === 0) {
+    return json({ error: "These are the dates the reservation already has.", bookingId: parent.bookingId }, 400);
+  }
+
+  const results = [];
+  for (const childId of parent.childBookingIds || []) {
+    try {
+      const child = await env.BOOKINGS.get(childId, { type: "json" });
+      if (!child) {
+        results.push({ bookingId: childId, status: 404, error: "Unknown bookingId" });
+        continue;
+      }
+      const childRequest = {
+        method: request.method,
+        url: request.url,
+        headers: request.headers,
+        json: async () => ({
+          ...body,
+          bookingId: childId,
+          newCheckIn: addDays(child.stay.checkIn, shiftDays),
+          newCheckOut: addDays(child.stay.checkOut, shiftDays),
+        }),
+      };
+      const res = await handleReschedule(childRequest, env);
+      const outcome = await res.json();
+      results.push({ bookingId: childId, status: res.status, ...outcome });
+    } catch (err) {
+      console.error(`Multi-listing reschedule failed for ${childId}: ${err.message}`);
+      results.push({ bookingId: childId, status: 500, error: err.message });
+    }
+  }
+
+  await refreshParentFromChildren(env, parent);
+
+  const failed = results.filter((r) => r.status >= 400);
+  return json({
+    rescheduled: true,
+    multiListing: true,
+    shiftDays,
+    listingCount: results.length,
+    stayRange: parent.stayRange,
+    listings: results.map((r) => ({
+      bookingId: r.bookingId, status: r.status,
+      newDates: r.newDates ?? null,
+      settlementType: r.settlement?.type ?? null,
+    })),
+    failedListings: failed.map((r) => ({ bookingId: r.bookingId, status: r.status, error: r.error || null })),
+  }, failed.length ? 207 : 200);
+}
+
+// Re-read the children and rebuild the parent's span and totals from them.
+//
+// Called after any child moves, including a child rescheduled directly by its
+// own id -- which is the supported way to change one leg. Without this the
+// parent keeps the dates and money of a reservation that no longer exists,
+// which is the same drift #61 closed between the snapshot and the Transaction
+// record and #64 closed between the snapshot and the invoice.
+export async function refreshParentFromChildren(env, parent) {
+  const children = [];
+  for (const id of parent.childBookingIds || []) {
+    const child = await env.BOOKINGS.get(id, { type: "json" });
+    if (child) children.push(child);
+  }
+  if (!children.length) return parent;
+
+  const sum = (xs) => Math.round(xs.reduce((s, n) => s + (Number(n) || 0), 0) * 100) / 100;
+  parent.charges = {
+    rentTotal: sum(children.map((c) => c.charges?.rentTotal)),
+    cleaningFee: sum(children.map((c) => c.charges?.cleaningFee)),
+    processingFee: sum(children.map((c) => c.charges?.processingFee)),
+  };
+  parent.securityDeposit = { total: sum(children.map((c) => c.securityDeposit?.total ?? 0)) };
+  parent.stayRange = {
+    checkIn: children.map((c) => c.stay.checkIn).sort()[0],
+    checkOut: children.map((c) => c.stay.checkOut).sort().at(-1),
+  };
+  await env.BOOKINGS.put(parent.bookingId, JSON.stringify(parent));
+  return parent;
+}
+
 export async function handleReschedule(request, env) {
   const body = await request.json();
 
@@ -80,6 +210,15 @@ export async function handleReschedule(request, env) {
   if (!snapshot) {
     console.error("Reschedule reject: Unknown bookingId. Raw body:", JSON.stringify(body));
     return json({ error: "Unknown bookingId", receivedBookingId: body.bookingId ?? null }, 404);
+  }
+
+  // Rescheduling a bundled reservation is not the same problem as cancelling
+  // one. Cancelling is unambiguous -- GHL cancels every listing together, and
+  // each child prices against its own check-in. Moving dates is not: a parent
+  // has no stay of its own, so one new check-in and check-out could mean the
+  // whole trip shifts, or one leg got longer, and those pay different owners.
+  if (isMultiListingParent(snapshot)) {
+    return handleRescheduleMultiListing(request, env, snapshot, body);
   }
 
   const tenant = await env.TENANTS.get(snapshot.locationId, { type: "json" });
@@ -188,6 +327,15 @@ export async function handleReschedule(request, env) {
       unpaid: true, reason: body.reason || ""
     }];
     await env.BOOKINGS.put(snapshot.bookingId, JSON.stringify(snapshot));
+
+    // Same reason as on the paid path below: a listing that belongs to a bundled
+    // reservation has moved, so the reservation has to follow. It matters MORE
+    // here -- bundled bookings have no invoice or payment wired yet, so their
+    // children are all unsettled and every one of them takes this branch.
+    if (snapshot.parentBookingId) {
+      const parent0 = await env.BOOKINGS.get(snapshot.parentBookingId, { type: "json" });
+      if (parent0 && parent0.childBookingIds) await refreshParentFromChildren(env, parent0);
+    }
 
     // No Transaction record exists yet for an unpaid booking, and no money
     // moved -- nothing to write to D1 or GHL here.
@@ -476,6 +624,18 @@ export async function handleReschedule(request, env) {
     reason: body.reason || ""
   }];
   await env.BOOKINGS.put(snapshot.bookingId, JSON.stringify(snapshot));
+
+  // A listing that belongs to a bundled reservation has just changed its dates
+  // and its rent, so the reservation it belongs to is now describing a trip that
+  // no longer exists. Rebuild it from its children.
+  //
+  // This runs for a leg rescheduled directly by its own id -- the supported way
+  // to change one listing -- as well as for each child of a parent-level shift.
+  // Doing it twice on a shift is harmless: it reads the children and recomputes.
+  if (snapshot.parentBookingId) {
+    const parent = await env.BOOKINGS.get(snapshot.parentBookingId, { type: "json" });
+    if (parent && parent.childBookingIds) await refreshParentFromChildren(env, parent);
+  }
 
   // ---- D1 + GHL ledger ----
   // Admin fee retained (shortened stay): new income, split by ownerPct, same
