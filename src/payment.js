@@ -11,6 +11,7 @@
 import { getAccessToken } from "./paypal.js";
 import { settleRescheduleAdjustment } from "./reschedule.js";
 import { writeLedgerEntries } from "./ledger.js";
+import { isMultiListingParent } from "./multi-listing.js";
 import { notifyAndRecord } from "./cancellation.js";
 import { fetchInvoice, listContactInvoices, bookingIdOf, normStatus, findInvoiceTransactionId } from "./ghl-invoice.js";
 
@@ -362,6 +363,35 @@ export async function handleGhlInvoicePaid(request, env) {
   // already released. Settling it would book revenue and an owner/manager split
   // for a booking nobody is honouring, so it is recorded and escalated instead --
   // and the guest is never sent a confirmation.
+  // A bundled reservation's parent holds the invoice but no stay of its own, so
+  // settle() would be pricing a booking with no nights, no property and no
+  // payout. Refused explicitly rather than left to fail somewhere further in,
+  // where the error would name a missing field instead of the actual reason.
+  //
+  // The money is real and the guest has paid it -- this says so, and says the
+  // ledger does not have it yet, which is a different thing from a payment that
+  // quietly did nothing.
+  if (isMultiListingParent(snapshot)) {
+    console.error(
+      `Payment received on bundled reservation ${snapshot.bookingId} (invoice ` +
+      `${invoice.invoiceNumber || invoice._id}) -- settlement for bundled reservations is not wired, ` +
+      `so no ledger rows or Transaction record were written`
+    );
+    return json({
+      ok: true,
+      skipped: "multi_listing_not_settled",
+      bookingId: snapshot.bookingId,
+      listingCount: snapshot.childBookingIds?.length ?? 0,
+      // Deliberately NOT amountPaid. paymentSkippedPayload sets that to "0.00"
+      // and means it -- nothing was confirmed or booked, which is what a
+      // workflow reading amountPaid is entitled to assume. The money that
+      // actually arrived is a different fact and needs a different name, the
+      // same way manualRefunds had to stop sharing one with refundFailures.
+      amountReceived: round2(Number(invoice.amountPaid ?? invoice.total ?? 0)),
+      ...paymentSkippedPayload("multi_listing", snapshot.bookingId),
+    }, 200);
+  }
+
   if (snapshot.cancelled) {
     const amount = round2(Number(invoice.amountPaid ?? invoice.total ?? 0));
     snapshot.paymentAfterCancellation = {
