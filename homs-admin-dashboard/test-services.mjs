@@ -6,6 +6,20 @@ const VENDOR = "CKDO0Xbqdn3CVxPLGECb";
 const CLIENT = "ZghxU8I60bEm39JUbtCm";
 const SR = "custom_objects.service_requests";
 
+// Fixture timestamps are relative, because the sweep filters on them.
+//
+// sweep() in services.js only considers records touched within the vendor's
+// sweepDays, 14 by default. These fixtures were hardcoded to 2026-09-15, which
+// worked until the cutoff caught up with them -- at 12:00Z on 2026-09-29 the
+// record fell outside the window, the sweep found nothing, and the re-quote
+// assertion failed. It had passed the previous day and would have failed every
+// day after.
+//
+// A date that has to stay inside a rolling window cannot be a constant. Ordering
+// between the two fixtures is what the tests actually care about, so that is
+// what these preserve.
+const daysAgo = (n) => new Date(Date.now() - n * 86400000).toISOString();
+
 // ---- in-memory GHL -----------------------------------------------------------
 function makeGhl() {
   const db = {
@@ -63,7 +77,7 @@ function makeGhl() {
     }
     if ((m = path.match(/^\/objects\/([^/]+)\/records$/)) && method === "POST") {
       const rid = id("rec");
-      const rec = { id: rid, properties: body.properties, createdAt: "2026-09-15T12:00:00.000Z" };
+      const rec = { id: rid, properties: body.properties, createdAt: daysAgo(2) };
       db.records[`${body.locationId}|${m[1]}`][rid] = rec;
       return json(201, { record: rec });
     }
@@ -183,7 +197,7 @@ const call = (env, path, body, key = "svc-key") =>
   }), env);
 
 function seedRequest(props) {
-  const rec = { id: "sr1", createdAt: "2026-09-15T12:00:00.000Z", properties: props };
+  const rec = { id: "sr1", createdAt: daysAgo(2), properties: props };
   ghl.db.records[`${VENDOR}|${SR}`].sr1 = rec;
   ghl.db.relations.push({ associationId: "a-sr-contact", firstRecordId: "contact9", secondRecordId: "sr1" });
   return rec;
@@ -497,7 +511,7 @@ const expensesOf = () => Object.values(ghl.db.records[`${CLIENT}|custom_objects.
   ghl = makeGhl();
   const env = baseEnv(null);
   seedRequest(homsReq({ request_status: "pagado", estimate_id: "old-est", invoice_id: "old-inv" }));
-  const newer = { id: "sr2", createdAt: "2026-09-16T12:00:00.000Z", properties: homsReq({ request_status: "cotizado", estimate_id: "new-est" }) };
+  const newer = { id: "sr2", createdAt: daysAgo(1), properties: homsReq({ request_status: "cotizado", estimate_id: "new-est" }) };
   ghl.db.records[`${VENDOR}|${SR}`].sr2 = newer;
   ghl.db.relations.push({ associationId: "a-sr-contact", firstRecordId: "contact9", secondRecordId: "sr2" });
 
