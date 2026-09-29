@@ -24,6 +24,7 @@
 import { getAccessToken } from "./paypal.js";
 import { isMultiListingParent } from "./multi-listing.js";
 import { voidInvoice } from "./ghl-invoice.js";
+import { earnedAddOns } from "./ledger.js";
 import { writeAndSyncRows } from "./ledger.js";
 import { updateObjectRecord } from "./ghl.js";
 import { isLegacyPolicy, nativeCancellationPolicy } from "./policy.js";
@@ -148,7 +149,7 @@ export function calcCancellation(snapshot, nowMs, tenant, override) {
   // Feeding it through rentBasis rather than as a separate term is what makes
   // the nights tiers stay right: "one night plus half the rest" now counts the
   // pet fee as part of the rest, which is what being part of the price means.
-  const rent = round2(snapshot.charges.rentTotal + (snapshot.charges.petFee || 0));
+  const rent = round2(snapshot.charges.rentTotal + earnedAddOns(snapshot));
   const { tier, chargePct, hoursUntil } = cancellationTier(snapshot.stay.checkIn, nowMs, tenant, override, {
     nights: snapshot.stay?.nights,
     nightlyRate: snapshot.stay?.nightlyRate,

@@ -175,30 +175,39 @@ export function repriceFromInvoice(snapshot, tenant, nativeItems) {
   const feePct = snapshot.charges.feePct ?? tenant.processingFeePct ?? 0.06;
   const processingFee = round2(feePct * (nativeSubtotal + deposit.totalDeposit));
 
-  // The pet fee is part of the rent price (Yari, 2026-09-29), so it is split
-  // like rent rather than kept aside. It was split like nothing at all: no
-  // ledger row named it, bookingTotalOf did not count it, and no statement
-  // showed it -- the guest paid it, the processing fee was charged on it, and
-  // it reached neither the owner nor the manager.
+  // Everything the guest was charged for that is not the stay itself, not its
+  // cleaning, and not a pass-through: a pet fee, a late check-out, an early
+  // check-in, an extra guest, whatever the account sells next. All of it is
+  // part of the rent price (Yari, 2026-09-29, about the pet fee; the same is
+  // true of the rest), so it is split at ownerPct like the rent.
+  //
+  // Recognised by NOT being a pass-through rather than by name, which is what
+  // makes a charge added in GHL tomorrow reach somebody without a deploy. The
+  // pet fee needed six edits across five files before anyone was paid for it,
+  // and the next fee would have needed the same six.
+  //
+  // Cleaning is excluded because it is already earned, by whoever
+  // cleaningFeeTo names -- usually the manager, since it pays the cleaner.
+  // Adding it here would pay it to the owner as well.
   //
   // Kept OUT of charges.rentTotal on purpose. That field divides by nights to
   // give nightlyRate, which sizes the deposit and drives the nights-based
-  // cancellation tiers, and a pet fee does not buy a night. It is a separate
-  // amount that happens to be split on the same terms.
-  //
-  // isPetFeeName, not the looser pattern isFeeLine screens with: "Pet
-  // Cleaning" matches that pattern and is not the pet fee. Anything the
-  // precise test does not recognise stays out of the split, which is the
-  // safe way round -- unrecognised money is still collected and still on the
-  // invoice, it is simply not handed to anybody.
-  const petFee = round2(nativeItems.filter(i => isPetFeeName(i?.name, tenant)).reduce((s, i) => s + lineTotal(i), 0));
-  const basis = round2(rent + petFee);
+  // cancellation tiers, and none of these buy a night. They are separate
+  // amounts that happen to be split on the same terms.
+  const addOnItems = nativeItems
+    .slice(1)
+    .filter((i) => !isCleaningFee(i) && !isPassThrough(i, tenant));
+  const addOns = round2(addOnItems.reduce((s, i) => s + lineTotal(i), 0));
+  const basis = round2(rent + addOns);
 
   snapshot.stay.nightlyRate = nightlyRate;
   snapshot.charges.rentTotal = rent;
-  if (petFee > 0) {
-    snapshot.charges.petFee = petFee;
-    snapshot.charges.petFeeSource = "ghl_native";
+  if (addOns > 0) {
+    snapshot.charges.addOns = addOns;
+    // Named individually so a statement can say "Pet Fee 300, Late Checkout
+    // 50" rather than "Add-ons 350", and so a client can see what the split
+    // was taken on without opening the invoice.
+    snapshot.charges.addOnDetail = addOnItems.map((i) => ({ name: String(i.name || "").trim(), amount: lineTotal(i) }));
   }
   snapshot.charges.processingFee = processingFee;
   snapshot.charges.grandTotal = round2(nativeSubtotal + processingFee + deposit.totalDeposit);
@@ -328,6 +337,49 @@ const FEE_LINE_PATTERNS = [
   /deposit|dep(ó|o)sito|garant(í|i)a/i,
   /process|procesamiento|service fee|tarifa/i,
   /\btax|impuesto|itbis/i,
+];
+
+// What the client does NOT earn. Three things, and it is a closed list:
+//
+//   tax             remitted to the government
+//   deposit         the guest's own money, held and given back
+//   processing fee  the gateway's cut, and our own appended line
+//
+// Everything else the guest is charged, the client earned. That is the way
+// round this has to be, because the list of things a client can sell is open
+// and grows every time they add one -- a late check-out, an early check-in, an
+// extra guest, an airport transfer, firewood -- while the list of things that
+// merely pass through is short and does not move.
+//
+// Enumerating the earnings instead is what cost us: the pet fee reached nobody
+// for as long as it existed, and every new charge needed the same six edits
+// before anyone was paid for it. The failure mode of getting THIS list wrong is
+// visible -- a client sees a line on a statement they did not expect. The
+// failure mode of the other way round is money silently reaching no one, which
+// is what we kept finding.
+export function isPassThrough(item, tenant) {
+  const name = String(item?.name ?? "").trim();
+  if (!name) return true;
+  // Cleaning is earned -- by whoever cleaningFeeTo names -- and an account is
+  // free to word it "Cleaning Service Fee", which the processing pattern below
+  // would otherwise claim. There is deliberately no equivalent check for the
+  // pet fee: once the processing pattern stopped matching every "tarifa", no
+  // pet-fee wording collided with anything here, and a name-based pet rule is
+  // the exact thing this change exists to retire.
+  if (isCleaningFee(item)) return false;
+  return PASS_THROUGH_PATTERNS.some((re) => re.test(name));
+}
+
+const PASS_THROUGH_PATTERNS = [
+  /\btax|impuesto|itbis|\bitbi\b/i,
+  /deposit|dep(ó|o)sito|garant(í|i)a/i,
+  // "tarifa de servicio" is deliberately NOT here. The real line reads "Cargo
+  // por procesamiento / Processing fee" and is caught by "procesamiento", and
+  // the broader wording swallowed anything an account chose to call a service
+  // charge -- a pet fee worded "Tarifa de servicio para mascotas" would have
+  // been paid to nobody, which is the failure this whole inversion exists to
+  // stop. A charge has to look like the gateway's cut, not merely like a fee.
+  /process|procesamiento|service fee/i,
 ];
 
 export function isFeeLine(item, tenant) {
