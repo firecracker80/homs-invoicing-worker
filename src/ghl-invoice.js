@@ -343,6 +343,62 @@ export function propertyNameFromInvoice(items, tenant) {
 // Deliberately does NOT re-send the invoice. That would email every guest on
 // every date change, and whether they hear about it is a decision for a
 // workflow that can see the reason, not a side effect of repricing.
+// Close an invoice so nobody can pay it.
+//
+// A booking cancelled for non-payment leaves its invoice live, and the link is
+// already in the guest's inbox. DEMO-HOMS 2026-09-29: booking cancelled 14:17,
+// $975.20 paid 14:49 against a stay that was no longer happening. The Worker
+// caught it and refused to book the revenue, but by then the money had moved.
+//
+// Voiding closes the door rather than catching what comes through it.
+//
+// Refuses to void anything already paid, and says so rather than throwing: a
+// cancellation that reached this point has already decided the booking is over,
+// and an invoice this could not close is worth reporting, not worth failing the
+// cancellation over. The caller records the outcome either way.
+export async function voidInvoice({ tenant, env, locationId, invoiceId }, fetchImpl = fetch) {
+  if (!invoiceId) return { ok: false, reason: "no_invoice_on_booking" };
+
+  let existing;
+  try {
+    existing = await ghlFetch(
+      tenant, env, `/invoices/${invoiceId}?altId=${encodeURIComponent(locationId)}&altType=location`, {}, fetchImpl
+    );
+  } catch (err) {
+    return { ok: false, reason: "invoice_unreadable", detail: err.message };
+  }
+
+  const status = normStatus(existing.status);
+  if (status === "void") return { ok: true, alreadyVoid: true, invoiceId, status };
+
+  // Never void money that has already arrived. A paid or part-paid invoice is a
+  // record of a real payment, and voiding it would hide a refund that is owed.
+  if (isSettled(status) || Number(existing.amountPaid ?? 0) > 0) {
+    return {
+      ok: false,
+      reason: "invoice_already_paid",
+      detail: `Invoice ${existing.invoiceNumber || invoiceId} is ${status} with ${existing.amountPaid ?? 0} paid; voiding it would hide money that actually arrived.`,
+      invoiceId, status, amountPaid: existing.amountPaid ?? 0,
+    };
+  }
+
+  try {
+    const res = await ghlFetch(
+      tenant, env, `/invoices/${invoiceId}/void`,
+      { method: "POST", body: { altId: locationId, altType: "location" } },
+      fetchImpl
+    );
+    return {
+      ok: true,
+      invoiceId,
+      invoiceNumber: existing.invoiceNumber || null,
+      status: normStatus(res?.status) || "void",
+    };
+  } catch (err) {
+    return { ok: false, reason: "void_rejected", detail: err.message, invoiceId };
+  }
+}
+
 export async function updateInvoiceForReschedule(
   { tenant, env, locationId, invoiceId, snapshot, previousNights },
   fetchImpl = fetch

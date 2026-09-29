@@ -374,6 +374,31 @@ export async function handleGhlInvoicePaid(request, env) {
       "Payment of " + amount + " received on CANCELLED booking " + bookingId +
       " (invoice " + (invoice.invoiceNumber || invoice._id) + ") -- owed back to the guest, or the booking has to be reinstated"
     );
+
+    // Voiding the invoice at cancellation should stop this happening at all.
+    // This is the backstop for what still gets through -- a payment already in
+    // flight, or a cancellation where the void was refused -- and until now the
+    // backstop was a console.error, which is a note to nobody. A guest could pay
+    // for a stay that is not happening and the first anyone would know is a
+    // month-end reconciliation.
+    //
+    // Flat strings, same as the cancellation notify: a workflow branches on
+    // paymentAfterCancellation being "yes" and tells whoever has to act.
+    await notifyAndRecord(env, snapshot, tenant.ghlCancellationUrl, {
+      event: "payment_after_cancellation",
+      bookingId: snapshot.bookingId,
+      contactId: snapshot.ghlContactId || "",
+      email: snapshot.guest?.email || "",
+      guestName: snapshot.guest?.name || "",
+      paymentAfterCancellation: "yes",
+      amountPaid: amount.toFixed(2),
+      refundOwed: amount.toFixed(2),
+      invoiceNumber: invoice.invoiceNumber || "",
+      cancelledAt: snapshot.cancellation?.at || "",
+      checkIn: snapshot.stay?.checkIn || "",
+      propertyName: snapshot.propertyCode || tenant.brandName || "",
+    });
+
     return json({ ok: true, skipped: "booking_cancelled", refundOwed: amount, invoiceId: invoice._id, ...paymentSkippedPayload("cancelled", bookingId) });
   }
 
