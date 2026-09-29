@@ -122,23 +122,16 @@ assert.equal(r2.ok, true);
 assert.equal(db1._rows.length, 6, "re-writing the same booking must not create duplicate rows (OR IGNORE + unique index)");
 console.log("2) Idempotent: re-write of BK-1 added 0 new rows, still 6 total");
 
-// ---- 3. No otaRate configured -> the default rate, not a skipped row ----
-// This assertion used to say the opposite: no otaRate meant no shadow row, on
-// the reasoning that guessing a commission rate for a client was worse than
-// showing nothing. It held for months and hid the real problem -- otaRate is
-// not a custom value and not in the provisioning blueprint, so NO tenant had
-// ever had one and the line had never been written for anybody.
-//
-// Reversed deliberately on 2026-09-28: 15.5% across the board, Airbnb's
-// host-only fee. A tenant that genuinely wants none sets otaRate to 0, which
-// test 3b below pins.
+// ---- 3. No otaRate configured -> shadow row skipped, never invent a rate ----
+// Briefly reversed on 2026-09-28 to a flat 15.5% default, and reverted the next
+// day: one invented percentage is wrong for an OTA-sourced booking, whose real
+// rate is recorded on its own channel record, and meaningless for a direct
+// booking, which has no commission at all.
 const db3 = makeMockD1();
 const r3 = await writeLedgerEntries({ LEDGER_DB: db3 }, { currency: "USD" }, makeSnapshot("BK-NO-OTA"), captures);
-assert.equal(r3.d1.rowsWritten, 6, "no otaRate on tenant -> the default rate still writes a shadow row");
-const shadow = db3._rows.find(r => r.entry_type === "shadow_ota_commission");
-assert.ok(shadow, "the shadow row is written without per-client configuration");
-assert.equal(shadow.category, "shadow", "and never counts as income");
-console.log("3) No tenant.otaRate -> shadow entry written at the default rate");
+assert.equal(r3.d1.rowsWritten, 5, "no otaRate on tenant -> 5 rows, no shadow_ota_commission");
+assert.ok(!db3._rows.some(r => r.entry_type === "shadow_ota_commission"));
+console.log("3) No tenant.otaRate -> shadow entry correctly omitted (never invents a rate)");
 
 // ---- 3a. otaRate: 0 still means none ----
 // The escape hatch, and the reason the default reads ?? rather than ||.

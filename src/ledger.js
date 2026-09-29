@@ -38,11 +38,6 @@ import {
 const toMinor = n => Math.round(Number(n) * 100);
 const round2 = n => Math.round(n * 100) / 100;
 
-// Airbnb's host-only service fee, and the rate the shadow commission line is
-// reckoned against for every tenant that has not set its own. See the comment
-// at the row itself for why this is a default rather than a per-client field.
-export const OTA_RATE_DEFAULT = 0.155;
-
 // "15.5%", and "15%" rather than "15.0%". This is read by prospects.
 const formatPct = (rate) => `${Number((rate * 100).toFixed(1))}%`;
 
@@ -124,21 +119,26 @@ export async function writeLedgerEntries(env, tenant, snapshot, captures) {
   // 6. Shadow OTA commission -- informational only, no real money moved, and
   // excluded from incomeTotal on every statement.
   //
-  // It used to be skipped unless a tenant had configured a rate, on the
-  // reasoning that guessing a commission percentage for a client would be
-  // worse than showing nothing. In practice no tenant ever had one: otaRate
-  // lives only in KV, is not a custom value, and is not in the provisioning
-  // blueprint -- so the number the marketing leans on had never been written
-  // for anybody, and could not be turned on through onboarding at all.
+  // Written only when a tenant has actually configured a rate. A flat default
+  // of 15.5% shipped on 2026-09-28 and was reverted the next day, for a reason
+  // worth keeping written down: it conflated two different things.
   //
-  // Yari's call, 2026-09-28: 15.5% across the board. It is Airbnb's current
-  // host-only fee, Airbnb is the majority channel, and it is the best
-  // documented number to defend if a prospect pushes back. It does not vary by
-  // client, so a default beats a field nobody fills in.
+  // A booking that CAME FROM an OTA has a real commission, at that channel's
+  // real rate. Applying one invented percentage to it is wrong, and the right
+  // number is already recorded -- custom_objects.ota_channels has a
+  // commission_rate field, and findRecordByName below resolves that very
+  // channel record for snapshot.bookingSource. The rate sits one field away
+  // from code that was already fetching it.
   //
-  // Still overridable: a tenant with a different channel mix can set its own,
-  // and setting it to 0 turns the line off entirely.
-  const otaRate = tenant.otaRate ?? OTA_RATE_DEFAULT;
+  // A DIRECT booking has no commission at all. "What Airbnb would have charged"
+  // is a marketing comparison, and if it is worth showing it should quote the
+  // tenant's own recorded Airbnb rate rather than a constant in this file --
+  // then it moves when their rate does, and it is their number to defend.
+  //
+  // Both are still to build, and the open question ahead of either is whether
+  // the rent the Worker sees on an OTA booking is gross or already net of the
+  // channel's cut. Booking a commission on a net figure would double-count it.
+  const otaRate = tenant.otaRate ?? 0;
   if (otaRate > 0) {
     rows.push({
       recipient: "owner", recipientName: ownerName, category: "shadow", entry_type: "shadow_ota_commission",

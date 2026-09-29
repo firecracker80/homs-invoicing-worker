@@ -1,18 +1,23 @@
-// Every booking shows what an OTA would have taken.
+// The OTA comparison line, and the rate it is allowed to use.
 // Run: node test-ota-shadow-rate.mjs
 //
-// The shadow commission line was skipped unless a tenant had configured
-// otaRate, so as never to guess a commission rate on a client's behalf. In
-// practice no tenant ever had one -- otaRate lives only in KV, is not a custom
-// value, and is not in the provisioning blueprint. The number the marketing
-// leans on had never been written for anybody, and could not be turned on
-// through onboarding at all. Found 2026-09-28 answering what was safe to film.
+// A flat 15.5% default shipped on 2026-09-28 and was reverted the next day,
+// because it conflated two different things:
 //
-// Yari's call: 15.5% across the board, Airbnb's host-only fee. It does not vary
-// by client, so a default beats a field nobody fills in.
+//   A booking that CAME FROM an OTA has a real commission at that channel's
+//   real rate. custom_objects.ota_channels already carries a commission_rate
+//   field, and ledger.js already resolves that channel record for the booking's
+//   source -- so the true number was one field away from the code inventing one.
+//
+//   A DIRECT booking has no commission at all. "What Airbnb would have charged"
+//   is a marketing comparison, not an accounting fact.
+//
+// So the line is written only when a rate has been configured deliberately.
+// What this file still pins is the part that was a genuine bug either way: the
+// sentence and the amount have to agree.
 import assert from "node:assert";
 
-const { writeLedgerEntries, OTA_RATE_DEFAULT } = await import("./src/ledger.js");
+const { writeLedgerEntries } = await import("./src/ledger.js");
 
 const BOOKING = "BK-OTA";
 const LOC = "L1";
@@ -55,67 +60,65 @@ const run = async (tenantOver = {}) => {
     .map((r) => r.properties);
 };
 
-// ---- 1. a tenant with no otaRate still gets the line ------------------
+// ---- 1. no configured rate, no line ----------------------------------
+// The revert. A tenant that has said nothing about commission gets nothing
+// asserted on its behalf.
 {
-  const rows = await run();
-  assert.strictEqual(rows.length, 1, "the line is written without any per-client configuration");
-  assert.strictEqual(OTA_RATE_DEFAULT, 0.155, "at Airbnb's host-only fee");
-  console.log("1) Every tenant gets a shadow commission line, with no configuration needed");
+  assert.deepStrictEqual(await run(), [], "nothing is written without a rate somebody chose");
+  console.log("1) A tenant with no configured rate gets no comparison line");
 }
 
-// ---- 2. the amount is 15.5% of the rent basis ------------------------
+// ---- 2. an explicit zero is also no line -----------------------------
+// Absent and zero are different inputs that must reach the same place, so the
+// opt-out cannot be undone by a later change to how the default is read.
 {
-  const [row] = await run();
-  const amount = Number(row.amount?.value ?? row.amount);
-  assert.strictEqual(amount, 41.85, "15.5% of 270, to the cent");
-  console.log("2) It is reckoned against the rent basis: 41.85 on a 270 stay");
+  assert.deepStrictEqual(await run({ otaRate: 0 }), [], "an explicit zero is still none");
+  console.log("2) An explicit zero rate writes no line either");
 }
 
-// ---- 3. the label matches the arithmetic ----------------------------
-// This is the assertion that exists because of the bug. Math.round(0.155 * 100)
-// is 16, so the line read "a 16% OTA commission" beside an amount computed at
-// 15.5% -- on the single figure meant to be shown to prospects.
+// ---- 3. a configured rate is used exactly as given -------------------
 {
-  const [row] = await run();
+  const [row] = await run({ otaRate: 0.155 });
+  assert.strictEqual(Number(row.amount?.value ?? row.amount), 41.85, "15.5% of the 270 rent basis");
+  console.log("3) A configured rate is applied to the rent basis, to the cent");
+}
+
+// ---- 4. the label matches the arithmetic -----------------------------
+// The bug that was real regardless of where the rate comes from:
+// Math.round(0.155 * 100) is 16, so the line read "a 16% OTA commission" beside
+// an amount computed at 15.5% -- on the one figure meant for prospects.
+{
+  const [row] = await run({ otaRate: 0.155 });
   assert.match(row.notes, /15\.5%/, "the sentence says the rate the amount was computed at");
   assert.doesNotMatch(row.notes, /16%/, "and never a rounded one");
-  console.log("3) The description says 15.5%, matching the amount, not a rounded 16%");
+  console.log("4) The description says 15.5%, matching the amount, not a rounded 16%");
 }
 
-// ---- 4. a whole number loses its decimal ----------------------------
-// "15.0%" is not how anyone writes a rate.
+// ---- 5. a whole number loses its decimal -----------------------------
 {
   const [row] = await run({ otaRate: 0.15 });
   assert.match(row.notes, /\b15%/);
   assert.doesNotMatch(row.notes, /15\.0%/);
-  console.log("4) A whole-number rate reads 15%, not 15.0%");
+  console.log("5) A whole-number rate reads 15%, not 15.0%");
 }
 
-// ---- 5. a tenant can still set its own -------------------------------
+// ---- 6. rates differ between tenants, and are honoured ---------------
+// The reason a constant was wrong: channels do not charge the same.
 {
   const [row] = await run({ otaRate: 0.18 });
   assert.strictEqual(Number(row.amount?.value ?? row.amount), 48.6, "18% of 270");
   assert.match(row.notes, /18%/);
-  console.log("5) A tenant with a different channel mix can override the default");
-}
-
-// ---- 6. and zero turns it off entirely -------------------------------
-// The escape hatch has to be an explicit 0, not merely an absent field -- which
-// is exactly the distinction the default now depends on.
-{
-  const rows = await run({ otaRate: 0 });
-  assert.deepStrictEqual(rows, [], "no line at all for a tenant that wants none");
-  console.log("6) Setting the rate to zero removes the line, rather than falling back to the default");
+  console.log("6) A different rate produces a different amount and a matching label");
 }
 
 // ---- 7. it never counts as income ------------------------------------
-// No money moved. A shadow row leaking into incomeTotal would overstate what an
-// owner earned by 15.5% of every booking.
+// No money moved. A shadow row reaching incomeTotal would overstate what an
+// owner earned by the commission rate on every booking.
 {
-  const [row] = await run();
+  const [row] = await run({ otaRate: 0.155 });
   assert.strictEqual(row.category, "shadow");
-  assert.notStrictEqual(row.category, "income");
-  console.log("7) The line is category shadow, so it never reaches an owner's income total");
+  assert.strictEqual(row.cleared_for_payout, "no", "and never clears for payout");
+  console.log("7) The line is category shadow and never clears for payout");
 }
 
-console.log("\nPASS — every booking records what an OTA would have taken, at a rate the sentence and the amount agree on.");
+console.log("\nPASS — the comparison line appears only at a rate somebody chose, and says the rate it actually used.");
