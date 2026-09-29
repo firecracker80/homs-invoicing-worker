@@ -28,7 +28,7 @@
 // its own rent and deposit sums to exactly the fee on the whole booking.
 
 import { composeBooking } from "./booking-composer.js";
-import { isFeeLine } from "./ghl-invoice.js";
+import { isFeeLine, isCleaningFee } from "./ghl-invoice.js";
 
 export const MULTI_PARENT_TYPE = "multi_listing_parent";
 
@@ -55,6 +55,8 @@ export async function splitBookedReservation({ tenant, env, snapshot, nativeItem
   const paired = pairListings(nativeItems, fetched.services, tenant);
   if (!paired.ok) return { split: false, reason: paired.reason, ...paired };
 
+  const cleaning = pairCleaning(nativeItems, paired.listings);
+
   const { parent, children } = composeMultiListing(
     {
       bookingId: snapshot.bookingId,
@@ -67,14 +69,30 @@ export async function splitBookedReservation({ tenant, env, snapshot, nativeItem
     paired.listings
   );
 
+  applyCleaning(children, cleaning, tenant);
+
   // The reservation-level facts stay on the parent: the guest pays one invoice
   // and one payment arrives against it, so that is where they belong. The
   // children are stays, not sales.
   parent.ghlInvoice = snapshot.ghlInvoice ?? null;
   parent.gateway = snapshot.gateway ?? null;
   parent.guest = snapshot.guest ?? parent.guest;
-  parent.charges.processingFee = snapshot.charges?.processingFee ?? parent.charges.processingFee;
   parent.charges.grandTotal = snapshot.charges?.grandTotal ?? null;
+  // Re-summed after the cleaning fees landed on the children. Taking the fee
+  // from the reservation-level snapshot instead would leave the parent and its
+  // children disagreeing by exactly the fee on the cleaning -- 7.80 on the
+  // DEMO-HOMS booking that found this -- and settlement divides the payment by
+  // the children.
+  parent.charges.cleaningFee = sum(children.map((c) => c.charges.cleaningFee));
+  // Summed from the children rather than copied from the reservation-level
+  // snapshot. The two agree on every booking seen so far, because
+  // repriceFromInvoice charges the fee on the whole invoice subtotal and that
+  // is the same base once cleaning has reached the children -- no test can
+  // currently tell them apart. The children are still the right source:
+  // settlement divides the payment by them, so a parent that disagreed with
+  // its children would be describing a reservation nobody was paid for.
+  parent.charges.processingFee = sum(children.map((c) => c.charges.processingFee));
+  if (!cleaning.ok) parent.cleaningPairing = cleaning;
 
   return { split: true, parent, children };
 }
@@ -170,6 +188,74 @@ export function pairListings(invoiceItems, services, tenant) {
 }
 
 const round2 = (n) => Math.round(n * 100) / 100;
+
+// Pair the invoice's cleaning lines with the listings they cleaned.
+//
+// Cleaning is per listing (Yari, 2026-09-28) and GHL's Additional Fees add one
+// line per service, so a two-listing reservation carries two cleaning lines.
+// They pair in the same order the rent lines do, which is chronological -- the
+// order proven on JI1yIAnf498IgFIV7J9M and confirmed again on the staggered
+// 3at3yw3tMEYQ1MWGfHFM.
+//
+// Nothing was reading them. composeBooking sets cleaningFee to 0 for every
+// booking and the enrich step fills it back in from the invoice afterwards, but
+// the children are composed AFTER enrich has already run, so no step ever put
+// cleaning on them. On 3at3yw3tMEYQ1MWGfHFM that left two 65.00 lines, 130.00
+// the guest actually paid, attributed to no listing at all -- and cleaning is
+// income, so settlement would have paid the manager 130.00 less than the guest
+// was charged.
+//
+// A count that does not match cannot be attributed, and the choice there is
+// between two wrongs. Leaving it at zero loses the money outright, which is the
+// bug this exists to fix. Putting the whole total on the first listing keeps the
+// reservation's total exactly right and misattributes only WHICH listing earned
+// it -- and only on a tenant that names owners or managers per property, since
+// cleaningFeeTo is tenant-wide. So: total preserved, attribution flagged.
+export function pairCleaning(invoiceItems, listings) {
+  const amounts = (invoiceItems || [])
+    .filter(isCleaningFee)
+    .map((i) => round2(Number(i.amount || 0) * Number(i.qty || 1)))
+    .filter((n) => n > 0);
+  const total = round2(amounts.reduce((s, n) => s + n, 0));
+
+  if (!(total > 0)) return { ok: true, perListing: listings.map(() => 0), total: 0 };
+  if (amounts.length === listings.length) return { ok: true, perListing: amounts, total };
+
+  return {
+    ok: false,
+    reason: "cleaning_line_count_mismatch",
+    cleaningLines: amounts.length,
+    listingCount: listings.length,
+    total,
+    perListing: listings.map((_, i) => (i === 0 ? total : 0)),
+  };
+}
+
+// Put each listing's cleaning on its child, and re-derive what depends on it.
+//
+// The processing fee has to move with it. It is a flat percentage of everything
+// the guest is charged, so a child holding cleaning but a fee computed without
+// it under-states the fee -- and the children would then sum to less than the
+// invoice the guest paid. With cleaning included they sum to it exactly: on
+// 3at3yw3tMEYQ1MWGfHFM, 6% of (945 + 65) plus 6% of (880 + 65) is 117.30, which
+// is the fee on the invoice to the cent.
+//
+// The deposit deliberately does NOT move with it. calcSecurityDeposit is called
+// with a cleaning fee of 0 everywhere else too (booking-composer, and
+// repriceFromInvoice on the single-listing path), because a deposit is sized
+// against the stay rather than against the fees on it.
+function applyCleaning(children, cleaning, tenant) {
+  children.forEach((child, index) => {
+    const amount = cleaning.perListing?.[index] ?? 0;
+    if (!(amount > 0)) return;
+    const deposit = child.securityDeposit?.total ?? 0;
+    const feePct = child.charges.feePct ?? tenant.processingFeePct ?? 0.06;
+    child.charges.cleaningFee = amount;
+    child.charges.cleaningFeeSource = cleaning.ok ? "ghl_native" : "ghl_native_unattributed";
+    child.charges.processingFee = round2(feePct * (child.charges.rentTotal + amount + deposit));
+    child.charges.grandTotal = round2(child.charges.rentTotal + amount + child.charges.processingFee + deposit);
+  });
+}
 
 // Pull the listings out of whatever GHL actually sends.
 //

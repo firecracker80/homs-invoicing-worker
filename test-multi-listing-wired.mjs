@@ -27,6 +27,10 @@ const tenant = {
   brandName: "Casa Bonita", currency: "USD", ownerPct: 0.85, processingFeePct: 0.06,
   deposit: { rule: "none" }, invoiceStrategy: "enrich", ghlPit: "pit",
   webhookSecret: "s3cret", invoiceSenderUserId: "u1",
+  // Set so case 11 can prove nothing is posted to it. Without a URL here,
+  // notifyAndRecord has nowhere to post and the assertion passes on a tenant
+  // that could not have been notified in the first place.
+  ghlPaymentConfirmedUrl: "https://ghl.test/payment-confirmed",
   propertyOwnerNames: { "Test Villa 2": "Carlos Mendoza", "Test Villa 3": "Rosa Jimenez" },
   ownerName: "Account Default Owner", managerName: "Account Default Manager",
 };
@@ -117,7 +121,21 @@ const book = async (opts = {}) => {
     ["Test Villa 3", "2026-11-05", "2026-11-11", 660]);
   assert.strictEqual(a.payout.ownerName, "Carlos Mendoza");
   assert.strictEqual(b.payout.ownerName, "Rosa Jimenez", "the second listing pays its own owner");
-  console.log("3) Each listing keeps its own dates, rent and owner");
+
+  // Cleaning is per listing, and the invoice carries one line per listing to
+  // match. Nothing was reading them: composeBooking sets cleaningFee to 0 and
+  // the enrich step that fills it back in has already run by the time the
+  // children exist. On the DEMO-HOMS booking that found this, 130.00 of
+  // cleaning the guest had paid belonged to no listing at all.
+  assert.strictEqual(a.charges.cleaningFee, 65, "the first listing earns its own cleaning fee");
+  assert.strictEqual(b.charges.cleaningFee, 65, "and so does the second");
+
+  // And the processing fee follows it, because the guest was charged a
+  // percentage of the cleaning too. Without this the children sum to less than
+  // the invoice, which is the number settlement divides.
+  assert.strictEqual(a.charges.processingFee, 28.2, "6% of 405 + 65");
+  assert.strictEqual(b.charges.processingFee, 43.5, "6% of 660 + 65");
+  console.log("3) Each listing keeps its own dates, rent, owner and cleaning fee");
 }
 
 // ---- 4. the parent keeps the money side -----------------------------
@@ -130,8 +148,23 @@ const book = async (opts = {}) => {
   assert.strictEqual(parent.ghlInvoice.invoiceId, INVOICE);
   assert.strictEqual(parent.gateway, "ghl_invoice");
   assert.strictEqual(parent.charges.rentTotal, 1065);
+  assert.strictEqual(parent.charges.cleaningFee, 130, "both cleaning lines, summed from the children");
+  assert.strictEqual(parent.charges.processingFee, 71.7, "6% of rent + cleaning across the reservation");
   assert.deepStrictEqual(parent.stayRange, { checkIn: "2026-11-02", checkOut: "2026-11-11" });
-  console.log("4) The parent holds the invoice and the reservation's span");
+
+  // The children have to add up to what the guest is being charged, because
+  // that is the sum settlement divides. Anything left over is a discrepancy,
+  // and a parent that quietly disagreed with its own children by the fee on
+  // the cleaning would make every real discrepancy unreadable.
+  const childTotal = Math.round((JSON.parse(store.get(`${BOOKING}#1`)).charges.grandTotal
+    + JSON.parse(store.get(`${BOOKING}#2`)).charges.grandTotal) * 100) / 100;
+  assert.strictEqual(childTotal, 1266.7);
+  assert.strictEqual(
+    Math.round((parent.charges.rentTotal + parent.charges.cleaningFee + parent.charges.processingFee) * 100) / 100,
+    childTotal,
+    "the parent and its children price the same reservation"
+  );
+  console.log("4) The parent holds the invoice and the span, and agrees with its children to the cent");
 }
 
 // ---- 5. an ordinary booking is untouched ----------------------------
@@ -170,16 +203,24 @@ const book = async (opts = {}) => {
   console.log("6) Two sources that disagree leave the booking intact and record why");
 }
 
-// ---- 7. paying a bundled reservation is refused, not mishandled -----
-// The parent has no stay, so settling it would price a booking with no nights.
-// It has to say that rather than fail on a missing field somewhere deeper.
-{
-  await book();
-  const { handleGhlInvoicePaid } = await import("./src/payment.js");
-  global.fetch = async (url) => {
+// ---- 7..11 paying a bundled reservation ---------------------------
+// One invoice over several stays settles as several bookings. The parent has no
+// stay of its own, so it cannot be priced -- and until this existed it was not
+// priced at all: the whole payment returned "not settled" and nothing reached
+// the ledger.
+const { handleGhlInvoicePaid } = await import("./src/payment.js");
+
+let objectPosts = [];
+let confirmPosts = [];
+const payInvoice = async ({ amountPaid = 1266.7 } = {}) => {
+  objectPosts = []; confirmPosts = [];
+  global.fetch = async (url, opts = {}) => {
+    const u = String(url);
     const ok = (o) => ({ ok: true, status: 200, json: async () => o, text: async () => JSON.stringify(o) });
-    if (String(url).includes("/invoices/")) {
-      return ok({ _id: INVOICE, invoiceNumber: "000030", status: "paid", total: 1198.9, amountPaid: 1198.9,
+    if (u.includes("/objects/") && opts.method === "POST") objectPosts.push(JSON.parse(opts.body || "{}"));
+    if (u === tenant.ghlPaymentConfirmedUrl) { confirmPosts.push(u); return ok({}); }
+    if (u.includes("/invoices/")) {
+      return ok({ _id: INVOICE, invoiceNumber: "000030", status: "paid", total: amountPaid, amountPaid,
         altId: LOC, source: "calendar", sourceId: BOOKING });
     }
     return ok({ records: [], record: { id: "r" } });
@@ -189,19 +230,127 @@ const book = async (opts = {}) => {
     json: async () => ({ invoiceId: INVOICE, locationId: LOC, secret: "s3cret" }),
     headers: { get: () => null },
   }, env);
-  const body = await res.json();
+  return { status: res.status, body: await res.json() };
+};
 
-  assert.strictEqual(body.skipped, "multi_listing_not_settled");
-  assert.strictEqual(body.listingCount, 2);
+{
+  await book();
+  const out = await payInvoice();
 
-  // Two different facts, two different names. amountPaid is the GHL-facing
-  // "what we confirmed and booked", which is nothing -- and a workflow reading
-  // it is entitled to assume that. What the guest actually handed over is
-  // amountReceived. The first version of this collided them, and the spread
-  // silently won.
-  assert.strictEqual(body.amountReceived, 1198.9, "the payment is acknowledged");
-  assert.strictEqual(body.amountPaid, "0.00", "while nothing is claimed to have been booked");
-  console.log("7) A paid bundled reservation is refused explicitly, naming what was not written");
+  assert.strictEqual(out.status, 200, JSON.stringify(out.body));
+  assert.strictEqual(out.body.settled, true);
+  assert.strictEqual(out.body.multiListing, true);
+  assert.strictEqual(out.body.listingCount, 2);
+
+  const a = JSON.parse(store.get(`${BOOKING}#1`));
+  const b = JSON.parse(store.get(`${BOOKING}#2`));
+  assert.strictEqual(a.settled, true, "the first listing is settled in its own right");
+  assert.strictEqual(b.settled, true, "and so is the second");
+  assert.strictEqual(JSON.parse(store.get(BOOKING)).settled, true, "and the reservation as a whole");
+  console.log("7) A paid bundled reservation settles as each of its listings");
 }
 
-console.log("\nPASS — a bundled reservation is invoiced once, split into its listings, and says plainly that settlement is not wired.");
+// ---- 8. each listing is priced on its own money, and they add up ----
+// The division needs no apportioning rule, because each child already holds
+// what the guest was charged for it. That only adds up because the cleaning
+// fee -- and the processing fee on the cleaning -- reached the children at all.
+{
+  await book();
+  const out = await payInvoice();
+  assert.deepStrictEqual(
+    out.body.listings.map((l) => l.amount), [498.2, 768.5],
+    "405 + 65 + 28.20, and 660 + 65 + 43.50"
+  );
+  assert.strictEqual(out.body.allocated, 1266.7);
+  assert.strictEqual(out.body.variance, undefined, "nothing is left over on a reservation that adds up");
+  console.log("8) Each listing settles on its own money, and the listings account for the whole invoice");
+}
+
+// ---- 9. money that does not add up is recorded, never spread --------
+// Spreading a discrepancy over the listings would make the books balance by
+// moving somebody's split. A part payment, a manual GHL adjustment or a
+// missing child all land here, and all have to stay visible.
+{
+  await book();
+  const out = await payInvoice({ amountPaid: 1200 });
+  assert.strictEqual(out.body.allocated, 1266.7, "the listings are priced on what they cost");
+  assert.strictEqual(out.body.variance, -66.7, "and the shortfall is stated rather than absorbed");
+  assert.deepStrictEqual(
+    out.body.listings.map((l) => l.amount), [498.2, 768.5],
+    "no listing's split moved to make the total work"
+  );
+  assert.strictEqual(JSON.parse(store.get(BOOKING)).settlement.variance, -66.7,
+    "and it is on the record, not only in a log");
+  console.log("9) A payment that does not match the listings is recorded as a variance, not spread over them");
+}
+
+// ---- 10. a listing that fails leaves the reservation retryable ------
+{
+  await book();
+  store.delete(`${BOOKING}#2`);
+  const out = await payInvoice();
+
+  assert.strictEqual(out.status, 207, "partial settlement is not a success");
+  assert.strictEqual(out.body.settled, false);
+  assert.deepStrictEqual(out.body.failedListings, [{ bookingId: `${BOOKING}#2`, reason: "child_missing" }],
+    "and the listing that failed is named, not counted");
+
+  const parent = JSON.parse(store.get(BOOKING));
+  assert.notStrictEqual(parent.settled, true,
+    "the reservation stays unsettled so the same webhook firing again finishes it");
+  assert.strictEqual(JSON.parse(store.get(`${BOOKING}#1`)).settled, true,
+    "while the listing that did settle keeps its settlement");
+
+  // The retry. settle() is idempotent per booking, so the listing that already
+  // went through must not be paid a second time -- it reports back rather than
+  // writing another set of ledger rows.
+  store.set(`${BOOKING}#2`, JSON.stringify({
+    ...JSON.parse(store.get(`${BOOKING}#1`)), bookingId: `${BOOKING}#2`, settled: false, settledAt: null,
+  }));
+  const retry = await payInvoice();
+  assert.strictEqual(retry.status, 200);
+  assert.strictEqual(retry.body.settled, true, "the retry finishes the reservation");
+  assert.strictEqual(retry.body.listings[0].alreadySettled, true,
+    "without settling the listing that was already done twice");
+  console.log("10) A listing that fails leaves the reservation retryable, and the retry does not double-settle");
+}
+
+// ---- 11. one reservation, one confirmation --------------------------
+// The guest booked once and paid once. The cancellation fan-out sends one
+// notification per listing, which is how a bundled cancellation reached the
+// guest twice -- this deliberately does not copy it.
+{
+  await book();
+  const out = await payInvoice();
+  assert.strictEqual(confirmPosts.length, 0,
+    "the GHL-invoice route never posts back to the workflow that called it");
+  assert.strictEqual(out.body.event, "payment_confirmed", "the response is the confirmation");
+  assert.strictEqual(out.body.amountPaid, "1266.70", "for the whole reservation");
+  assert.strictEqual(out.body.propertyName, "Test Villa 2 + Test Villa 3", "naming every listing on it");
+  assert.strictEqual(out.body.checkIn, "2026-11-02");
+  assert.strictEqual(out.body.checkOut, "2026-11-11", "over the reservation's whole span, not one listing's");
+  console.log("11) One reservation gets one confirmation, covering every listing on it");
+}
+
+// ---- 12. paid after cancellation, on a bundled reservation ----------
+// A guest can pay an invoice that is still sitting in their inbox after the
+// booking was cancelled, and on a bundled reservation the bundled branch used
+// to answer first -- so the money came back as "not settled yet", which reads
+// as a system that has not got round to it rather than money owed back to
+// somebody. Cancelled is checked first now.
+{
+  await book();
+  const parent = JSON.parse(store.get(BOOKING));
+  parent.cancelled = true;
+  parent.cancellation = { at: "2026-10-20T12:00:00.000Z", reason: "guest cancelled" };
+  store.set(BOOKING, JSON.stringify(parent));
+
+  const out = await payInvoice();
+  assert.strictEqual(out.body.skipped, "booking_cancelled", "not a settlement, and not a bundled skip");
+  assert.strictEqual(out.body.refundOwed, 1266.7, "the money is named as owed back");
+  assert.strictEqual(JSON.parse(store.get(`${BOOKING}#1`)).settled, undefined,
+    "and no listing was settled on a reservation nobody is honouring");
+  console.log("12) A bundled reservation paid after cancellation escalates instead of settling");
+}
+
+console.log("\nPASS — a bundled reservation is invoiced once, split into its listings, and settles as each of them.");

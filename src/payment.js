@@ -277,6 +277,128 @@ async function settle(env, tenant, snapshot, captures, { notify = true } = {}) {
   return { settled: true, totalPaid, ledgerOk, ghlOk };
 }
 
+// A bundled reservation settles as its listings, not as itself.
+//
+// The parent holds the invoice and no stay of its own -- no nights, no
+// property, no payout -- so settle() cannot price it. Until now that meant it
+// was not priced at all: a paid bundled reservation returned
+// multi_listing_not_settled and nothing reached the ledger. On DEMO-HOMS
+// 3at3yw3tMEYQ1MWGfHFM that was 2,072.30 collected and no owner or manager
+// credited with any of it.
+//
+// It settles by fanning out over the children instead, which is the same shape
+// as the cancellation fan-out and works for the same reason: each child is an
+// ordinary single-listing booking, so every per-property thing -- the
+// owner/manager split, the Transaction record, the Property link, the statement
+// rows -- runs on it untouched. One invoice in, one Transaction per listing out.
+//
+// The division needs no apportioning rule. Each child already holds its own
+// rent, cleaning and processing fee, and since applyCleaning moved the fee onto
+// the same base the guest was charged on, the children sum to the invoice
+// exactly -- 1,070.60 and 1,001.70 against a 2,072.30 invoice. Anything left
+// over is therefore a real discrepancy rather than rounding, so it is recorded
+// as a variance instead of being spread over the listings to make the books
+// balance. A part payment, a manual adjustment in GHL, or a child snapshot that
+// went missing all show up here rather than silently moving someone's split.
+//
+// The parent is marked settled only when every child settled. A child that
+// failed leaves the parent unsettled so the same webhook firing again retries
+// it -- settle() is idempotent per booking, so the children that already went
+// through return alreadySettled and only the failed one is attempted.
+async function settleMultiListing(env, tenant, parent, { invoice, paid, common }) {
+  const results = [];
+  const properties = [];
+  let depositTotal = 0;
+
+  for (const childId of parent.childBookingIds || []) {
+    const child = await findSnapshot(env, childId);
+    if (!child) {
+      console.error(`Bundled settlement: child ${childId} of ${parent.bookingId} is not in KV`);
+      results.push({ bookingId: childId, ok: false, reason: "child_missing" });
+      continue;
+    }
+    if (child.propertyCode) properties.push(child.propertyCode);
+
+    const dep = round2(Number(child.securityDeposit?.total || 0));
+    depositTotal = round2(depositTotal + dep);
+    // Everything the guest was charged for this listing except its deposit,
+    // matching how the single-listing route splits RENT from DEP.
+    const rentGross = round2(
+      (child.charges?.rentTotal || 0) + (child.charges?.cleaningFee || 0) + (child.charges?.processingFee || 0)
+    );
+    const captures = {
+      RENT: { ...common, gross: rentGross },
+      ...(dep > 0 ? { DEP: { ...common, gross: dep } } : {}),
+    };
+
+    try {
+      const outcome = await settle(env, tenant, child, captures, { notify: false });
+      results.push({
+        bookingId: childId, ok: true, propertyName: child.propertyCode || null,
+        amount: round2(rentGross + dep), ...outcome,
+      });
+    } catch (err) {
+      console.error(`Bundled settlement failed for ${childId}: ${err.message}`);
+      results.push({ bookingId: childId, ok: false, error: err.message });
+    }
+  }
+
+  const failed = results.filter((r) => !r.ok);
+  const allocated = round2(results.reduce((s, r) => s + (Number(r.amount) || 0), 0));
+  const variance = round2(paid - allocated);
+
+  parent.settlement = {
+    at: new Date().toISOString(),
+    invoiceId: invoice._id,
+    invoiceNumber: invoice.invoiceNumber || null,
+    amountPaid: round2(paid),
+    allocated,
+    listings: results.map((r) => ({
+      bookingId: r.bookingId, ok: r.ok,
+      amount: r.amount ?? null,
+      alreadySettled: r.alreadySettled ?? false,
+      reason: r.reason || r.error || null,
+    })),
+  };
+  if (Math.abs(variance) >= 0.01) {
+    parent.settlement.variance = variance;
+    console.error(
+      `Bundled settlement variance on ${parent.bookingId}: guest paid ${paid.toFixed(2)}, ` +
+      `listings account for ${allocated.toFixed(2)}, difference ${variance.toFixed(2)}`
+    );
+  }
+  if (!failed.length) {
+    parent.settled = true;
+    parent.settledAt = parent.settlement.at;
+  }
+  await env.BOOKINGS.put(parent.bookingId, JSON.stringify(parent));
+
+  // One confirmation for one reservation. The guest made one booking and paid
+  // one invoice, so sending a confirmation per listing would tell them twice
+  // that a thing they did once had happened -- the same duplication the
+  // cancellation fan-out produces and that this deliberately does not copy.
+  return json({
+    ...paymentConfirmedPayload({
+      bookingId: parent.bookingId,
+      contactId: parent.ghlContactId,
+      amountPaid: paid,
+      depositTotal,
+      checkIn: parent.stayRange?.checkIn,
+      checkOut: parent.stayRange?.checkOut,
+      propertyName: properties.join(" + ") || tenant.brandName,
+    }),
+    ok: true,
+    invoiceId: invoice._id,
+    multiListing: true,
+    listingCount: results.length,
+    settled: !failed.length,
+    allocated,
+    ...(Math.abs(variance) >= 0.01 ? { variance } : {}),
+    listings: parent.settlement.listings,
+    failedListings: failed.map((r) => ({ bookingId: r.bookingId, reason: r.reason || r.error || null })),
+  }, failed.length ? 207 : 200);
+}
+
 function confirmationPage(tenant, snapshot) {
   const b = tenant.brandName || "";
   return `<!doctype html><html lang="es"><head><meta charset="utf-8">
@@ -363,35 +485,12 @@ export async function handleGhlInvoicePaid(request, env) {
   // already released. Settling it would book revenue and an owner/manager split
   // for a booking nobody is honouring, so it is recorded and escalated instead --
   // and the guest is never sent a confirmation.
-  // A bundled reservation's parent holds the invoice but no stay of its own, so
-  // settle() would be pricing a booking with no nights, no property and no
-  // payout. Refused explicitly rather than left to fail somewhere further in,
-  // where the error would name a missing field instead of the actual reason.
   //
-  // The money is real and the guest has paid it -- this says so, and says the
-  // ledger does not have it yet, which is a different thing from a payment that
-  // quietly did nothing.
-  if (isMultiListingParent(snapshot)) {
-    console.error(
-      `Payment received on bundled reservation ${snapshot.bookingId} (invoice ` +
-      `${invoice.invoiceNumber || invoice._id}) -- settlement for bundled reservations is not wired, ` +
-      `so no ledger rows or Transaction record were written`
-    );
-    return json({
-      ok: true,
-      skipped: "multi_listing_not_settled",
-      bookingId: snapshot.bookingId,
-      listingCount: snapshot.childBookingIds?.length ?? 0,
-      // Deliberately NOT amountPaid. paymentSkippedPayload sets that to "0.00"
-      // and means it -- nothing was confirmed or booked, which is what a
-      // workflow reading amountPaid is entitled to assume. The money that
-      // actually arrived is a different fact and needs a different name, the
-      // same way manualRefunds had to stop sharing one with refundFailures.
-      amountReceived: round2(Number(invoice.amountPaid ?? invoice.total ?? 0)),
-      ...paymentSkippedPayload("multi_listing", snapshot.bookingId),
-    }, 200);
-  }
-
+  // Checked BEFORE the bundled branch below, not after. A bundled reservation
+  // that was cancelled and then paid is the same problem as a single one, and
+  // under the old order it answered "not settled" instead of escalating -- which
+  // reads as a system that has not got round to the money yet, rather than money
+  // owed back to a guest.
   if (snapshot.cancelled) {
     const amount = round2(Number(invoice.amountPaid ?? invoice.total ?? 0));
     snapshot.paymentAfterCancellation = {
@@ -433,12 +532,19 @@ export async function handleGhlInvoicePaid(request, env) {
   }
 
   const paid = Number(invoice.amountPaid ?? invoice.total ?? 0);
-  const depositHeld = Number(snapshot.securityDeposit?.total || 0);
   // No captureId: the money sits with GHL's processor, not a PayPal/Stripe
   // capture of ours, so cancellation refunds for it stay manual (in GHL).
   // gatewayTransactionId ties our Revenue rows to GHL's native payment.
   const gatewayTransactionId = await findInvoiceTransactionId({ tenant, env, locationId, invoiceId: invoice._id }).catch(() => null);
   const common = { source: "ghl_invoice", invoiceId: invoice._id, invoiceNumber: invoice.invoiceNumber || null, gatewayTransactionId, paidAt: invoice.lastPaidAt || invoice.updatedAt || null };
+
+  // A bundled reservation is one invoice over several stays, so it settles as
+  // several bookings rather than one. See settleMultiListing.
+  if (isMultiListingParent(snapshot)) {
+    return settleMultiListing(env, tenant, snapshot, { invoice, paid, common });
+  }
+
+  const depositHeld = Number(snapshot.securityDeposit?.total || 0);
   const captures = {
     RENT: { ...common, gross: round2(paid - depositHeld) },
     ...(depositHeld > 0 ? { DEP: { ...common, gross: depositHeld } } : {})
