@@ -28,6 +28,7 @@
 // its own rent and deposit sums to exactly the fee on the whole booking.
 
 import { composeBooking } from "./booking-composer.js";
+import { isFeeLine } from "./ghl-invoice.js";
 
 export const MULTI_PARENT_TYPE = "multi_listing_parent";
 
@@ -40,6 +41,88 @@ export function isMultiListingParent(snapshot) {
 export const childBookingId = (bookingId, index) => `${bookingId}#${index + 1}`;
 
 const blank = (v) => v === undefined || v === null || String(v).trim() === "";
+
+// Fetch the per-listing date ranges GHL holds for a booking.
+//
+// GET /calendars/services/bookings/{id} returns one `services` entry per
+// listing, each with serviceStartTime and serviceEndTime. Documented endpoint,
+// and the tenant PIT already carries the scope -- verified live 2026-09-29
+// against DEMO-HOMS before any of this was written.
+//
+// Cancelling or deleting a booking wipes those fields to empty strings (Mara,
+// same day), so a bundled booking cannot be reconstructed from GHL after the
+// fact. That is why the split happens at booking time and is stored, and why
+// an empty string has to be rejected rather than parsed.
+export async function fetchBookingServices({ tenant, env, bookingId }, fetchImpl = fetch) {
+  const pit = tenant.ghlPitSecretName && env?.[tenant.ghlPitSecretName]
+    ? env[tenant.ghlPitSecretName]
+    : tenant.ghlPit;
+  if (!pit) return { ok: false, reason: "no_pit" };
+
+  try {
+    const res = await fetchImpl(`${GHL_BASE}/calendars/services/bookings/${encodeURIComponent(bookingId)}`, {
+      headers: { Authorization: `Bearer ${pit}`, Version: GHL_VERSION, Accept: "application/json" },
+    });
+    const text = await res.text();
+    if (!res.ok) return { ok: false, reason: "booking_unreadable", status: res.status, detail: text.slice(0, 200) };
+    const body = text ? JSON.parse(text) : {};
+    return { ok: true, services: body.services || [] };
+  } catch (err) {
+    return { ok: false, reason: "booking_fetch_failed", detail: err.message };
+  }
+}
+
+const GHL_BASE = "https://services.leadconnectorhq.com";
+const GHL_VERSION = "2021-07-28";
+
+// Pair the booking's listings with the invoice lines that priced them.
+//
+// Neither source is complete on its own. The services carry dates and no names
+// or amounts; the invoice lines carry names and amounts and no dates. Both have
+// to be joined, and the join is the part that had to be proven rather than
+// assumed -- a wrong pairing does not fail, it prices the wrong property, which
+// keys the wrong owner, which pays the wrong person.
+//
+// Proven on DEMO-HOMS booking JI1yIAnf498IgFIV7J9M: invoice lines Test Villa 2
+// at 405 and Test Villa 3 at 660, against stays of 3 and 6 nights. Pairing in
+// order gives 135 and 110 a night, and 110 is Test Villa 3's rate confirmed
+// across five other bookings the same day. The reverse pairing gives 67.50 and
+// 220, which match nothing. So invoice line order is CHRONOLOGICAL order.
+//
+// Which means the services array's own order is irrelevant: sort its ranges by
+// start time and pair against the lines in order. Where two listings share a
+// date range, sorting cannot separate them -- and does not need to, because
+// their ranges are identical and the name and amount come from the line.
+export function pairListings(invoiceItems, services, tenant) {
+  const lines = (invoiceItems || []).filter((i) => !isFeeLine(i, tenant));
+  const ranges = (services || [])
+    .map((s) => ({ checkIn: dateOnly(s.serviceStartTime), checkOut: dateOnly(s.serviceEndTime) }))
+    .filter((r) => !blank(r.checkIn) && !blank(r.checkOut))
+    .sort((a, b) => (a.checkIn < b.checkIn ? -1 : a.checkIn > b.checkIn ? 1 : 0));
+
+  if (lines.length < 2) return { ok: false, reason: `not_bundled_${lines.length}_priced_lines` };
+  if (ranges.length !== lines.length) {
+    // Refused rather than truncated. Pricing the listings we can see and
+    // dropping the rest loses money silently, and guessing which line lost its
+    // dates is the coin flip this whole function exists to avoid.
+    return { ok: false, reason: "listing_count_mismatch", pricedLines: lines.length, datedListings: ranges.length };
+  }
+
+  const listings = lines.map((line, i) => ({
+    propertyCode: String(line.name || "").trim(),
+    checkIn: ranges[i].checkIn,
+    checkOut: ranges[i].checkOut,
+    rentTotal: round2(Number(line.amount || 0) * Number(line.qty || 1)),
+    nightlyRate: null,
+  }));
+
+  if (listings.some((l) => !(l.rentTotal > 0) || !l.propertyCode)) {
+    return { ok: false, reason: "unpriced_or_unnamed_line" };
+  }
+  return { ok: true, listings };
+}
+
+const round2 = (n) => Math.round(n * 100) / 100;
 
 // Pull the listings out of whatever GHL actually sends.
 //
