@@ -280,35 +280,81 @@ export function pairAddOns(invoiceItems, listingLines, listings, tenant) {
   return pairAmounts(lineTotals(invoiceItems, isAddOn), listings, "add_on_line_count_mismatch");
 }
 
-// The pass-throughs, kept only so the caller can prove the invoice adds up.
-export function passThroughTotal(invoiceItems, tenant) {
-  return round2(lineTotals(invoiceItems, (i) => isPassThrough(i, tenant)).reduce((s, n) => s + n, 0));
-}
-
 const lineTotals = (invoiceItems, match) => (invoiceItems || [])
   .filter(match)
-  .map((i) => round2(Number(i.amount || 0) * Number(i.qty || 1)))
-  .filter((n) => n > 0);
+  .map((i) => ({ name: String(i.name || "").trim(), amount: round2(Number(i.amount || 0) * Number(i.qty || 1)) }))
+  .filter((e) => e.amount > 0);
 
-// One line per listing pairs in order, the way the rent lines do. Any other
-// count cannot be attributed, and the choice there is between two wrongs:
-// losing the money, or naming the wrong listing as having earned it. The total
-// is what the guest paid, so the total wins and the attribution is flagged.
-function pairAmounts(amounts, listings, mismatchReason) {
-  const total = round2(amounts.reduce((s, n) => s + n, 0));
+// Which listing a fee belongs to, in the order the answer can be trusted.
+//
+// 1. GHL SAYS SO. On a booking with more than one listing it names a
+//    per-listing fee after the listing: "Cleaning Fee - Test Villa 2". That is
+//    not a heuristic, it is the account telling us, and it survives lines
+//    arriving in any order, a listing charging a different amount from its
+//    neighbour, and a fee configured on some listings and not others.
+//
+// 2. One line per listing, paired in order -- the rule the rent lines use,
+//    proven chronological on JI1yIAnf498IgFIV7J9M and again on the staggered
+//    3at3yw3tMEYQ1MWGfHFM. Used when nothing carries a suffix, which is what a
+//    single-listing booking looks like ("Cleaning Fee", plain).
+//
+// 3. Neither, so we do not know. Every fee here is per listing (Yari,
+//    2026-09-29: rental calendars are listings, and the same manager runs
+//    properties under different rules -- one may allow pets at 300, another
+//    not at all). A fee that appears once against two listings therefore means
+//    it is configured on ONE of them and we cannot see which, not that it
+//    belongs to the reservation as a whole. Which is why it is not spread
+//    across the listings: doing that would credit an owner for a fee their
+//    property does not charge. The total is kept whole and flagged instead.
+function pairAmounts(entries, listings, mismatchReason) {
+  const total = round2(entries.reduce((s, e) => s + e.amount, 0));
   if (!(total > 0)) return { ok: true, perListing: listings.map(() => 0), total: 0 };
-  if (amounts.length === listings.length) return { ok: true, perListing: amounts, total };
+
+  const byName = attributeByListingName(entries, listings);
+  if (byName) return { ok: true, perListing: byName, total, attributedBy: "listing_name" };
+
+  if (entries.length === listings.length) {
+    return { ok: true, perListing: entries.map((e) => e.amount), total, attributedBy: "line_order" };
+  }
 
   return {
     ok: false,
     reason: mismatchReason,
-    cleaningLines: amounts.length,
-    feeLines: amounts.length,
+    cleaningLines: entries.length,
+    feeLines: entries.length,
     listingCount: listings.length,
     total,
+    // Kept whole rather than lost, and on one listing rather than spread. See
+    // point 3 above: spreading it would pay somebody for a fee their property
+    // never charged.
     perListing: listings.map((_, i) => (i === 0 ? total : 0)),
   };
 }
+
+// "Cleaning Fee - Test Villa 2" -> the Test Villa 2 listing.
+//
+// All or nothing: returns null unless EVERY line names a listing on this
+// booking, so a booking part-way through being configured -- one fee suffixed,
+// one not -- falls through to the rules below rather than half-attributing.
+// Several lines may name the same listing, and are summed onto it.
+function attributeByListingName(entries, listings) {
+  if (!listings.length) return null;
+  const perListing = listings.map(() => 0);
+  for (const entry of entries) {
+    const index = listings.findIndex((l) => namesListing(entry.name, l.propertyCode));
+    if (index < 0) return null;
+    perListing[index] = round2(perListing[index] + entry.amount);
+  }
+  return perListing;
+}
+
+// The suffix GHL appends, matched on the separator rather than anywhere in the
+// string: a listing called "Villa" must not claim "Cleaning Fee - Villa Azul".
+const namesListing = (lineName, propertyCode) => {
+  const code = String(propertyCode ?? "").trim();
+  if (!code) return false;
+  return normalize(lineName).endsWith(` - ${normalize(code)}`);
+};
 
 // Put each listing's cleaning on its child, and re-derive what depends on it.
 //

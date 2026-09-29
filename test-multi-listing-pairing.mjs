@@ -279,4 +279,136 @@ const TWO = [{ propertyCode: "Test Villa 2" }, { propertyCode: "Test Villa 3" }]
   console.log("14) A single add-on across the reservation keeps its total and flags the attribution");
 }
 
+// ---- 15..18 GHL says which listing a fee belongs to -----------------
+// On a booking with more than one listing, GHL names a per-listing fee after
+// the listing: "Cleaning Fee - Test Villa 2". That is the account telling us,
+// not a heuristic, and it beats every other rule here.
+//
+// It matters because every fee is per LISTING (Yari, 2026-09-29: rental
+// calendars are listings, and the same manager runs properties under different
+// rules -- one may allow pets at 300, another at 150, another not at all). So
+// the listings in a reservation can carry different fees, or different amounts
+// of the same fee, and neither order nor count can tell you which.
+{
+  // Deliberately out of order, and the second listing's fee is larger, so
+  // pairing in order would give exactly the wrong answer.
+  const listings = [{ name: "Test Villa 2", amount: 405, qty: 1 }, { name: "Test Villa 3", amount: 660, qty: 1 }];
+  const items = [
+    listings[0], listings[1],
+    { name: "Cleaning Fee - Test Villa 3", amount: 90, qty: 1 },
+    { name: "Cleaning Fee - Test Villa 2", amount: 65, qty: 1 },
+  ];
+  const cleaning = pairCleaning(items, TWO);
+
+  assert.strictEqual(cleaning.attributedBy, "listing_name");
+  assert.deepStrictEqual(cleaning.perListing, [65, 90],
+    "each fee on the listing GHL named, not the listing its line happened to sit above");
+  assert.strictEqual(cleaning.total, 155);
+  console.log("15) A fee named after its listing goes to that listing, whatever order the lines arrive in");
+}
+
+{
+  // Two pet fees, one per listing, at different amounts -- the same manager
+  // running two properties under different rules. Impossible to get right by
+  // order alone once the lines are interleaved with the cleaning.
+  const listings = [{ name: "Test Villa 2", amount: 405, qty: 1 }, { name: "Test Villa 3", amount: 660, qty: 1 }];
+  const items = [
+    listings[0], { name: "Pet Fee - Test Villa 3", amount: 150, qty: 1 },
+    listings[1], { name: "Pet Fee - Test Villa 2", amount: 300, qty: 1 },
+  ];
+  const addOns = pairAddOns(items, listings, TWO, tenant);
+
+  assert.strictEqual(addOns.attributedBy, "listing_name");
+  assert.deepStrictEqual(addOns.perListing, [300, 150],
+    "Villa 2 charges 300 for a pet and Villa 3 charges 150, and each is credited its own");
+  console.log("16) Two listings charging different amounts for the same fee are each credited their own");
+}
+
+{
+  // One listing carrying SEVERAL add-ons, which is the ordinary case once an
+  // account sells more than one thing: a pet fee and a late check-out on the
+  // same property, both named after it, both the same listing's money.
+  const listings = [{ name: "Test Villa 2", amount: 405, qty: 1 }, { name: "Test Villa 3", amount: 660, qty: 1 }];
+  const items = [
+    listings[0], { name: "Pet Fee - Test Villa 2", amount: 300, qty: 1 },
+    { name: "Late Checkout - Test Villa 2", amount: 50, qty: 1 },
+    listings[1], { name: "Late Checkout - Test Villa 3", amount: 40, qty: 1 },
+  ];
+  const addOns = pairAddOns(items, listings, TWO, tenant);
+
+  assert.strictEqual(addOns.attributedBy, "listing_name");
+  assert.deepStrictEqual(addOns.perListing, [350, 40], "both of Villa 2's add up rather than one replacing the other");
+  assert.strictEqual(addOns.total, 390);
+  console.log("16b) A listing carrying several add-ons is credited the sum, not the last one");
+}
+
+{
+  // A listing whose name is contained in another listing's. Matching the name
+  // anywhere in the line would put Villa Azul's fee on Villa, since
+  // "cleaning fee - villa azul" contains "villa".
+  const two = [{ propertyCode: "Villa" }, { propertyCode: "Villa Azul" }];
+  const listings = [{ name: "Villa", amount: 405, qty: 1 }, { name: "Villa Azul", amount: 660, qty: 1 }];
+  const items = [
+    listings[0], listings[1],
+    { name: "Cleaning Fee - Villa", amount: 65, qty: 1 },
+    { name: "Cleaning Fee - Villa Azul", amount: 90, qty: 1 },
+  ];
+  const cleaning = pairCleaning(items, two);
+
+  assert.strictEqual(cleaning.attributedBy, "listing_name");
+  assert.deepStrictEqual(cleaning.perListing, [65, 90],
+    "the suffix is matched on its separator, so one property name inside another does not claim it");
+  console.log("16c) A listing whose name sits inside another's does not claim the other's fees");
+}
+
+{
+  // Nothing suffixed: a single-listing booking's fee reads "Cleaning Fee"
+  // plain, and a bundled booking predating the per-listing configuration does
+  // too. The order rule still applies, so nothing that worked before stops.
+  const listings = [{ name: "Test Villa 2", amount: 405, qty: 1 }, { name: "Test Villa 3", amount: 660, qty: 1 }];
+  const items = [
+    listings[0], { name: "Cleaning Fee", amount: 65, qty: 1 },
+    listings[1], { name: "Cleaning Fee", amount: 65, qty: 1 },
+  ];
+  const cleaning = pairCleaning(items, TWO);
+  assert.strictEqual(cleaning.attributedBy, "line_order", "the rule that was there before, unchanged");
+  assert.deepStrictEqual(cleaning.perListing, [65, 65]);
+
+  // Half configured -- one fee suffixed, one not -- is all-or-nothing. Guessing
+  // the unsuffixed one belongs to whatever listing is left is the coin flip
+  // this whole thing exists to avoid.
+  const halfDone = [
+    listings[0], { name: "Cleaning Fee - Test Villa 2", amount: 65, qty: 1 },
+    listings[1], { name: "Cleaning Fee", amount: 90, qty: 1 },
+  ];
+  assert.strictEqual(pairCleaning(halfDone, TWO).attributedBy, "line_order",
+    "one named and one not falls back rather than half-attributing");
+  console.log("17) Unsuffixed fees still pair in order, and a half-configured booking does not half-attribute");
+}
+
+{
+  // A fee configured on ONE listing of two. It is that listing's -- pets are
+  // allowed at one property and not the other -- but the line does not say
+  // which, so we cannot know. Kept whole and flagged.
+  //
+  // Emphatically NOT spread across the listings: that would credit an owner
+  // for a fee their property does not charge.
+  const listings = [{ name: "Test Villa 2", amount: 405, qty: 1 }, { name: "Test Villa 3", amount: 660, qty: 1 }];
+  const items = [listings[0], listings[1], { name: "Pet Fee", amount: 300, qty: 1 }];
+  const addOns = pairAddOns(items, listings, TWO, tenant);
+
+  assert.strictEqual(addOns.ok, false);
+  assert.strictEqual(addOns.attributedBy, undefined, "nothing claims to know which listing it was");
+  assert.deepStrictEqual(addOns.perListing, [300, 0], "kept whole rather than split across properties");
+  assert.strictEqual(addOns.total, 300);
+
+  // And once the account names it, the same booking attributes exactly.
+  const named = [listings[0], listings[1], { name: "Pet Fee - Test Villa 3", amount: 300, qty: 1 }];
+  const fixed = pairAddOns(named, listings, TWO, tenant);
+  assert.strictEqual(fixed.ok, true);
+  assert.deepStrictEqual(fixed.perListing, [0, 300],
+    "on the listing that actually charges it, which is the one the fallback got wrong");
+  console.log("18) A fee on one listing of two is kept whole and flagged, and named it attributes exactly");
+}
+
 console.log("\nPASS — invoice lines and booking services join into listings in date order, or refuse.");
