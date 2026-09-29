@@ -23,6 +23,7 @@
 
 import { getAccessToken } from "./paypal.js";
 import { isMultiListingParent } from "./multi-listing.js";
+import { voidInvoice } from "./ghl-invoice.js";
 import { writeAndSyncRows } from "./ledger.js";
 import { updateObjectRecord } from "./ghl.js";
 import { isLegacyPolicy, nativeCancellationPolicy } from "./policy.js";
@@ -415,6 +416,27 @@ export async function handleCancel(request, env) {
       tier: "unpaid_void", at: new Date(effectiveNow).toISOString(), reason: body.reason || "",
       ...(asOf.backfilled ? { backfilled: true, recordedAt: new Date(now).toISOString() } : {}),
     };
+    // Close the invoice so the link in the guest's inbox stops working.
+    //
+    // This is the prevention half of the pair. Cancelling an unpaid booking used
+    // to leave its invoice live and payable, which is how $975.20 arrived 31
+    // minutes after a cancellation on DEMO-HOMS. The escalation below still
+    // exists and still fires -- it is the backstop for anything that gets
+    // through, including a payment already in flight when this runs.
+    //
+    // Never fails the cancellation. The booking is cancelled either way; an
+    // invoice that could not be closed is a fact to report, not a reason to
+    // leave the cancellation half-done.
+    snapshot.invoiceVoid = await voidInvoice({
+      tenant, env, locationId: snapshot.locationId, invoiceId: snapshot.ghlInvoice?.invoiceId,
+    });
+    if (!snapshot.invoiceVoid.ok) {
+      console.error(
+        `Could not void invoice for cancelled booking ${snapshot.bookingId}: ` +
+        `${snapshot.invoiceVoid.reason} ${snapshot.invoiceVoid.detail || ""}`
+      );
+    }
+
     await env.BOOKINGS.put(snapshot.bookingId, JSON.stringify(snapshot));
     // No Transaction record exists yet for an unpaid booking, and no money
     // moved -- nothing to write to D1 or GHL here.
