@@ -184,8 +184,17 @@ const kv = {
   async get(k, o) { const v = store.get(k); return v == null ? null : (o?.type === "json" ? JSON.parse(v) : v); },
   async put(k, v) { store.set(k, v); },
 };
-global.fetch = async (url) => {
+const INVOICE_ID = "inv-bundle";
+let notifies = [];
+let voids = [];
+global.fetch = async (url, opts = {}) => {
+  const u = String(url);
   const ok = (o) => ({ ok: true, status: 200, json: async () => o, text: async () => JSON.stringify(o) });
+  if (u === cancelTenant.ghlCancellationUrl) { notifies.push(JSON.parse(opts.body || "{}")); return ok({}); }
+  if (u.includes(`/invoices/${INVOICE_ID}/void`)) { voids.push(u); return ok({ status: "void" }); }
+  if (u.includes(`/invoices/${INVOICE_ID}`)) {
+    return ok({ _id: INVOICE_ID, invoiceNumber: "000031", status: "sent", amountPaid: 0 });
+  }
   return ok({ records: [], record: { id: "r" }, associations: [] });
 };
 
@@ -206,6 +215,16 @@ async function seedBundle({ nowIso }) {
   }
   await kv.put(parent.bookingId, JSON.stringify(parent));
   return { parent, children, nowIso };
+}
+
+async function seedUnpaidBundle() {
+  store.clear();
+  await kv.put(LOC, JSON.stringify(cancelTenant));
+  const { parent, children } = composeMultiListing(straddling(), cancelTenant, listingsFrom(straddling()));
+  for (const c of children) await kv.put(c.bookingId, JSON.stringify(c));
+  parent.ghlInvoice = { invoiceId: INVOICE_ID, status: "sent" };
+  await kv.put(parent.bookingId, JSON.stringify(parent));
+  return { parent, children };
 }
 
 const cancelParent = async () => {
@@ -301,6 +320,80 @@ const cancelParent = async () => {
   assert.strictEqual(JSON.parse(store.get(childBookingId(BOOKING, 0))).cancelled, true,
     "the listing that could be cancelled still was");
   console.log("12) A listing that throws mid-fan-out is caught, named, and does not stop the others");
+}
+
+// ---- 13. one reservation, one notification --------------------------
+// The fan-out notified per listing, so one cancellation reached the guest as
+// two emails a second apart -- seen on DEMO-HOMS 3at3yw3tMEYQ1MWGfHFM.
+{
+  await seedBundle({});
+  notifies = [];
+  await cancelParent();
+
+  assert.strictEqual(notifies.length, 1, "one cancellation, one notification, whatever it is made of");
+  const n = notifies[0];
+  assert.strictEqual(n.bookingId, BOOKING, "sent for the reservation, not for either half of it");
+  assert.strictEqual(n.multiListing, "yes");
+  assert.strictEqual(n.listingCount, "2");
+  assert.strictEqual(n.propertyName, "Test Villa 2 + Test Villa 3",
+    "and it names every property, rather than whichever listing notified last");
+  console.log("13) A bundled cancellation notifies once, for the reservation");
+}
+
+// ---- 14. and says what happened on each listing ---------------------
+// The two legs are in different tiers -- one under way, one still ahead -- so
+// a single tier or a single percentage would be wrong for one of them.
+{
+  await seedBundle({});
+  notifies = [];
+  const out = await cancelParent();
+  const n = notifies[0];
+
+  assert.strictEqual(n.tier, "already_checked_in + under_120h",
+    "both tiers named, because the reservation is genuinely in both");
+  assert.strictEqual(n.chargePct, "",
+    "and no single percentage claimed, which would be wrong for one leg either way");
+  assert.strictEqual(n.chargeTotal, out.body.cancellation.chargeTotal.toFixed(2),
+    "the money agrees with what the listings actually did");
+  assert.strictEqual(n.refundTotal, out.body.cancellation.refundTotal.toFixed(2));
+  assert.strictEqual(n.manualRefundRequired, "yes",
+    "and the manager is told there is something to do, not just something that happened");
+  assert.match(n.listingDetail, /Test Villa 2 .*already_checked_in/);
+  assert.match(n.listingDetail, /Test Villa 3 .*under_120h/,
+    "each listing named with its own tier, so the email can say which is which");
+  console.log("14) The one notification carries every listing's own tier, and the reservation's totals");
+}
+
+// ---- 15. the reservation's one invoice is voided, once --------------
+// Each child was voiding an invoice it does not hold -- the invoice lives on
+// the parent -- so both recorded no_invoice_on_booking and the invoice the
+// guest could still pay stayed live. That is the hole #71 closed for single
+// bookings, still open for bundles.
+{
+  await seedUnpaidBundle();
+  voids = [];
+  await cancelParent();
+
+  assert.strictEqual(voids.length, 1, "one invoice, voided once, not once per listing and not never");
+  const parent = JSON.parse(store.get(BOOKING));
+  assert.strictEqual(parent.invoiceVoid.ok, true, "recorded on the reservation that owns the invoice");
+  assert.strictEqual(parent.invoiceVoid.invoiceId, INVOICE_ID);
+
+  const child = JSON.parse(store.get(childBookingId(BOOKING, 0)));
+  assert.strictEqual(child.invoiceVoid, undefined,
+    "and a listing no longer records a failed void of an invoice it never had");
+  console.log("15) An unpaid bundled reservation voids its one invoice, once, on the parent");
+}
+
+// ---- 16. a paid reservation's invoice is left alone -----------------
+// Voiding a paid invoice would hide a refund that is owed.
+{
+  await seedBundle({});
+  voids = [];
+  await cancelParent();
+  assert.strictEqual(voids.length, 0, "money that arrived is never voided away");
+  assert.strictEqual(JSON.parse(store.get(BOOKING)).invoiceVoid, undefined);
+  console.log("16) A paid bundled reservation's invoice is left alone, because a refund is owed on it");
 }
 
 console.log("\nPASS — a bundled reservation becomes one ordinary-looking booking per listing, each with its own dates, owner and split.");
