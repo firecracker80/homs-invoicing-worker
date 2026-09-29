@@ -32,6 +32,53 @@ import { isFeeLine } from "./ghl-invoice.js";
 
 export const MULTI_PARENT_TYPE = "multi_listing_parent";
 
+// Split a booking that has already been composed and invoiced.
+//
+// Runs AFTER enrichAndSendInvoice rather than before, which is what makes the
+// restructure small. By then GHL's own lines are in hand, the processing fee
+// and deposit have been computed across the whole reservation (correct either
+// way, since the fee is a flat percentage of everything on the invoice), and
+// the invoice has gone to the guest. What is wrong at that point is only the
+// booking's own shape: one stay, one property, one split, describing a
+// reservation that has several of each.
+//
+// Returns { split: false, reason } when it is an ordinary booking or when the
+// two sources disagree -- the caller then leaves the snapshot exactly as it is,
+// which is today's behaviour, rather than half-applying something.
+export async function splitBookedReservation({ tenant, env, snapshot, nativeItems }, fetchImpl = fetch) {
+  const priced = (nativeItems || []).filter((i) => !isFeeLine(i, tenant));
+  if (priced.length < 2) return { split: false, reason: "single_listing" };
+
+  const fetched = await fetchBookingServices({ tenant, env, bookingId: snapshot.bookingId }, fetchImpl);
+  if (!fetched.ok) return { split: false, reason: fetched.reason, detail: fetched.detail };
+
+  const paired = pairListings(nativeItems, fetched.services, tenant);
+  if (!paired.ok) return { split: false, reason: paired.reason, ...paired };
+
+  const { parent, children } = composeMultiListing(
+    {
+      bookingId: snapshot.bookingId,
+      locationId: snapshot.locationId,
+      ghlContactId: snapshot.ghlContactId,
+      firstName: snapshot.guest?.name, email: snapshot.guest?.email, phone: snapshot.guest?.phone,
+      bookingSource: snapshot.bookingSource,
+    },
+    tenant,
+    paired.listings
+  );
+
+  // The reservation-level facts stay on the parent: the guest pays one invoice
+  // and one payment arrives against it, so that is where they belong. The
+  // children are stays, not sales.
+  parent.ghlInvoice = snapshot.ghlInvoice ?? null;
+  parent.gateway = snapshot.gateway ?? null;
+  parent.guest = snapshot.guest ?? parent.guest;
+  parent.charges.processingFee = snapshot.charges?.processingFee ?? parent.charges.processingFee;
+  parent.charges.grandTotal = snapshot.charges?.grandTotal ?? null;
+
+  return { split: true, parent, children };
+}
+
 // A parent holds no stay of its own, so anything that reads snapshot.stay must
 // not be handed one by accident.
 export function isMultiListingParent(snapshot) {

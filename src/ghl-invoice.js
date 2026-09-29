@@ -587,7 +587,11 @@ export async function enrichAndSendInvoice(
     fetchImpl
   );
 
-  return { invoiceId, items: invoiceItems, appendedItems: appendItems, removedItems, sent };
+  // nativeItems comes back so the caller can see what GHL itself billed,
+  // separately from what we appended. A bundled reservation is recognised by
+  // having more than one non-fee line among these, and re-fetching the invoice
+  // to find that out would be a second call for something already in hand.
+  return { invoiceId, items: invoiceItems, appendedItems: appendItems, nativeItems, removedItems, sent };
 }
 
 function round2(n) {

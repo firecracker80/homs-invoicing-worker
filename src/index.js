@@ -1,7 +1,7 @@
 // index.js (v2) — Cloudflare Worker entry
 // POST /booking-created ← GHL Webhook action (after Calcular Reserva)
 import { composeBooking } from "./booking-composer.js";
-import { listingsFrom, composeMultiListing } from "./multi-listing.js";
+import { splitBookedReservation } from "./multi-listing.js";
 import { createOrder } from "./paypal.js";
 import { createCheckoutSession } from "./stripe.js";
 import { handlePayPalReturn, handlePayPalWebhook, handleStripeReturn, handleStripeWebhook, handleGhlInvoicePaid } from "./payment.js";
@@ -258,31 +258,6 @@ async function handleBookingCreated(request, env) {
     });
   }
 
-  // A bundled booking is several stays under one reservation, and a snapshot
-  // holds exactly one. It becomes one child snapshot per listing plus a parent
-  // that owns the money side -- see multi-listing.js for why that shape and not
-  // a snapshot that holds two properties.
-  //
-  // Returns early: the invoice and gateway work below is per-reservation, and
-  // the parent is what the guest paid against. Wiring that up needs the real
-  // bundled payload in front of us, so for now the reservation is recorded
-  // correctly and priced per listing, and says plainly that it stopped there.
-  const listings = listingsFrom(payload);
-  if (listings) {
-    const { parent, children } = composeMultiListing(payload, tenant, listings);
-    for (const child of children) await env.BOOKINGS.put(child.bookingId, JSON.stringify(child));
-    await env.BOOKINGS.put(parent.bookingId, JSON.stringify(parent));
-    console.log(`Multi-listing booking ${parent.bookingId}: ${children.length} listings recorded`);
-    return json({
-      bookingId: parent.bookingId,
-      mode: "multi_listing_recorded",
-      listingCount: children.length,
-      childBookingIds: parent.childBookingIds,
-      rentTotal: parent.charges.rentTotal.toFixed(2),
-      pending: "invoice_and_payment_not_wired_for_bundled_bookings",
-    });
-  }
-
   const { snapshot, purchaseUnits } = composeBooking(payload, tenant);
 
   // Invoice strategy — additive path, tenant KV overrides env, default is
@@ -307,7 +282,7 @@ async function handleBookingCreated(request, env) {
       // this and returns instead of appending the lines and sending twice.
       snapshot.ghlInvoice = { invoiceId, status: "sending", claimedAt: new Date().toISOString() };
       await env.BOOKINGS.put(snapshot.bookingId, JSON.stringify(snapshot));
-      const { items, removedItems } = await enrichAndSendInvoice({
+      const { items, removedItems, nativeItems } = await enrichAndSendInvoice({
         tenant, env,
         locationId: snapshot.locationId,
         invoiceId,
@@ -328,6 +303,39 @@ async function handleBookingCreated(request, env) {
       gateway = "ghl_invoice";
       gatewayRef = invoiceId;
       approveUrl = null; // guest pays via the invoice GHL just sent, not a link we generate
+
+      // Several listings on one reservation. Split here rather than before the
+      // invoice: by now GHL's own lines are in hand, and the processing fee and
+      // deposit have been computed across the whole reservation, which is right
+      // either way since the fee is a flat percentage of everything on it.
+      //
+      // What is still wrong at this point is the booking's shape -- one stay,
+      // one property, one split, describing a reservation that has several of
+      // each. The children fix that; the parent keeps the invoice, because the
+      // guest pays once.
+      snapshot.gateway = gateway;
+      const bundle = await splitBookedReservation({ tenant, env, snapshot, nativeItems });
+      if (bundle.split) {
+        for (const child of bundle.children) await env.BOOKINGS.put(child.bookingId, JSON.stringify(child));
+        await env.BOOKINGS.put(bundle.parent.bookingId, JSON.stringify(bundle.parent));
+        console.log(`Bundled reservation ${bundle.parent.bookingId}: ${bundle.children.length} listings recorded`);
+        return json({
+          bookingId: bundle.parent.bookingId,
+          mode: "multi_listing_recorded",
+          listingCount: bundle.children.length,
+          childBookingIds: bundle.parent.childBookingIds,
+          rentTotal: bundle.parent.charges.rentTotal.toFixed(2),
+          invoiceId,
+          pending: "settlement_not_wired_for_bundled_reservations",
+        });
+      }
+      // An ordinary booking, or two sources that disagreed. Either way the
+      // snapshot stands exactly as it is -- recorded so a refusal is visible
+      // rather than looking like nothing happened.
+      if (bundle.reason !== "single_listing") {
+        snapshot.multiListingSkipped = bundle;
+        console.error(`Bundled reservation ${snapshot.bookingId} not split: ${bundle.reason}`);
+      }
     } catch (err) {
       // No fallback link (retired 2026-09-21). The link was priced from the
       // webhook's stayTotal ({{rentalBooking.amount_due}}), which includes every
