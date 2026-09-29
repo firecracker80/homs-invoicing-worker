@@ -56,6 +56,7 @@ export async function splitBookedReservation({ tenant, env, snapshot, nativeItem
   if (!paired.ok) return { split: false, reason: paired.reason, ...paired };
 
   const cleaning = pairCleaning(nativeItems, paired.listings);
+  const otherFees = pairOtherFees(nativeItems, paired.listings, tenant);
 
   const { parent, children } = composeMultiListing(
     {
@@ -69,7 +70,7 @@ export async function splitBookedReservation({ tenant, env, snapshot, nativeItem
     paired.listings
   );
 
-  applyCleaning(children, cleaning, tenant);
+  applyFees(children, cleaning, otherFees, tenant);
 
   // The reservation-level facts stay on the parent: the guest pays one invoice
   // and one payment arrives against it, so that is where they belong. The
@@ -84,6 +85,7 @@ export async function splitBookedReservation({ tenant, env, snapshot, nativeItem
   // DEMO-HOMS booking that found this -- and settlement divides the payment by
   // the children.
   parent.charges.cleaningFee = sum(children.map((c) => c.charges.cleaningFee));
+  parent.charges.otherFees = sum(children.map((c) => c.charges.otherFees ?? 0));
   // Summed from the children rather than copied from the reservation-level
   // snapshot. The two agree on every booking seen so far, because
   // repriceFromInvoice charges the fee on the whole invoice subtotal and that
@@ -93,6 +95,7 @@ export async function splitBookedReservation({ tenant, env, snapshot, nativeItem
   // its children would be describing a reservation nobody was paid for.
   parent.charges.processingFee = sum(children.map((c) => c.charges.processingFee));
   if (!cleaning.ok) parent.cleaningPairing = cleaning;
+  if (!otherFees.ok) parent.feePairing = otherFees;
 
   return { split: true, parent, children };
 }
@@ -212,19 +215,51 @@ const round2 = (n) => Math.round(n * 100) / 100;
 // it -- and only on a tenant that names owners or managers per property, since
 // cleaningFeeTo is tenant-wide. So: total preserved, attribution flagged.
 export function pairCleaning(invoiceItems, listings) {
-  const amounts = (invoiceItems || [])
-    .filter(isCleaningFee)
-    .map((i) => round2(Number(i.amount || 0) * Number(i.qty || 1)))
-    .filter((n) => n > 0);
-  const total = round2(amounts.reduce((s, n) => s + n, 0));
+  return pairAmounts(lineTotals(invoiceItems, isCleaningFee), listings, "cleaning_line_count_mismatch");
+}
 
+// Everything else the guest was charged: a pet fee, a tax, a tourist levy, an
+// airport transfer -- whatever the account has configured as an Additional Fee
+// that is neither the stay itself nor its cleaning.
+//
+// Defined as what is left over rather than by name, which is the only
+// definition that makes the listings add up to the invoice. A fee nobody
+// anticipated is still money the guest paid, and a name-matching list would
+// drop it silently -- which is what happened here: a 300 pet fee on a bundled
+// invoice belonged to no listing, and turned up as a 318.00 variance (the fee
+// plus the 6% charged on it) on a reservation with nothing actually wrong.
+//
+// NOT income, and deliberately not made income here. No ledger row credits a
+// pet fee to anyone on a single-listing booking either -- cleaning is the only
+// native fee that is split -- so a bundled booking inventing one would pay
+// somebody money their own single bookings do not. Whether these fees should
+// be income, and whose, is a question about the business rather than about
+// bundling. This only makes sure the money is attached to the listing the
+// guest was charged it for, so that when the answer comes it is answerable.
+export function pairOtherFees(invoiceItems, listings, tenant) {
+  const isOther = (i) => isFeeLine(i, tenant) && !isCleaningFee(i);
+  return pairAmounts(lineTotals(invoiceItems, isOther), listings, "fee_line_count_mismatch");
+}
+
+const lineTotals = (invoiceItems, match) => (invoiceItems || [])
+  .filter(match)
+  .map((i) => round2(Number(i.amount || 0) * Number(i.qty || 1)))
+  .filter((n) => n > 0);
+
+// One line per listing pairs in order, the way the rent lines do. Any other
+// count cannot be attributed, and the choice there is between two wrongs:
+// losing the money, or naming the wrong listing as having earned it. The total
+// is what the guest paid, so the total wins and the attribution is flagged.
+function pairAmounts(amounts, listings, mismatchReason) {
+  const total = round2(amounts.reduce((s, n) => s + n, 0));
   if (!(total > 0)) return { ok: true, perListing: listings.map(() => 0), total: 0 };
   if (amounts.length === listings.length) return { ok: true, perListing: amounts, total };
 
   return {
     ok: false,
-    reason: "cleaning_line_count_mismatch",
+    reason: mismatchReason,
     cleaningLines: amounts.length,
+    feeLines: amounts.length,
     listingCount: listings.length,
     total,
     perListing: listings.map((_, i) => (i === 0 ? total : 0)),
@@ -244,16 +279,25 @@ export function pairCleaning(invoiceItems, listings) {
 // with a cleaning fee of 0 everywhere else too (booking-composer, and
 // repriceFromInvoice on the single-listing path), because a deposit is sized
 // against the stay rather than against the fees on it.
-function applyCleaning(children, cleaning, tenant) {
+function applyFees(children, cleaning, other, tenant) {
   children.forEach((child, index) => {
-    const amount = cleaning.perListing?.[index] ?? 0;
-    if (!(amount > 0)) return;
+    const cleaningAmt = cleaning.perListing?.[index] ?? 0;
+    const otherAmt = other.perListing?.[index] ?? 0;
+    if (cleaningAmt > 0) {
+      child.charges.cleaningFee = cleaningAmt;
+      child.charges.cleaningFeeSource = cleaning.ok ? "ghl_native" : "ghl_native_unattributed";
+    }
+    if (otherAmt > 0) {
+      child.charges.otherFees = otherAmt;
+      child.charges.otherFeesSource = other.ok ? "ghl_native" : "ghl_native_unattributed";
+    }
+    if (!(cleaningAmt > 0) && !(otherAmt > 0)) return;
+
     const deposit = child.securityDeposit?.total ?? 0;
     const feePct = child.charges.feePct ?? tenant.processingFeePct ?? 0.06;
-    child.charges.cleaningFee = amount;
-    child.charges.cleaningFeeSource = cleaning.ok ? "ghl_native" : "ghl_native_unattributed";
-    child.charges.processingFee = round2(feePct * (child.charges.rentTotal + amount + deposit));
-    child.charges.grandTotal = round2(child.charges.rentTotal + amount + child.charges.processingFee + deposit);
+    const charged = round2(child.charges.rentTotal + cleaningAmt + otherAmt);
+    child.charges.processingFee = round2(feePct * (charged + deposit));
+    child.charges.grandTotal = round2(charged + child.charges.processingFee + deposit);
   });
 }
 

@@ -353,4 +353,74 @@ const payInvoice = async ({ amountPaid = 1266.7 } = {}) => {
   console.log("12) A bundled reservation paid after cancellation escalates instead of settling");
 }
 
+// ---- 13..14 a pet fee on a bundled invoice --------------------------
+// Everything the guest was charged that is neither the stay nor its cleaning
+// belonged to no listing, so a bundled booking with a pet fee settled short by
+// the fee plus the processing charged on it -- and reported it as a variance,
+// on a reservation with nothing actually wrong. A variance that fires on an
+// ordinary booking is worse than no variance at all: it is the signal that a
+// real shortfall was supposed to raise.
+const WITH_PET = [...INVOICE_ITEMS, { name: "Pet Fee", amount: 300, qty: 1 }];
+
+{
+  await book({ items: WITH_PET });
+  const a = JSON.parse(store.get(`${BOOKING}#1`));
+  const b = JSON.parse(store.get(`${BOOKING}#2`));
+
+  // One pet fee across two listings cannot be attributed, so it is kept whole
+  // on the first and flagged rather than split on a guess.
+  assert.strictEqual(a.charges.otherFees, 300);
+  assert.strictEqual(b.charges.otherFees, undefined, "the second listing earns none of it");
+  assert.strictEqual(JSON.parse(store.get(BOOKING)).feePairing.reason, "fee_line_count_mismatch",
+    "and the reservation records that the attribution is a fallback, not a pairing");
+
+  // The processing fee follows it, because the guest paid a percentage of the
+  // pet fee too.
+  assert.strictEqual(a.charges.processingFee, 46.2, "6% of 405 + 65 + 300");
+  assert.strictEqual(a.charges.grandTotal, 816.2);
+  assert.strictEqual(b.charges.processingFee, 43.5, "6% of 660 + 65, unchanged");
+
+  // The parent re-sums it from the children, the same as cleaning. Settlement
+  // divides the payment by the children, so a parent that did not carry what
+  // they carry would describe a different reservation from the one being paid.
+  const parent = JSON.parse(store.get(BOOKING));
+  assert.strictEqual(parent.charges.otherFees, 300);
+  assert.strictEqual(
+    Math.round((parent.charges.rentTotal + parent.charges.cleaningFee
+      + parent.charges.otherFees + parent.charges.processingFee) * 100) / 100,
+    1584.7,
+    "and the reservation adds up to the invoice the guest was sent"
+  );
+  console.log("13) A pet fee lands on a listing, and the processing fee on it follows");
+}
+
+{
+  // The number that proves it: 1584.70 is the whole invoice -- 1065 of rent,
+  // 130 of cleaning, 300 of pet fee and 89.70 of processing on all of it.
+  await book({ items: WITH_PET });
+  const out = await payInvoice({ amountPaid: 1584.7 });
+
+  assert.strictEqual(out.body.allocated, 1584.7, "the listings account for every cent on the invoice");
+  assert.strictEqual(out.body.variance, undefined,
+    "so nothing is reported as unexplained -- it used to be 318.00, the pet fee plus its 6%");
+  assert.deepStrictEqual(out.body.listings.map((l) => l.amount), [816.2, 768.5]);
+  console.log("14) A bundled reservation with a pet fee settles whole, with no variance left over");
+}
+
+// ---- 15. and none of it is quietly turned into income ---------------
+// No ledger row credits a pet fee to anyone on a single-listing booking --
+// cleaning is the only native fee that is split -- so a bundled booking
+// inventing one would pay somebody money their own single bookings do not.
+// Whether these fees SHOULD be income, and whose, is a question about the
+// business rather than about bundling.
+{
+  await book({ items: WITH_PET });
+  const a = JSON.parse(store.get(`${BOOKING}#1`));
+  assert.strictEqual(a.payout.basis, a.charges.rentTotal,
+    "the split is still on rent alone, with the pet fee outside it");
+  assert.strictEqual(a.payout.owner + a.payout.manager, a.charges.rentTotal,
+    "so nobody is credited with the fee, the same as on a single booking");
+  console.log("15) The fee is attached to a listing without being made income nobody else earns");
+}
+
 console.log("\nPASS — a bundled reservation is invoiced once, split into its listings, and settles as each of them.");
