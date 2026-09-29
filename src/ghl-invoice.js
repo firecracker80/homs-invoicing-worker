@@ -311,6 +311,54 @@ export async function invoiceHasWorkerLines({ tenant, env, locationId, invoiceId
 // pet; on "No" that line is dropped before the invoice is sent. Payment at
 // booking is off, so nothing has been paid on it yet. Matched by name, in
 // English or Spanish (policy.js isPetFeeName).
+// An optional add-on the guest was asked about and said no to.
+//
+// GHL charges a listing's add-ons on every booking -- there is no way to mark
+// one optional in the booking widget (Yari, 2026-09-29). So the account
+// configures the add-on on the listing, the form asks whether the guest wants
+// it, and the line comes back off here when the answer is no. That is the
+// pet-fee mechanism, which has worked since the beginning; this is the same
+// thing for everything else the account sells.
+//
+// tenant.optionalAddOns is [{ field, name }] -- the booking-form field that
+// carries the answer, and the fee's name as GHL writes it. The pet fee stays
+// hard-wired alongside it: every account already has it, none has this config
+// yet, and there is nothing to gain from making them re-enter it.
+//
+// ONLY an explicit no removes a line. An answer that is missing or
+// unrecognisable leaves the charge in place, the same way the pet fee always
+// has -- overcharging is visible to the guest and recoverable, while dropping
+// a charge nobody notices is neither. Unanswered add-ons are recorded on the
+// snapshot so the silence is at least legible.
+export function optionalAddOnsToRemove(tenant, answers) {
+  const configured = Array.isArray(tenant?.optionalAddOns) ? tenant.optionalAddOns : [];
+  const declined = [];
+  const unanswered = [];
+  for (const addOn of configured) {
+    if (!addOn?.field || !addOn?.name) continue;
+    const said = yesNo(answers?.[addOn.field]);
+    if (said === false) declined.push(addOn.name);
+    else if (said === null) unanswered.push(addOn.name);
+  }
+  return { declined, unanswered };
+}
+
+// "Pet Fee" matches both "Pet Fee" and "Pet Fee - Test Villa 2".
+//
+// Matched on the separator rather than as a prefix, so an add-on called
+// "Late Checkout" cannot claim a different one called "Late Checkout Premium".
+// This is the same suffix rule multi-listing.js reads for attribution, applied
+// from the other end.
+export function matchesAddOnName(lineName, addOnName) {
+  const line = normName(lineName);
+  const name = normName(addOnName);
+  if (!line || !name) return false;
+  return line === name || line.startsWith(`${name} - `);
+}
+
+const normName = (s) => String(s ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+  .toLowerCase().replace(/\s+/g, " ").trim();
+
 export const isCleaningFee = item => /clean|limpieza/i.test(String(item?.name || ""));
 // The property name, taken from what the guest is actually being charged for.
 //
@@ -563,7 +611,7 @@ export async function updateInvoiceForReschedule(
 }
 
 export async function enrichAndSendInvoice(
-  { tenant, env, locationId, invoiceId, snapshot, contact, userId, hasPets },
+  { tenant, env, locationId, invoiceId, snapshot, contact, userId, hasPets, addOnAnswers },
   fetchImpl = fetch
 ) {
   const senderUserId = userId || tenant?.invoiceSenderUserId || null;
@@ -583,11 +631,24 @@ export async function enrichAndSendInvoice(
   );
 
   const noPets = yesNo(hasPets) === false;
+  const { declined, unanswered } = optionalAddOnsToRemove(tenant, addOnAnswers);
   // A run that died after its PUT left our lines on the draft already; drop
   // them so finishing it doesn't add them twice.
   const ghlItems = (existing.invoiceItems || []).filter(i => !OUR_LINES.has(i?.name));
-  const nativeItems = ghlItems.filter(i => !(noPets && isPetFeeName(i?.name, tenant)));
+  const nativeItems = ghlItems.filter((i) =>
+    !(noPets && isPetFeeName(i?.name, tenant)) &&
+    !declined.some((name) => matchesAddOnName(i?.name, name))
+  );
   const removedItems = ghlItems.length - nativeItems.length;
+  // Legible rather than silent: an add-on the account charges, configured as
+  // optional, and never answered is a form that has drifted from the listing.
+  if (unanswered.length) {
+    snapshot.unansweredAddOns = unanswered;
+    console.error(
+      `Booking ${snapshot.bookingId}: optional add-ons with no answer on the form, charged as configured: ` +
+      unanswered.join(", ")
+    );
+  }
   repriceFromInvoice(snapshot, tenant, nativeItems);
   const appendItems = buildAppendItems(snapshot, tenant);
   const invoiceItems = [...nativeItems, ...appendItems];

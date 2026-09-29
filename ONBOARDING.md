@@ -152,6 +152,42 @@ who only handles some of them) needs a name on each row to tell them apart:
 "propertyOwnerNames": { "PROP-B": "Marco" },
 "propertyManagerNames": { "PROP-B": "Diego" }
 ```
+## Optional add-ons
+
+GHL charges a listing's add-ons on **every** booking — there is no way to mark
+one optional in the booking widget. So configure the add-on on the **listing**,
+ask about it on the booking form, and name the pair here:
+
+```json
+"optionalAddOns": [
+  { "field": "hasPets",           "name": "Pet Fee" },
+  { "field": "wantsLateCheckout", "name": "Late Checkout" }
+]
+```
+
+`field` is the booking-form field carrying the answer; `name` is the fee's name
+as GHL writes it. On a booking with more than one listing GHL suffixes it with
+the property (`Pet Fee - Test Villa 2`), so **one entry covers every listing
+that charges it** — do not add one per property.
+
+Configuring on the listing rather than having the Worker add the line is what
+makes attribution free: the suffix is how the right property gets credited.
+
+Only an explicit **no** removes a line. An answer that is missing or
+unrecognisable leaves the charge in place — overcharging is visible to the guest
+and recoverable, while dropping a charge nobody notices is neither. Those are
+recorded on the snapshot as `unansweredAddOns` and logged, because an optional
+add-on nobody was asked about means the form has drifted from the listing.
+
+**Known limitation:** the form gives one answer for the whole booking. If an
+add-on is configured on two listings and the guest says yes, they are charged on
+both. Correct for a pet, which stays at both; wrong for a late check-out, where
+they only leave from one. Fixing that needs the Worker to write the line itself
+rather than remove GHL's.
+
+The Pet Fee stays hard-wired alongside this (`hasPets`), so an account with no
+`optionalAddOns` behaves exactly as before.
+
 `ownerName`/`managerName` are the tenant-wide default; `propertyOwnerNames`/
 `propertyManagerNames` (keyed by `propertyCode`) override it per property.
 Then pass `&recipientName=Marco` on the statement URL to scope to just that
