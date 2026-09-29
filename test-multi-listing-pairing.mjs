@@ -16,7 +16,7 @@
 // nothing. Invoice line order is chronological order.
 import assert from "node:assert";
 
-const { pairListings } = await import("./src/multi-listing.js");
+const { pairListings, pairCleaning } = await import("./src/multi-listing.js");
 
 const tenant = { currency: "USD" };
 
@@ -153,5 +153,62 @@ const STAGGERED = [
     "a listing priced at nothing is a line we do not understand");
   console.log("8) A line without a name or a price refuses the whole split");
 }
+
+// ---- 9..11 the cleaning fees ---------------------------------------
+// Cleaning is per listing, and GHL's Additional Fees add one line per service,
+// so the lines pair with the listings the same way the rent lines do. Nothing
+// was reading them at all: composeBooking zeroes cleaningFee and the enrich
+// step that fills it back in runs before the children exist.
+const TWO = [{ propertyCode: "Test Villa 2" }, { propertyCode: "Test Villa 3" }];
+
+{
+  const items = [
+    { name: "Test Villa 2", amount: 405, qty: 1 },
+    { name: "Cleaning Fee", amount: 65, qty: 1 },
+    { name: "Test Villa 3", amount: 660, qty: 1 },
+    { name: "Limpieza", amount: 80, qty: 1 },
+  ];
+  const out = pairCleaning(items, TWO);
+  assert.strictEqual(out.ok, true);
+  assert.deepStrictEqual(out.perListing, [65, 80],
+    "in line order, the same order the rent lines pair in -- and different amounts, so the order shows");
+  assert.strictEqual(out.total, 145);
+  console.log("9) One cleaning line per listing pairs in order, Spanish or English");
+}
+
+{
+  // A reservation with no cleaning at all. Zero is a real answer here, not the
+  // absence of one, and must not be confused with the bug it replaces.
+  const out = pairCleaning([{ name: "Test Villa 2", amount: 405, qty: 1 }], TWO);
+  assert.strictEqual(out.ok, true);
+  assert.deepStrictEqual(out.perListing, [0, 0]);
+  assert.strictEqual(out.total, 0);
+  console.log("10) A reservation with no cleaning line is answered with zero, not refused");
+}
+
+{
+  // One line, two listings -- the account charges cleaning once per booking
+  // rather than once per stay. It cannot be attributed, and the choice is
+  // between two wrongs: losing the money, or naming the wrong listing as
+  // having earned it. The total is what the guest paid and the owner or
+  // manager is owed, so the total wins and the attribution is flagged.
+  const items = [
+    { name: "Test Villa 2", amount: 405, qty: 1 },
+    { name: "Test Villa 3", amount: 660, qty: 1 },
+    { name: "Cleaning Fee", amount: 90, qty: 1 },
+  ];
+  const out = pairCleaning(items, TWO);
+  assert.strictEqual(out.ok, false, "and it says so rather than looking like an ordinary pairing");
+  assert.strictEqual(out.reason, "cleaning_line_count_mismatch");
+  assert.strictEqual(out.cleaningLines, 1);
+  assert.strictEqual(out.listingCount, 2);
+  assert.strictEqual(out.total, 90);
+  assert.deepStrictEqual(out.perListing, [90, 0], "the whole fee is kept, on one listing");
+  assert.strictEqual(out.perListing.reduce((s, n) => s + n, 0), out.total,
+    "nothing is lost, which is the failure this replaces");
+  console.log("11) Cleaning that cannot be attributed keeps its total and flags the attribution");
+}
+
+
 
 console.log("\nPASS — invoice lines and booking services join into listings in date order, or refuse.");

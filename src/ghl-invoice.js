@@ -279,7 +279,7 @@ export async function invoiceHasWorkerLines({ tenant, env, locationId, invoiceId
 // pet; on "No" that line is dropped before the invoice is sent. Payment at
 // booking is off, so nothing has been paid on it yet. Matched by name, in
 // English or Spanish (policy.js isPetFeeName).
-const isCleaningFee = item => /clean|limpieza/i.test(String(item?.name || ""));
+export const isCleaningFee = item => /clean|limpieza/i.test(String(item?.name || ""));
 // The property name, taken from what the guest is actually being charged for.
 //
 // The booking webhook cannot supply it: the inbound payload carries the guest's
