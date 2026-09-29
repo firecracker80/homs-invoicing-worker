@@ -60,8 +60,14 @@ const formatPct = (rate) => `${Number((rate * 100).toFixed(1))}%`;
 // it, and those two being separate expressions of the same rule is exactly how
 // the record went stale in the first place -- a duration change moved the dates
 // on the Transaction and left the money at whatever the original booking cost.
+// petFee is the name this held for the day between the pet fee becoming
+// revenue and every add-on becoming revenue. A snapshot has one or the other,
+// never both, so summing both is how bookings already in KV keep their totals.
 export const bookingTotalOf = (snapshot) =>
-  round2(snapshot.charges.rentTotal + (snapshot.charges.petFee || 0) + snapshot.charges.cleaningFee);
+  round2(snapshot.charges.rentTotal + earnedAddOns(snapshot) + snapshot.charges.cleaningFee);
+
+export const earnedAddOns = (snapshot) =>
+  round2((snapshot.charges?.addOns || 0) + (snapshot.charges?.petFee || 0));
 
 function resolveSecret(tenant, env, nameKey, inlineKey) {
   if (tenant[nameKey] && env[tenant[nameKey]]) return env[tenant[nameKey]];

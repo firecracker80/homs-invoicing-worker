@@ -324,8 +324,12 @@ async function settleMultiListing(env, tenant, parent, { invoice, paid, common }
     // Everything the guest was charged for this listing except its deposit,
     // matching how the single-listing route splits RENT from DEP.
     const rentGross = round2(
-      (child.charges?.rentTotal || 0) + (child.charges?.cleaningFee || 0) + (child.charges?.petFee || 0) +
-      (child.charges?.otherFees || 0) + (child.charges?.processingFee || 0)
+      (child.charges?.rentTotal || 0) + (child.charges?.cleaningFee || 0) +
+      // petFee and otherFees are what this held for the day between the pet fee
+      // becoming revenue and every add-on becoming revenue. A child has addOns
+      // or those, never both, so summing all three settles bookings already in KV.
+      (child.charges?.addOns || 0) + (child.charges?.petFee || 0) + (child.charges?.otherFees || 0) +
+      (child.charges?.processingFee || 0)
     );
     const captures = {
       RENT: { ...common, gross: rentGross },

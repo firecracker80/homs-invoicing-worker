@@ -16,7 +16,7 @@
 // nothing. Invoice line order is chronological order.
 import assert from "node:assert";
 
-const { pairListings, pairCleaning, pairOtherFees, pairPetFees } = await import("./src/multi-listing.js");
+const { pairListings, pairCleaning, pairAddOns } = await import("./src/multi-listing.js");
 
 const tenant = { currency: "USD" };
 
@@ -210,90 +210,73 @@ const TWO = [{ propertyCode: "Test Villa 2" }, { propertyCode: "Test Villa 3" }]
 }
 
 // ---- 12..14 everything else the guest was charged -------------------
-// A pet fee, a tax, a tourist levy. Defined as what is left over rather than
-// by name, because a name-matching list drops the fee nobody anticipated --
-// and that money is still on the invoice the guest paid.
+// A pet fee, a late check-out, an early check-in, a tax. Everything that is
+// not the stay, not its cleaning and not a pass-through is the client's, and
+// is split at ownerPct like the rent. Recognised by NOT being a pass-through,
+// which is what lets a charge added in GHL tomorrow reach somebody without a
+// deploy -- the pet fee took six edits across five files before anyone was
+// paid for it, and the next charge would have taken the same six.
+//
+// pairAddOns is told which lines were claimed as listings, so the add-ons are
+// exactly what is left rather than a second guess at the same question.
 {
+  const listings = [{ name: "Test Villa 2", amount: 405, qty: 1 }, { name: "Test Villa 3", amount: 660, qty: 1 }];
   const items = [
-    { name: "Test Villa 2", amount: 405, qty: 1 },
-    { name: "Cleaning Fee", amount: 65, qty: 1 },
-    { name: "Pet Fee", amount: 150, qty: 1 },
-    { name: "Test Villa 3", amount: 660, qty: 1 },
-    { name: "Cleaning Fee", amount: 65, qty: 1 },
-    { name: "Pet Fee", amount: 200, qty: 1 },
+    listings[0],
+    { name: "Cleaning Fee - Test Villa 2", amount: 65, qty: 1 },
+    { name: "Late Checkout", amount: 50, qty: 1 },
+    listings[1],
+    { name: "Cleaning Fee - Test Villa 3", amount: 65, qty: 1 },
+    { name: "Extra Guest", amount: 75, qty: 1 },
   ];
-  const pets = pairPetFees(items, TWO, tenant);
-  assert.strictEqual(pets.ok, true);
-  assert.deepStrictEqual(pets.perListing, [150, 200], "paired in line order, like everything else");
-  assert.strictEqual(pets.total, 350);
+  const addOns = pairAddOns(items, listings, TWO, tenant);
+  assert.strictEqual(addOns.ok, true);
+  assert.deepStrictEqual(addOns.perListing, [50, 75],
+    "two charges nothing in the code has heard of, paired in line order like the rest");
+  assert.strictEqual(addOns.total, 125);
 
-  // Three buckets, and none of them counts another's money. The pet fee is
-  // split like rent; cleaning has its own recipient; the rest is neither.
   assert.deepStrictEqual(pairCleaning(items, TWO).perListing, [65, 65],
-    "cleaning is still cleaning");
-  assert.strictEqual(pairOtherFees(items, TWO, tenant).total, 0,
-    "and neither of them is counted again as a leftover fee");
-  console.log("12) Pet fees pair per listing, apart from the cleaning and the leftovers");
+    "cleaning is still its own, for its own recipient");
+  console.log("12) Charges the code has never heard of pair per listing, apart from the cleaning");
 }
 
 {
-  // A tax line the code has never been told about by name. It is still money.
+  // The three that pass through, and are nobody's earnings.
+  const listings = [{ name: "Test Villa 2", amount: 405, qty: 1 }, { name: "Test Villa 3", amount: 660, qty: 1 }];
   const items = [
-    { name: "Test Villa 2", amount: 405, qty: 1 },
-    { name: "ITBIS 18%", amount: 72.9, qty: 1 },
-    { name: "Test Villa 3", amount: 660, qty: 1 },
-    { name: "ITBIS 18%", amount: 118.8, qty: 1 },
+    listings[0], { name: "ITBIS 18%", amount: 72.9, qty: 1 },
+    listings[1], { name: "Depósito de garantía", amount: 200, qty: 1 },
+    { name: "Cargo por procesamiento / Processing fee", amount: 80, qty: 1 },
   ];
-  const fees = pairOtherFees(items, TWO, tenant);
-  assert.deepStrictEqual(fees.perListing, [72.9, 118.8]);
-  assert.strictEqual(fees.total, 191.7, "the whole of it, not the part somebody remembered to name");
-  assert.strictEqual(pairPetFees(items, TWO, tenant).total, 0,
-    "and a tax is not revenue anybody earns -- it is remitted, so it stays out of the split");
+  assert.strictEqual(pairAddOns(items, listings, TWO, tenant).total, 0,
+    "a tax is remitted, a deposit is the guest's, a processing fee is the gateway's");
 
-  // Names with "pet" in them that are not the pet fee. isPetFeeName is exact
-  // for this reason -- it would be splitting somebody's money on a substring.
-  // Each still lands somewhere, because what is left over is what makes the
-  // listings add up to the invoice.
-  const lookalikes = [
-    { name: "Test Villa 2", amount: 405, qty: 1 },
-    { name: "Pet Cleaning", amount: 40, qty: 1 },
-    { name: "Pet Insurance", amount: 25, qty: 1 },
-    { name: "Test Villa 3", amount: 660, qty: 1 },
-    { name: "Pet Cleaning", amount: 40, qty: 1 },
-    { name: "Pet Insurance", amount: 25, qty: 1 },
-  ];
-  assert.strictEqual(pairPetFees(lookalikes, TWO, tenant).total, 0,
-    "neither is split as a pet fee, on a name that merely contains the word");
-  assert.deepStrictEqual(pairCleaning(lookalikes, TWO).perListing, [40, 40],
-    "pet CLEANING is cleaning, and goes to whoever the cleaning goes to");
-  assert.deepStrictEqual(pairOtherFees(lookalikes, TWO, tenant).perListing, [25, 25],
-    "and the one that is neither is still attributed, so no money is lost");
-  console.log("13) A tax, and names containing \"pet\" that are not the pet fee, land without being split");
+  // And the pet fee, which needed a named rule of its own a day ago.
+  const withPet = [listings[0], { name: "Tarifa por mascota", amount: 150, qty: 1 },
+                   listings[1], { name: "Pet Fee", amount: 200, qty: 1 }];
+  assert.deepStrictEqual(pairAddOns(withPet, listings, TWO, tenant).perListing, [150, 200],
+    "in Spanish and English, with no list naming either");
+  console.log("13) Tax, deposit and processing fee pass through; the pet fee is just an add-on now");
 }
 
 {
-  // One pet fee, two listings -- the dog came on the whole trip. Cannot be
-  // attributed, so the total is kept and the attribution is flagged, exactly
-  // as cleaning does.
-  const items = [
-    { name: "Test Villa 2", amount: 405, qty: 1 },
-    { name: "Test Villa 3", amount: 660, qty: 1 },
-    { name: "Pet Fee", amount: 300, qty: 1 },
-  ];
-  const pets = pairPetFees(items, TWO, tenant);
-  assert.strictEqual(pets.ok, false);
-  assert.strictEqual(pets.reason, "pet_fee_line_count_mismatch");
-  assert.deepStrictEqual(pets.perListing, [300, 0]);
-  assert.strictEqual(pets.perListing.reduce((s, n) => s + n, 0), pets.total,
+  // One late check-out across a two-listing trip. Cannot be attributed, so the
+  // total is kept whole on the first listing and flagged, rather than split on
+  // a guess -- the same fallback cleaning uses.
+  const listings = [{ name: "Test Villa 2", amount: 405, qty: 1 }, { name: "Test Villa 3", amount: 660, qty: 1 }];
+  const items = [listings[0], listings[1], { name: "Late Checkout", amount: 90, qty: 1 }];
+  const addOns = pairAddOns(items, listings, TWO, tenant);
+
+  assert.strictEqual(addOns.ok, false);
+  assert.strictEqual(addOns.reason, "add_on_line_count_mismatch");
+  assert.deepStrictEqual(addOns.perListing, [90, 0]);
+  assert.strictEqual(addOns.perListing.reduce((s, n) => s + n, 0), addOns.total,
     "nothing is lost, which is the whole point");
 
-  // Nothing to attribute is a real answer, not a missing one.
-  const none = pairOtherFees([{ name: "Test Villa 2", amount: 405, qty: 1 }], TWO, tenant);
+  const none = pairAddOns([listings[0], listings[1]], listings, TWO, tenant);
   assert.strictEqual(none.ok, true);
-  assert.strictEqual(none.total, 0);
-  console.log("14) A single fee across the reservation keeps its total and flags the attribution");
+  assert.strictEqual(none.total, 0, "and nothing to attribute is a real answer, not a missing one");
+  console.log("14) A single add-on across the reservation keeps its total and flags the attribution");
 }
-
-
 
 console.log("\nPASS — invoice lines and booking services join into listings in date order, or refuse.");

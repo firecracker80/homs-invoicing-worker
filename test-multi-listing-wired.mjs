@@ -55,6 +55,16 @@ const makeFetch = ({ services = SERVICES, items = INVOICE_ITEMS } = {}) => async
   urls.push(u);
   const ok = (o) => ({ ok: true, status: 200, json: async () => o, text: async () => JSON.stringify(o) });
   if (u.includes("/calendars/services/bookings/")) return ok({ bookingId: BOOKING, services });
+  // The service catalog, which is how a listing line is recognised for being a
+  // listing rather than for not looking like a fee. Verified live against
+  // DEMO-HOMS: it answers with the name and the nightly rate.
+  if (u.includes("/calendars/services/catalog/")) {
+    const id = u.split("/").pop();
+    const CATALOG = { s1: { name: "Test Villa 2", amount: 135 }, s2: { name: "Test Villa 3", amount: 110 } };
+    const entry = CATALOG[id];
+    return entry ? ok({ service: { id, name: entry.name, payment: { amount: entry.amount } } })
+                 : { ok: false, status: 404, json: async () => ({}), text: async () => "{}" };
+  }
   if (u.includes(`/invoices/${INVOICE}/send`)) { sentInvoice = true; return ok({ invoice: { _id: INVOICE } }); }
   if (u.includes(`/invoices/${INVOICE}`) && opts.method === "PUT") return ok({ _id: INVOICE });
   if (u.includes(`/invoices/${INVOICE}`)) {
@@ -192,7 +202,12 @@ const book = async (opts = {}) => {
 // Half-applying a split would be worse than not splitting: the invoice has
 // already gone to the guest.
 {
-  const out = await book({ services: [SERVICES[0]] });
+  // A listing whose dates were wiped, which is the shape this actually takes:
+  // cancelling or deleting a booking blanks serviceStartTime/serviceEndTime
+  // (Mara, 2026-09-29), leaving a service GHL still lists and cannot date.
+  const out = await book({
+    services: [SERVICES[0], { ...SERVICES[1], serviceStartTime: "", serviceEndTime: "" }],
+  });
   assert.notStrictEqual(out.body.mode, "multi_listing_recorded");
   const snap = JSON.parse(store.get(BOOKING));
   assert.strictEqual(snap.type, undefined, "the booking is left exactly as it was");
@@ -369,9 +384,9 @@ const WITH_PET = [...INVOICE_ITEMS, { name: "Pet Fee", amount: 300, qty: 1 }];
 
   // One pet fee across two listings cannot be attributed, so it is kept whole
   // on the first and flagged rather than split on a guess.
-  assert.strictEqual(a.charges.petFee, 300);
-  assert.strictEqual(b.charges.petFee, undefined, "the second listing earns none of it");
-  assert.strictEqual(JSON.parse(store.get(BOOKING)).petFeePairing.reason, "pet_fee_line_count_mismatch",
+  assert.strictEqual(a.charges.addOns, 300);
+  assert.strictEqual(b.charges.addOns, undefined, "the second listing earns none of it");
+  assert.strictEqual(JSON.parse(store.get(BOOKING)).addOnPairing.reason, "add_on_line_count_mismatch",
     "and the reservation records that the attribution is a fallback, not a pairing");
 
   // The processing fee follows it, because the guest paid a percentage of the
@@ -384,10 +399,10 @@ const WITH_PET = [...INVOICE_ITEMS, { name: "Pet Fee", amount: 300, qty: 1 }];
   // divides the payment by the children, so a parent that did not carry what
   // they carry would describe a different reservation from the one being paid.
   const parent = JSON.parse(store.get(BOOKING));
-  assert.strictEqual(parent.charges.petFee, 300);
+  assert.strictEqual(parent.charges.addOns, 300);
   assert.strictEqual(
     Math.round((parent.charges.rentTotal + parent.charges.cleaningFee
-      + parent.charges.petFee + parent.charges.processingFee) * 100) / 100,
+      + parent.charges.addOns + parent.charges.processingFee) * 100) / 100,
     1584.7,
     "and the reservation adds up to the invoice the guest was sent"
   );
@@ -437,10 +452,20 @@ const WITH_PET = [...INVOICE_ITEMS, { name: "Pet Fee", amount: 300, qty: 1 }];
 {
   await book({ items: [...INVOICE_ITEMS, { name: "ITBIS", amount: 100, qty: 1 }] });
   const a = JSON.parse(store.get(`${BOOKING}#1`));
-  assert.strictEqual(a.charges.otherFees, 100, "attributed, so the reservation still adds up");
-  assert.strictEqual(a.payout.basis, a.charges.rentTotal,
-    "but not split -- a tax is remitted, not earned");
-  console.log("16) A tax is attached to a listing without being paid to anybody");
+  assert.strictEqual(a.charges.addOns, undefined, "a tax is not the client's to be paid");
+  assert.strictEqual(a.payout.basis, a.charges.rentTotal, "so the split is the rent alone");
+  console.log("16) A tax passes through, and is paid to nobody");
+}
+
+// ---- 17. the charge nobody wrote code for --------------------------
+// The point of the inversion. Nothing here has heard of a late check-out.
+{
+  await book({ items: [...INVOICE_ITEMS, { name: "Late Checkout", amount: 50, qty: 1 }] });
+  const a = JSON.parse(store.get(`${BOOKING}#1`));
+  assert.strictEqual(a.charges.addOns, 50, "attributed with no rule naming it");
+  assert.strictEqual(a.payout.basis, 455, "405 of rent plus the 50 it adds");
+  assert.strictEqual(a.payout.owner, 386.75, "and somebody is actually paid for it");
+  console.log("17) A late check-out is attributed and split, with no rule naming it");
 }
 
 console.log("\nPASS — a bundled reservation is invoiced once, split into its listings, and settles as each of them.");

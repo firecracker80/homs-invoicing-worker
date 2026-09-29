@@ -28,8 +28,7 @@
 // its own rent and deposit sums to exactly the fee on the whole booking.
 
 import { composeBooking } from "./booking-composer.js";
-import { isFeeLine, isCleaningFee } from "./ghl-invoice.js";
-import { isPetFeeName } from "./policy.js";
+import { isFeeLine, isCleaningFee, isPassThrough } from "./ghl-invoice.js";
 
 export const MULTI_PARENT_TYPE = "multi_listing_parent";
 
@@ -57,8 +56,7 @@ export async function splitBookedReservation({ tenant, env, snapshot, nativeItem
   if (!paired.ok) return { split: false, reason: paired.reason, ...paired };
 
   const cleaning = pairCleaning(nativeItems, paired.listings);
-  const petFees = pairPetFees(nativeItems, paired.listings, tenant);
-  const otherFees = pairOtherFees(nativeItems, paired.listings, tenant);
+  const addOns = pairAddOns(nativeItems, paired.listingLines, paired.listings, tenant);
 
   const { parent, children } = composeMultiListing(
     {
@@ -72,7 +70,7 @@ export async function splitBookedReservation({ tenant, env, snapshot, nativeItem
     paired.listings
   );
 
-  applyFees(children, cleaning, petFees, otherFees, tenant);
+  applyFees(children, cleaning, addOns, tenant);
 
   // The reservation-level facts stay on the parent: the guest pays one invoice
   // and one payment arrives against it, so that is where they belong. The
@@ -87,8 +85,7 @@ export async function splitBookedReservation({ tenant, env, snapshot, nativeItem
   // DEMO-HOMS booking that found this -- and settlement divides the payment by
   // the children.
   parent.charges.cleaningFee = sum(children.map((c) => c.charges.cleaningFee));
-  parent.charges.petFee = sum(children.map((c) => c.charges.petFee ?? 0));
-  parent.charges.otherFees = sum(children.map((c) => c.charges.otherFees ?? 0));
+  parent.charges.addOns = sum(children.map((c) => c.charges.addOns ?? 0));
   // Summed from the children rather than copied from the reservation-level
   // snapshot. The two agree on every booking seen so far, because
   // repriceFromInvoice charges the fee on the whole invoice subtotal and that
@@ -98,8 +95,7 @@ export async function splitBookedReservation({ tenant, env, snapshot, nativeItem
   // its children would be describing a reservation nobody was paid for.
   parent.charges.processingFee = sum(children.map((c) => c.charges.processingFee));
   if (!cleaning.ok) parent.cleaningPairing = cleaning;
-  if (!petFees.ok) parent.petFeePairing = petFees;
-  if (!otherFees.ok) parent.feePairing = otherFees;
+  if (!addOns.ok) parent.addOnPairing = addOns;
 
   return { split: true, parent, children };
 }
@@ -138,9 +134,45 @@ export async function fetchBookingServices({ tenant, env, bookingId }, fetchImpl
     const text = await res.text();
     if (!res.ok) return { ok: false, reason: "booking_unreadable", status: res.status, detail: text.slice(0, 200) };
     const body = text ? JSON.parse(text) : {};
-    return { ok: true, services: body.services || [] };
+    const services = body.services || [];
+    // Ask the catalog what each booked service actually is. It answers with
+    // the listing's name and its nightly rate -- "Test Villa 2", 135 --
+    // verified live 2026-09-29 against both legs of 3at3yw3tMEYQ1MWGfHFM.
+    //
+    // This is what lets a listing line be recognised for being a listing,
+    // rather than for not looking like a fee. Under the old rule a charge the
+    // code had never heard of -- a late check-out -- counted as a listing, and
+    // a two-property booking with one would come out as three listings against
+    // two date ranges and refuse to split at all.
+    //
+    // Fails soft: a catalog that cannot be read leaves the names off, and
+    // pairListings falls back to the order-based join it used before.
+    await Promise.all(services.map(async (s) => {
+      const entry = await fetchServiceCatalog({ tenant, env, pit, serviceId: s.id }, fetchImpl);
+      if (entry.ok) { s.catalogName = entry.name; s.catalogRate = entry.nightlyRate; }
+    }));
+    return { ok: true, services };
   } catch (err) {
     return { ok: false, reason: "booking_fetch_failed", detail: err.message };
+  }
+}
+
+// One service in the account's catalog: what it is called and what a night of
+// it costs. GET /calendars/services/catalog/{serviceId}, documented, and the
+// tenant PIT already carries calendars.readonly.
+async function fetchServiceCatalog({ tenant, env, pit, serviceId }, fetchImpl = fetch) {
+  if (!pit || blank(serviceId)) return { ok: false };
+  try {
+    const res = await fetchImpl(`${GHL_BASE}/calendars/services/catalog/${encodeURIComponent(serviceId)}`, {
+      headers: { Authorization: `Bearer ${pit}`, Version: GHL_VERSION, Accept: "application/json" },
+    });
+    if (!res.ok) return { ok: false };
+    const body = JSON.parse((await res.text()) || "{}");
+    const name = String(body?.service?.name ?? "").trim();
+    if (!name) return { ok: false };
+    return { ok: true, name, nightlyRate: numberOrNull(body?.service?.payment?.amount) };
+  } catch {
+    return { ok: false };
   }
 }
 
@@ -166,7 +198,17 @@ const GHL_VERSION = "2021-07-28";
 // date range, sorting cannot separate them -- and does not need to, because
 // their ranges are identical and the name and amount come from the line.
 export function pairListings(invoiceItems, services, tenant) {
-  const lines = (invoiceItems || []).filter((i) => !isFeeLine(i, tenant));
+  // Prefer the names the catalog gave, which turn this from a join on ORDER
+  // into a join on identity: the line called "Test Villa 2" is the stay of
+  // Test Villa 2, and no argument about invoice ordering is needed. Falls back
+  // to the order-based rule when the catalog could not be read, which is the
+  // behaviour every bundled booking used before and is still proven below.
+  const named = new Set((services || []).map((s) => normalize(s.catalogName)).filter(Boolean));
+  const isListingLine = named.size
+    ? (i) => named.has(normalize(i?.name)) && !isCleaningFee(i)
+    : (i) => !isFeeLine(i, tenant);
+
+  const lines = (invoiceItems || []).filter(isListingLine);
   const ranges = (services || [])
     .map((s) => ({ checkIn: dateOnly(s.serviceStartTime), checkOut: dateOnly(s.serviceEndTime) }))
     .filter((r) => !blank(r.checkIn) && !blank(r.checkOut))
@@ -191,10 +233,11 @@ export function pairListings(invoiceItems, services, tenant) {
   if (listings.some((l) => !(l.rentTotal > 0) || !l.propertyCode)) {
     return { ok: false, reason: "unpriced_or_unnamed_line" };
   }
-  return { ok: true, listings };
+  return { ok: true, listings, listingLines: lines };
 }
 
 const round2 = (n) => Math.round(n * 100) / 100;
+const normalize = (s) => String(s ?? "").trim().toLowerCase();
 
 // Pair the invoice's cleaning lines with the listings they cleaned.
 //
@@ -222,41 +265,24 @@ export function pairCleaning(invoiceItems, listings) {
   return pairAmounts(lineTotals(invoiceItems, isCleaningFee), listings, "cleaning_line_count_mismatch");
 }
 
-// The pet fee, which is part of the rent price (Yari, 2026-09-29) and so is
-// split like rent. Paired per listing like everything else, and then folded
-// into that listing's payout basis by applyFees.
+// Everything the guest was charged that is not the stay, not its cleaning and
+// not a pass-through: a pet fee, a late check-out, an early check-in, an extra
+// guest, whatever the account sells next. All of it is part of the rent price,
+// so it is split at ownerPct like the rent -- see applyFees.
 //
-// Matched with isPetFeeName rather than the looser pattern isFeeLine screens
-// with, because "Pet Cleaning" matches that pattern and is not the pet fee.
-// What the precise test does not recognise falls through to pairOtherFees and
-// is attributed without being paid to anyone -- unrecognised money is still
-// collected, it is simply not handed to somebody on a guess.
-export function pairPetFees(invoiceItems, listings, tenant) {
-  return pairAmounts(
-    lineTotals(invoiceItems, (i) => isPetFeeName(i?.name, tenant)),
-    listings, "pet_fee_line_count_mismatch"
-  );
+// Recognised by NOT being a pass-through, which is what lets a charge added in
+// GHL tomorrow reach somebody without a deploy. This was three named buckets a
+// day ago -- pet fees split, everything else attributed and paid to nobody --
+// and the pet fee alone had taken six edits across five files to start paying.
+export function pairAddOns(invoiceItems, listingLines, listings, tenant) {
+  const used = new Set(listingLines || []);
+  const isAddOn = (i) => !used.has(i) && !isCleaningFee(i) && !isPassThrough(i, tenant);
+  return pairAmounts(lineTotals(invoiceItems, isAddOn), listings, "add_on_line_count_mismatch");
 }
 
-// Everything else the guest was charged: a tax, a tourist levy, an airport
-// transfer -- whatever the account has configured as an Additional Fee that is
-// none of the stay, its cleaning, or its pet fee.
-//
-// Defined as what is left over rather than by name, which is the only
-// definition that makes the listings add up to the invoice. A fee nobody
-// anticipated is still money the guest paid, and a name-matching list would
-// drop it silently -- which is what happened here: a 300 pet fee on a bundled
-// invoice belonged to no listing, and turned up as a 318.00 variance (the fee
-// plus the 6% charged on it) on a reservation with nothing actually wrong.
-//
-// NOT income, and deliberately not made income. A tax is remitted, not earned,
-// and a fee nobody has classified is not something to start paying out on a
-// guess. They are attached to the listing the guest was charged them for so
-// that the reservation adds up, and left there. The pet fee used to be in here
-// with them; it is revenue, and now has its own pairing above.
-export function pairOtherFees(invoiceItems, listings, tenant) {
-  const isOther = (i) => isFeeLine(i, tenant) && !isCleaningFee(i) && !isPetFeeName(i?.name, tenant);
-  return pairAmounts(lineTotals(invoiceItems, isOther), listings, "fee_line_count_mismatch");
+// The pass-throughs, kept only so the caller can prove the invoice adds up.
+export function passThroughTotal(invoiceItems, tenant) {
+  return round2(lineTotals(invoiceItems, (i) => isPassThrough(i, tenant)).reduce((s, n) => s + n, 0));
 }
 
 const lineTotals = (invoiceItems, match) => (invoiceItems || [])
@@ -297,35 +323,31 @@ function pairAmounts(amounts, listings, mismatchReason) {
 // with a cleaning fee of 0 everywhere else too (booking-composer, and
 // repriceFromInvoice on the single-listing path), because a deposit is sized
 // against the stay rather than against the fees on it.
-function applyFees(children, cleaning, pet, other, tenant) {
+function applyFees(children, cleaning, addOns, tenant) {
   children.forEach((child, index) => {
     const cleaningAmt = cleaning.perListing?.[index] ?? 0;
-    const petAmt = pet.perListing?.[index] ?? 0;
-    const otherAmt = other.perListing?.[index] ?? 0;
+    const addOnAmt = addOns.perListing?.[index] ?? 0;
+    if (!(cleaningAmt > 0) && !(addOnAmt > 0)) return;
+
     if (cleaningAmt > 0) {
       child.charges.cleaningFee = cleaningAmt;
       child.charges.cleaningFeeSource = cleaning.ok ? "ghl_native" : "ghl_native_unattributed";
     }
-    if (petAmt > 0) {
-      child.charges.petFee = petAmt;
-      child.charges.petFeeSource = pet.ok ? "ghl_native" : "ghl_native_unattributed";
+    if (addOnAmt > 0) {
+      child.charges.addOns = addOnAmt;
+      child.charges.addOnsSource = addOns.ok ? "ghl_native" : "ghl_native_unattributed";
       // Part of the rent price, so it joins the basis the split is taken on --
       // the same thing repriceFromInvoice does for a single-listing booking.
       // composeBooking sized this listing's payout on rent alone, because the
-      // fee lines had not been paired yet when it ran.
-      child.payout.basis = round2(child.charges.rentTotal + petAmt);
+      // invoice lines had not been paired yet when it ran.
+      child.payout.basis = round2(child.charges.rentTotal + addOnAmt);
       child.payout.owner = round2(child.payout.basis * child.payout.ownerPct);
       child.payout.manager = round2(child.payout.basis - child.payout.owner);
-    }
-    if (!(cleaningAmt > 0) && !(petAmt > 0) && !(otherAmt > 0)) return;
-    if (otherAmt > 0) {
-      child.charges.otherFees = otherAmt;
-      child.charges.otherFeesSource = other.ok ? "ghl_native" : "ghl_native_unattributed";
     }
 
     const deposit = child.securityDeposit?.total ?? 0;
     const feePct = child.charges.feePct ?? tenant.processingFeePct ?? 0.06;
-    const charged = round2(child.charges.rentTotal + cleaningAmt + petAmt + otherAmt);
+    const charged = round2(child.charges.rentTotal + cleaningAmt + addOnAmt);
     child.charges.processingFee = round2(feePct * (charged + deposit));
     child.charges.grandTotal = round2(charged + child.charges.processingFee + deposit);
   });
