@@ -437,6 +437,40 @@ export function isFeeLine(item, tenant) {
   return FEE_LINE_PATTERNS.some((re) => re.test(name));
 }
 
+// What GHL says this booking is for, when the invoice cannot say.
+//
+// One listing means one booked service, and the catalog holds its name. More
+// than one means a bundled reservation, which multi-listing.js splits and which
+// therefore has no single property to name -- so this returns null rather than
+// picking one, the same refusal propertyNameFromInvoice makes for the same
+// reason: a wrong property keys a per-property owner name, and addresses a
+// statement to somebody with no claim on the money.
+export async function propertyFromBooking({ tenant, env, bookingId }, fetchImpl = fetch) {
+  if (!bookingId) return null;
+  // Read through ghlFetch rather than importing multi-listing.js's copy:
+  // multi-listing.js already imports from here, and a cycle between the two is
+  // not a thing to introduce for two calls it can make itself.
+  let services;
+  try {
+    const booking = await ghlFetch(tenant, env, `/calendars/services/bookings/${encodeURIComponent(bookingId)}`, {}, fetchImpl);
+    services = booking?.services || [];
+  } catch {
+    return null;
+  }
+  // More than one booked service is a bundled reservation, which has no single
+  // property to name. Returning null is the same refusal propertyNameFromInvoice
+  // makes when it cannot choose, and for the same reason.
+  if (services.length !== 1) return null;
+
+  try {
+    const entry = await ghlFetch(tenant, env, `/calendars/services/catalog/${encodeURIComponent(services[0].id)}`, {}, fetchImpl);
+    const name = String(entry?.service?.name ?? "").trim();
+    return name || null;
+  } catch {
+    return null;
+  }
+}
+
 export function propertyNameFromInvoice(items, tenant) {
   const candidates = (items || []).filter((i) => !isFeeLine(i, tenant));
   if (candidates.length === 1) {
@@ -671,7 +705,34 @@ export async function enrichAndSendInvoice(
       snapshot.propertyCode = name;
       snapshot.propertyCodeSource = "ghl_invoice";
     } else {
-      snapshot.propertyCodeSource = `unresolved:${reason}`;
+      // The invoice could not say which line was the property, so ask GHL what
+      // it actually booked.
+      //
+      // Reading it off the invoice works by elimination -- the line that is not
+      // a fee -- and that stops working the moment an account sells something
+      // the fee patterns have never heard of. DEMO-HOMS added Early Check-in
+      // and Late Check-out, and booking mRHVdjX72Ip49jQckB6W came out with
+      // THREE candidate property lines and no property at all
+      // (unresolved:ambiguous_3_non_fee_lines, 2026-09-29). Its owner then fell
+      // back to the account default rather than the one keyed to Test Villa 3
+      // -- invisible on an account with one owner, the wrong person credited on
+      // an account with several.
+      //
+      // The catalog answers it outright: the booked service's own name, which
+      // is the listing. Same call multi-listing.js uses to identify a bundled
+      // reservation's listings, and the reason bundled bookings never had this
+      // problem.
+      //
+      // Only reached when the invoice was ambiguous, so an ordinary booking
+      // pays for no extra calls. Fails soft: unreadable leaves the snapshot
+      // exactly as it was, recording why, which is today's behaviour.
+      const booked = await propertyFromBooking({ tenant, env, bookingId: snapshot.bookingId }, fetchImpl);
+      if (booked) {
+        snapshot.propertyCode = booked;
+        snapshot.propertyCodeSource = "ghl_service_catalog";
+      } else {
+        snapshot.propertyCodeSource = `unresolved:${reason}`;
+      }
     }
   }
 
