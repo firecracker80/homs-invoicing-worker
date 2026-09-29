@@ -16,7 +16,7 @@
 // nothing. Invoice line order is chronological order.
 import assert from "node:assert";
 
-const { pairListings, pairCleaning } = await import("./src/multi-listing.js");
+const { pairListings, pairCleaning, pairOtherFees } = await import("./src/multi-listing.js");
 
 const tenant = { currency: "USD" };
 
@@ -207,6 +207,67 @@ const TWO = [{ propertyCode: "Test Villa 2" }, { propertyCode: "Test Villa 3" }]
   assert.strictEqual(out.perListing.reduce((s, n) => s + n, 0), out.total,
     "nothing is lost, which is the failure this replaces");
   console.log("11) Cleaning that cannot be attributed keeps its total and flags the attribution");
+}
+
+// ---- 12..14 everything else the guest was charged -------------------
+// A pet fee, a tax, a tourist levy. Defined as what is left over rather than
+// by name, because a name-matching list drops the fee nobody anticipated --
+// and that money is still on the invoice the guest paid.
+{
+  const items = [
+    { name: "Test Villa 2", amount: 405, qty: 1 },
+    { name: "Cleaning Fee", amount: 65, qty: 1 },
+    { name: "Pet Fee", amount: 150, qty: 1 },
+    { name: "Test Villa 3", amount: 660, qty: 1 },
+    { name: "Cleaning Fee", amount: 65, qty: 1 },
+    { name: "Pet Fee", amount: 200, qty: 1 },
+  ];
+  const fees = pairOtherFees(items, TWO, tenant);
+  assert.strictEqual(fees.ok, true);
+  assert.deepStrictEqual(fees.perListing, [150, 200], "paired in line order, like everything else");
+  assert.strictEqual(fees.total, 350);
+
+  // And the two do not double-count each other.
+  assert.deepStrictEqual(pairCleaning(items, TWO).perListing, [65, 65],
+    "cleaning is still cleaning, and is not counted again as an other fee");
+  console.log("12) Pet fees pair per listing, separately from the cleaning beside them");
+}
+
+{
+  // A tax line the code has never been told about by name. It is still money.
+  const items = [
+    { name: "Test Villa 2", amount: 405, qty: 1 },
+    { name: "ITBIS 18%", amount: 72.9, qty: 1 },
+    { name: "Test Villa 3", amount: 660, qty: 1 },
+    { name: "ITBIS 18%", amount: 118.8, qty: 1 },
+  ];
+  const fees = pairOtherFees(items, TWO, tenant);
+  assert.deepStrictEqual(fees.perListing, [72.9, 118.8]);
+  assert.strictEqual(fees.total, 191.7, "the whole of it, not the part somebody remembered to name");
+  console.log("13) A tax line is attributed too, because the definition is what is left over");
+}
+
+{
+  // One pet fee, two listings -- the dog came on the whole trip. Cannot be
+  // attributed, so the total is kept and the attribution is flagged, exactly
+  // as cleaning does.
+  const items = [
+    { name: "Test Villa 2", amount: 405, qty: 1 },
+    { name: "Test Villa 3", amount: 660, qty: 1 },
+    { name: "Pet Fee", amount: 300, qty: 1 },
+  ];
+  const fees = pairOtherFees(items, TWO, tenant);
+  assert.strictEqual(fees.ok, false);
+  assert.strictEqual(fees.reason, "fee_line_count_mismatch");
+  assert.deepStrictEqual(fees.perListing, [300, 0]);
+  assert.strictEqual(fees.perListing.reduce((s, n) => s + n, 0), fees.total,
+    "nothing is lost, which is the whole point");
+
+  // Nothing to attribute is a real answer, not a missing one.
+  const none = pairOtherFees([{ name: "Test Villa 2", amount: 405, qty: 1 }], TWO, tenant);
+  assert.strictEqual(none.ok, true);
+  assert.strictEqual(none.total, 0);
+  console.log("14) A single fee across the reservation keeps its total and flags the attribution");
 }
 
 

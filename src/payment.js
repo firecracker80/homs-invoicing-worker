@@ -324,7 +324,8 @@ async function settleMultiListing(env, tenant, parent, { invoice, paid, common }
     // Everything the guest was charged for this listing except its deposit,
     // matching how the single-listing route splits RENT from DEP.
     const rentGross = round2(
-      (child.charges?.rentTotal || 0) + (child.charges?.cleaningFee || 0) + (child.charges?.processingFee || 0)
+      (child.charges?.rentTotal || 0) + (child.charges?.cleaningFee || 0) +
+      (child.charges?.otherFees || 0) + (child.charges?.processingFee || 0)
     );
     const captures = {
       RENT: { ...common, gross: rentGross },
