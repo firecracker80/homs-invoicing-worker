@@ -56,7 +56,7 @@ const MANUAL_REFUND_LABELS = {
   rent_refund_needed_manual: "Rent",
   deposit_refund_needed_manual: "Deposit",
 };
-const MANUAL_SUFFIX = " — refund to be issued manually";
+export const MANUAL_SUFFIX = " — refund to be issued manually";
 
 // ---- tier math ----
 // Shared by /cancel (whole booking) and reschedule.js (partial cancellation

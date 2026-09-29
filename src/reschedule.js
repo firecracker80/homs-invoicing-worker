@@ -14,7 +14,7 @@ import { createOrder, getAccessToken } from "./paypal.js";
 import { createCheckoutSession } from "./stripe.js";
 import { writeAndSyncRows, bookingTotalOf } from "./ledger.js";
 import { updateObjectRecord } from "./ghl.js";
-import { adminAuthorized, notifyAndRecord, cancellationTier } from "./cancellation.js";
+import { adminAuthorized, notifyAndRecord, cancellationTier, MANUAL_REFUND_REF, MANUAL_SUFFIX } from "./cancellation.js";
 import { paymentConfirmedPayload } from "./payment.js";
 import { updateGhlBookingDates } from "./ghl-calendar.js";
 import { updateInvoiceForReschedule } from "./ghl-invoice.js";
@@ -665,20 +665,41 @@ export async function handleReschedule(request, env) {
       });
     }
 
-    const rentRefundPart = settlement.parts?.find(p => p.type === "rent_refund_issued");
+    // Rent income reversed for the nights that are no longer being stayed.
+    //
+    // This used to run only when the gateway had ISSUED the refund, which meant
+    // it almost never ran at all: on the ghl_invoice gateway there is no
+    // capture to refund against, so the part is rent_refund_needed_manual and
+    // no reversal was written -- while the admin-fee income rows above were
+    // written every time. A shortened invoice-paid stay therefore charged a fee
+    // for dropping the nights AND went on crediting the owner for hosting them.
+    // The statement gained income on both sides of the same change.
+    //
+    // The nights are dropped whether or not the cash has moved back yet, so the
+    // income reverses on the terms /cancel has always used: referenced by the
+    // gateway refund id when there is one, and by MANUAL_REFUND_REF when a
+    // person still has to issue it, with the description saying which.
+    const rentRefundPart = settlement.parts?.find(p => p.type.startsWith("rent_refund_"));
     if (rentRefundPart) {
+      const manualRent = !rentRefundPart.refundId;
+      const refundRef = rentRefundPart.refundId || MANUAL_REFUND_REF;
       const ownerShare = round2(rentRefundPart.amount * ownerPct);
       rows.push({
         recipient: "owner", category: "income", entry_type: "reschedule_refund_owner",
-        amount: -ownerShare, reference: rentRefundPart.refundId, source: "reschedule",
-        description: "Rent refund reversal — reschedule shortened stay"
+        amount: -ownerShare, reference: refundRef, source: "reschedule",
+        description: `Rent refund reversal — reschedule shortened stay${manualRent ? MANUAL_SUFFIX : ""}`
       });
       rows.push({
         recipient: "manager", category: "income", entry_type: "reschedule_refund_manager",
-        amount: -round2(rentRefundPart.amount - ownerShare), reference: rentRefundPart.refundId, source: "reschedule",
-        description: "Rent refund reversal (manager share) — reschedule shortened stay"
+        amount: -round2(rentRefundPart.amount - ownerShare), reference: refundRef, source: "reschedule",
+        description: `Rent refund reversal (manager share) — reschedule shortened stay${manualRent ? MANUAL_SUFFIX : ""}`
       });
     }
+    // Deliberately still gated on "issued", unlike the rent above. The rent row
+    // records income that is no longer earned, which is true the moment the
+    // nights are dropped. This row records the guest's own money going back to
+    // them -- until it actually has, the liability is still outstanding, and
+    // writing it early would say a deposit had been returned when it had not.
     const depositRefundPart = settlement.parts?.find(p => p.type === "deposit_refund_issued");
     if (depositRefundPart) {
       rows.push({
@@ -719,6 +740,13 @@ export async function handleReschedule(request, env) {
 
   const calendar = await updateGhlBookingDates(env, tenant, snapshot, newCheckIn, newCheckOut);
 
+  // Money owed back to the guest that no gateway is going to move: either there
+  // was no capture to refund against (the ghl_invoice gateway, by design) or a
+  // refund was attempted and refused.
+  const manualRefundTotal = round2((settlement.parts || [])
+    .filter(p => p.type.endsWith("_needed_manual") || p.type.endsWith("_failed"))
+    .reduce((s, p) => s + (Number(p.amount) || 0), 0));
+
   await notifyAndRecord(env, snapshot, tenant.ghlRescheduleUrl, {
     event: "booking_rescheduled",
     bookingId: snapshot.bookingId,
@@ -740,6 +768,16 @@ export async function handleReschedule(request, env) {
     invoiceNumber: settlement.invoiceNumber || "",
     adminFeeRetained: (cancellationInfo?.adminFee ?? 0).toFixed(2),
     cancellationTier: cancellationInfo?.tier || "",
+    // What somebody has to DO, not just what happened -- the same pair /cancel
+    // grew on 2026-09-26 and for the same reason. On the ghl_invoice gateway
+    // every refund is issued by hand, so a shortened stay left money owed to a
+    // guest with nothing anywhere saying so: the ledger now reverses the income
+    // either way, and this is how a person finds out there is a payment to make.
+    manualRefundRequired: manualRefundTotal > 0 ? "yes" : "no",
+    manualRefundTotal: manualRefundTotal.toFixed(2),
+    // Separate on purpose: a refund the gateway REFUSED is a fault, not a task,
+    // and a manager reading one as the other would either pay twice or not at all.
+    refundFailed: (settlement.parts || []).some(p => p.type.endsWith("_failed")) ? "yes" : "no",
     propertyName: snapshot.propertyCode || tenant.brandName,
     calendarUpdateRequired: calendar.ok ? "false" : "true"
   });
