@@ -297,7 +297,11 @@ async function handleBookingCreated(request, env) {
         // this invoice is a per-request fact, not a per-client one.
         userId: payload.userId,
         // Required Yes/No on the booking form; "No" drops GHL's Pet Fee line.
-        hasPets: payload.hasPets
+        hasPets: payload.hasPets,
+        // Every other add-on the account has configured as optional, answered
+        // on the same form. The tenant names the fields; the whole validated
+        // payload is handed over so a field added in GHL needs no change here.
+        addOnAnswers: payload
       });
       snapshot.ghlInvoice = { invoiceId, status: "sent", appendedItems: items.length, removedItems, sentAt: new Date().toISOString() };
       gateway = "ghl_invoice";

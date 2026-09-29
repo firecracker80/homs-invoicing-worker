@@ -358,4 +358,87 @@ console.log("10) Stale 'sending' claim: no Worker lines on the invoice -> finish
   console.log("11) Invoice sender: webhook userId wins, tenant fallback saves it, bare failure names both");
 }
 
+// ---- 12. an optional add-on the guest declined, end to end --------
+// GHL charges a listing's add-ons on every booking. The account configures the
+// add-on on the LISTING -- which is what makes GHL name it after the listing,
+// so the right property gets credited -- the form asks, and the line comes off
+// here when the answer is no.
+{
+  let putBody = null;
+  const bundled = async (url, init = {}) => {
+    const u = String(url);
+    const method = init.method || "GET";
+    if (u.includes("/send")) return { ok: true, status: 200, text: async () => "{}" };
+    if (u.includes("/invoices/") && method === "PUT") { putBody = JSON.parse(init.body || "{}"); return { ok: true, status: 200, text: async () => "{}" }; }
+    if (u.includes("/invoices/") && method === "GET") {
+      return { ok: true, status: 200, text: async () => JSON.stringify({
+        invoiceItems: [
+          { name: "Test Villa 2", amount: 405, qty: 1 },
+          { name: "Pet Fee - Test Villa 2", amount: 300, qty: 1 },
+          { name: "Late Checkout - Test Villa 2", amount: 50, qty: 1 },
+          { name: "Late Checkout - Test Villa 3", amount: 40, qty: 1 },
+        ],
+        invoiceNumber: "000030", name: "n", currency: "USD", issueDate: "2026-09-29", dueDate: "2026-10-05",
+      }) };
+    }
+    return { ok: true, status: 200, text: async () => "{}" };
+  };
+
+  const tenant = {
+    ghlPit: "p", invoiceSenderUserId: "u", processingFeePct: 0.06, ownerPct: 0.85,
+    optionalAddOns: [{ field: "hasPets", name: "Pet Fee" }, { field: "wantsLateCheckout", name: "Late Checkout" }],
+  };
+  const freshSnapshot = () => ({
+    bookingId: "b2", stay: { nights: 3, nightlyRate: 135, checkIn: "2026-10-01", checkOut: "2026-10-04" },
+    charges: { rentTotal: 405, cleaningFee: 0, processingFee: 0, feePct: 0.06, grandTotal: 405 },
+    securityDeposit: { total: 0, blocks: [] }, payout: { ownerPct: 0.85 },
+  });
+  const names = () => putBody.invoiceItems.map((i) => i.name);
+
+  // Declined the late check-out, kept the pet.
+  {
+    const snapshot = freshSnapshot();
+    const { removedItems } = await enrichAndSendInvoice({
+      env: {}, locationId: "loc1", invoiceId: "inv2", snapshot, tenant, userId: "u",
+      contact: { id: "c1", name: "G", email: "g@x.com" },
+      hasPets: "Yes", addOnAnswers: { hasPets: "Yes", wantsLateCheckout: "No" },
+    }, bundled);
+
+    assert.equal(removedItems, 2, "both listings' late check-out lines, not just the first");
+    assert.ok(!names().some((n) => /Late Checkout/.test(n)), "and neither survives onto the invoice");
+    assert.ok(names().includes("Pet Fee - Test Villa 2"), "while the pet they did want is untouched");
+    assert.equal(snapshot.payout.basis, 705, "405 of rent plus the 300 pet fee, and nothing for the declined one");
+  }
+
+  // Declined the pet instead -- the same entry, matched through the listing
+  // suffix rather than by the hard-wired pet rule.
+  {
+    const snapshot = freshSnapshot();
+    await enrichAndSendInvoice({
+      env: {}, locationId: "loc1", invoiceId: "inv2", snapshot, tenant, userId: "u",
+      contact: { id: "c1", name: "G", email: "g@x.com" },
+      hasPets: "Yes", addOnAnswers: { hasPets: "No", wantsLateCheckout: "Yes" },
+    }, bundled);
+
+    assert.ok(!names().some((n) => /Pet Fee/.test(n)), "a suffixed pet fee comes off by configuration");
+    assert.equal(snapshot.payout.basis, 495, "405 of rent plus the 50 and 40 of late check-out they kept");
+  }
+
+  // Asked about nothing: charged as configured, and the silence recorded.
+  {
+    const snapshot = freshSnapshot();
+    await enrichAndSendInvoice({
+      env: {}, locationId: "loc1", invoiceId: "inv2", snapshot, tenant, userId: "u",
+      contact: { id: "c1", name: "G", email: "g@x.com" },
+      hasPets: null, addOnAnswers: {},
+    }, bundled);
+
+    assert.equal(names().filter((n) => /Pet Fee|Late Checkout/.test(n)).length, 3, "nothing is dropped on silence");
+    assert.deepStrictEqual(snapshot.unansweredAddOns, ["Pet Fee", "Late Checkout"],
+      "and the form having drifted from the listing is on the record, not only in a log");
+  }
+
+  console.log("12) An add-on the guest declined comes off every listing charging it, and the basis follows");
+}
+
 console.log("\nPASS — all end-to-end assertions held. Existing PayPal-URL flow is provably untouched by this change.");
