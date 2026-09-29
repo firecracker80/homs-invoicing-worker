@@ -145,7 +145,10 @@ function statementHtml({ brandName, recipientLabel, fromLabel, toLabel, stmt }) 
   .wrap { max-width:820px; margin:0 auto; background:#fff; border-radius:16px; padding:36px; box-shadow:0 1px 3px rgba(0,0,0,.06); }
   h1 { font-family:'Space Grotesk',sans-serif; font-weight:700; font-size:1.6rem; margin:0 0 4px; }
   h2 { font-family:'Space Grotesk',sans-serif; font-weight:500; font-size:1.05rem; margin:28px 0 10px; color:var(--ink); }
-  .sub { color:var(--muted); font-size:.9rem; margin-bottom:24px; }
+  .sub { color:var(--muted); font-size:.9rem; margin-bottom:6px; }
+  /* Quieter than the heading and louder than a footnote: a reader should take
+     it in before the total, not discover it afterwards. */
+  .scope-note { color:var(--muted); font-size:.82rem; margin-bottom:24px; }
   .total-card { background:var(--bg); border:1px solid var(--line); border-radius:12px; padding:18px 20px; margin-bottom:8px; }
   .total-card .label { font-size:.8rem; color:var(--muted); text-transform:uppercase; letter-spacing:.03em; }
   .total-card .value { font-family:'Space Grotesk',sans-serif; font-weight:700; font-size:1.8rem; color:var(--teal); }
@@ -164,6 +167,16 @@ function statementHtml({ brandName, recipientLabel, fromLabel, toLabel, stmt }) 
 <body><div class="wrap">
   <h1>${escapeHtml(brandName)}</h1>
   <div class="sub">${escapeHtml(recipientLabel)} statement · ${fromLabel} – ${toLabel}</div>
+  <!--
+    Money from a booking platform goes to the client directly and never passes
+    through GHL, so an OTA booking produces no invoice, no payment and no ledger
+    entry. Every booking on this statement is therefore a direct one.
+
+    Said out loud because an owner with Airbnb income as well is looking at a
+    partial picture with nothing to say so -- and the better HOMS gets at winning
+    direct bookings, the more that gap would read as a decline somewhere else.
+  -->
+  <div class="scope-note">Direct bookings only. Reservations made through a booking platform are paid out by that platform and do not appear here.</div>
 
   <div class="total-card">
     <div class="label">Total earned</div>

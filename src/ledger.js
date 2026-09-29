@@ -38,6 +38,12 @@ import {
 const toMinor = n => Math.round(Number(n) * 100);
 const round2 = n => Math.round(n * 100) / 100;
 
+// The bookingSource values that mean "no platform was involved". composeBooking
+// defaults to "Direct"; the others are what a hand-entered or imported booking
+// tends to carry for the same thing.
+const DIRECT_SOURCES = new Set(["direct", "direct booking", "directo", "website", "manual", ""]);
+const isDirectSource = (source) => DIRECT_SOURCES.has(String(source ?? "").trim().toLowerCase());
+
 // "15.5%", and "15%" rather than "15.0%". This is read by prospects.
 const formatPct = (rate) => `${Number((rate * 100).toFixed(1))}%`;
 
@@ -246,7 +252,13 @@ async function syncRowsToGHL(env, tenant, snapshot, rows, now) {
           consequence: "dashboard shows no property for this booking, and per-property owner/manager names fall back to the account default",
         });
       }
-      if (!otaChannel && snapshot.bookingSource) {
+      // "Direct" is not a channel and never will be: money from a booking
+      // platform goes to the client directly and never passes through GHL, so
+      // an OTA booking produces no invoice and never reaches this code at all.
+      // Every booking that gets here is direct, which made this warn on all of
+      // them -- an unlinked report that fires every time is one nobody reads,
+      // and it was crowding out the property misses that do matter.
+      if (!otaChannel && snapshot.bookingSource && !isDirectSource(snapshot.bookingSource)) {
         unlinked.push({
           object: "custom_objects.ota_channels",
           lookedFor: snapshot.bookingSource,
