@@ -335,7 +335,7 @@ export function resolveAsOf(rawAsOf, nowMs) {
 // One child failing does not stop the rest. A reservation half-cancelled and
 // silent is the worst outcome available here, so each result is reported and
 // the totals are summed from what actually happened.
-async function handleCancelMultiListing(request, env, parent, body) {
+async function handleCancelMultiListing(request, env, parent, body, tenant) {
   const results = [];
   for (const childId of parent.childBookingIds || []) {
     const childRequest = {
@@ -344,18 +344,53 @@ async function handleCancelMultiListing(request, env, parent, body) {
       headers: request.headers,
       json: async () => ({ ...body, bookingId: childId }),
     };
+    let result;
     try {
-      const res = await handleCancel(childRequest, env);
+      // The listing prices and cancels itself, but it neither notifies nor
+      // voids: one guest cancelled one reservation, and one invoice covers it.
+      const res = await handleCancel(childRequest, env, { notify: false, voidInvoice: false });
       const outcome = await res.json();
-      results.push({ bookingId: childId, status: res.status, ...outcome });
+      result = { bookingId: childId, status: res.status, ...outcome };
     } catch (err) {
       console.error(`Multi-listing cancel failed for ${childId}: ${err.message}`);
-      results.push({ bookingId: childId, status: 500, error: err.message });
+      result = { bookingId: childId, status: 500, error: err.message };
     }
+    // Read back for the parts of a listing the cancellation response does not
+    // carry -- which property it was and when it started -- so the one
+    // notification can name them.
+    const child = await env.BOOKINGS.get(childId, { type: "json" }).catch(() => null);
+    result.propertyCode = child?.propertyCode || null;
+    result.checkIn = child?.stay?.checkIn || null;
+    results.push(result);
   }
 
   const priced = results.filter((r) => r.calculation);
   const sumOf = (pick) => round2(priced.reduce((s, r) => s + (Number(pick(r)) || 0), 0));
+  const anyPaid = results.some((r) => r.paid === true);
+  const manualRefunds = results.flatMap((r) => r.manualRefunds || []);
+  const manualRefundTotal = round2(manualRefunds.reduce((s, m) => s + (Number(m.amount) || 0), 0));
+  const chargeTotal = sumOf((r) => r.calculation.charge);
+  const refundTotal = sumOf((r) => r.calculation.totalRefund);
+
+  // The reservation's one invoice, voided once, here.
+  //
+  // It lives on the parent, and the children were each trying to void an
+  // invoice they do not hold -- so on a bundled reservation the invoice sitting
+  // in the guest's inbox stayed live and payable after cancellation. That is
+  // the hole #71 closed for single bookings, still open for bundles. Attempted
+  // only when nothing was paid: voidInvoice refuses a paid invoice anyway,
+  // since voiding one would hide a refund that is owed.
+  if (!anyPaid) {
+    parent.invoiceVoid = await voidInvoice({
+      tenant, env, locationId: parent.locationId, invoiceId: parent.ghlInvoice?.invoiceId,
+    });
+    if (!parent.invoiceVoid.ok) {
+      console.error(
+        `Could not void invoice for cancelled reservation ${parent.bookingId}: ` +
+        `${parent.invoiceVoid.reason} ${parent.invoiceVoid.detail || ""}`
+      );
+    }
+  }
 
   parent.cancelled = true;
   parent.cancellation = {
@@ -363,19 +398,68 @@ async function handleCancelMultiListing(request, env, parent, body) {
     reason: body.reason || "",
     listings: results.map((r) => ({
       bookingId: r.bookingId, status: r.status,
-      tier: r.calculation?.tier ?? null,
+      propertyCode: r.propertyCode ?? null,
+      tier: r.calculation?.tier ?? (r.cancelled ? "unpaid_void" : null),
       charge: r.calculation?.charge ?? null,
       refund: r.calculation?.totalRefund ?? null,
     })),
-    chargeTotal: sumOf((r) => r.calculation.charge),
-    refundTotal: sumOf((r) => r.calculation.totalRefund),
-    manualRefundTotal: round2(results
-      .flatMap((r) => r.manualRefunds || [])
-      .reduce((s, m) => s + (Number(m.amount) || 0), 0)),
+    chargeTotal,
+    refundTotal,
+    manualRefundTotal,
   };
   await env.BOOKINGS.put(parent.bookingId, JSON.stringify(parent));
 
   const failed = results.filter((r) => r.status >= 400);
+
+  // One reservation, one notification.
+  //
+  // The guest booked once and cancelled once. Notifying per listing sent two
+  // cancellation emails a second apart for one cancellation -- seen on
+  // DEMO-HOMS 3at3yw3tMEYQ1MWGfHFM -- and told the manager nothing about the
+  // reservation as a whole, only about each half of it in isolation.
+  //
+  // Same field names the single-listing notify uses, so one GHL mapping reads
+  // both. The bundled fields are additive: a workflow that ignores them behaves
+  // exactly as it does today.
+  const tiers = [...new Set(parent.cancellation.listings.map((l) => l.tier).filter(Boolean))];
+  const pcts = [...new Set(priced.map((r) => Math.round(r.calculation.chargePct * 100)))];
+
+  await notifyAndRecord(env, parent, tenant.ghlCancellationUrl, {
+    event: "booking_cancelled", bookingId: parent.bookingId,
+    contactId: parent.ghlContactId || "",
+    email: parent.guest?.email || "", paid: anyPaid,
+    guestName: parent.guest?.name || "",
+    // Listings can land in different tiers -- a guest already checked into the
+    // first and not yet started the second is the case the per-listing
+    // snapshots exist for -- so this names every tier the reservation is in.
+    tier: tiers.join(" + "),
+    // Blank rather than misleading when the legs disagree. One percentage
+    // merged into an email would be wrong for at least one of them, and the
+    // money is in chargeTotal either way.
+    chargePct: pcts.length === 1 ? String(pcts[0]) : "",
+    chargeTotal: chargeTotal.toFixed(2),
+    refundTotal: refundTotal.toFixed(2),
+    depositRefund: sumOf((r) => r.calculation.depositRefund).toFixed(2),
+    manualRefundRequired: manualRefundTotal > 0 ? "yes" : "no",
+    manualRefundTotal: manualRefundTotal.toFixed(2),
+    manualRefundDetail: manualRefunds.length
+      ? manualRefunds.map((r) => `${MANUAL_REFUND_LABELS[r.type] || r.type} ${Number(r.amount).toFixed(2)}`).join(", ")
+      : "",
+    refundFailed: results.some((r) => (r.refundFailures || []).length > 0) ? "yes" : "no",
+    checkIn: parent.stayRange?.checkIn || "",
+    propertyName: results.map((r) => r.propertyCode).filter(Boolean).join(" + ") || tenant.brandName || "",
+    multiListing: "yes",
+    listingCount: String(results.length),
+    // What a person reading it has to know: which property, from when, in which
+    // tier, and what is owed on it.
+    listingDetail: results
+      .map((r) => `${r.propertyCode || r.bookingId} ${r.checkIn || ""}: ` +
+        `${r.calculation?.tier ?? (r.cancelled ? "unpaid_void" : "not cancelled")}, ` +
+        `refund ${Number(r.calculation?.totalRefund || 0).toFixed(2)}`)
+      .join("; "),
+    // Named rather than counted, the same way the HTTP response names them.
+    failedListings: failed.map((r) => r.propertyCode || r.bookingId).join(", "),
+  });
   return json({
     cancelled: true,
     multiListing: true,
@@ -387,7 +471,13 @@ async function handleCancelMultiListing(request, env, parent, body) {
   }, failed.length ? 207 : 200);
 }
 
-export async function handleCancel(request, env) {
+// opts is for the bundled fan-out below, not for callers on the wire. A child
+// of a bundled reservation must not notify (the reservation notifies once, for
+// itself) and must not try to void an invoice it does not hold (the parent
+// holds it). Deliberately a parameter rather than a field on the body: the body
+// arrives from outside, and nothing outside gets to switch off a guest's
+// cancellation notice.
+export async function handleCancel(request, env, { notify = true, voidInvoice: shouldVoid = true } = {}) {
   const ctx = await loadContext(request, env);
   if (ctx.error) return ctx.error;
   const { body, snapshot, tenant } = ctx;
@@ -399,7 +489,7 @@ export async function handleCancel(request, env) {
   // the first listing and not yet started the second lands in the checked-in
   // tier for one and an ordinary tier for the other, with no branch knowing it.
   if (isMultiListingParent(snapshot)) {
-    return handleCancelMultiListing(request, env, snapshot, body);
+    return handleCancelMultiListing(request, env, snapshot, body, tenant);
   }
 
   if (snapshot.cancelled) return json({ alreadyCancelled: true, cancellation: snapshot.cancellation });
@@ -427,26 +517,36 @@ export async function handleCancel(request, env) {
     // Never fails the cancellation. The booking is cancelled either way; an
     // invoice that could not be closed is a fact to report, not a reason to
     // leave the cancellation half-done.
-    snapshot.invoiceVoid = await voidInvoice({
-      tenant, env, locationId: snapshot.locationId, invoiceId: snapshot.ghlInvoice?.invoiceId,
-    });
-    if (!snapshot.invoiceVoid.ok) {
-      console.error(
-        `Could not void invoice for cancelled booking ${snapshot.bookingId}: ` +
-        `${snapshot.invoiceVoid.reason} ${snapshot.invoiceVoid.detail || ""}`
-      );
+    //
+    // Skipped for a listing inside a bundled reservation. One invoice covers
+    // the whole reservation and lives on the parent, so each child voiding
+    // "its" invoice meant two attempts at nothing -- both recording
+    // no_invoice_on_booking, which reads as a fault -- while the invoice the
+    // guest could still pay was never touched. The parent voids it once.
+    if (shouldVoid) {
+      snapshot.invoiceVoid = await voidInvoice({
+        tenant, env, locationId: snapshot.locationId, invoiceId: snapshot.ghlInvoice?.invoiceId,
+      });
+      if (!snapshot.invoiceVoid.ok) {
+        console.error(
+          `Could not void invoice for cancelled booking ${snapshot.bookingId}: ` +
+          `${snapshot.invoiceVoid.reason} ${snapshot.invoiceVoid.detail || ""}`
+        );
+      }
     }
 
     await env.BOOKINGS.put(snapshot.bookingId, JSON.stringify(snapshot));
     // No Transaction record exists yet for an unpaid booking, and no money
     // moved -- nothing to write to D1 or GHL here.
-    await notifyAndRecord(env, snapshot, tenant.ghlCancellationUrl, {
-      event: "booking_cancelled", bookingId: snapshot.bookingId,
-      contactId: snapshot.ghlContactId || "",
-      email: snapshot.guest?.email || "", paid: false,
-      refundTotal: "0.00", chargeTotal: "0.00",
-      checkIn: snapshot.stay.checkIn, propertyName: snapshot.propertyCode || tenant.brandName
-    });
+    if (notify) {
+      await notifyAndRecord(env, snapshot, tenant.ghlCancellationUrl, {
+        event: "booking_cancelled", bookingId: snapshot.bookingId,
+        contactId: snapshot.ghlContactId || "",
+        email: snapshot.guest?.email || "", paid: false,
+        refundTotal: "0.00", chargeTotal: "0.00",
+        checkIn: snapshot.stay.checkIn, propertyName: snapshot.propertyCode || tenant.brandName
+      });
+    }
     return json({ cancelled: true, paid: false, refunds: null });
   }
 
@@ -620,7 +720,7 @@ export async function handleCancel(request, env) {
   // easier to get right than one branching on a number that might be "0.00".
   const manualRefundTotal = round2(manualRefunds.reduce((sum, r) => sum + (Number(r.amount) || 0), 0));
 
-  await notifyAndRecord(env, snapshot, tenant.ghlCancellationUrl, {
+  if (notify) await notifyAndRecord(env, snapshot, tenant.ghlCancellationUrl, {
     event: "booking_cancelled", bookingId: snapshot.bookingId,
     contactId: snapshot.ghlContactId || "",
     email: snapshot.guest?.email || "", paid: true,
