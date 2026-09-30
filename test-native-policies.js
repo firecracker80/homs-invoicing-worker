@@ -88,7 +88,7 @@ async function enrich(hasPets, items, tenant = native) {
     { name: "Pet Fee", amount: 25, qty: 1, currency: "USD" }
   ];
   const no = await enrich("No", ghlItems);
-  assert.deepEqual(no.names, ["Estadía", "Cleaning Fee", "Cargo por procesamiento / Processing fee"], "No -> Pet Fee dropped; nothing else touched, no cleaning appended");
+  assert.deepEqual(no.names, ["Estadía", "Cleaning Fee", "Cargo por procesamiento"], "No -> Pet Fee dropped; nothing else touched, no cleaning appended");
   assert.equal(no.out.removedItems, 1);
   assert.equal(no.snapshot.charges.cleaningFee, 45, "GHL's own cleaning line is recorded for the owner/manager split");
   assert.equal(no.snapshot.charges.cleaningFeeSource, "ghl_native");
@@ -102,7 +102,7 @@ async function enrich(hasPets, items, tenant = native) {
   assert.ok(renamed.names.includes("Pet cleaning"), "a different fee that mentions pets is kept");
 
   const spanish = await enrich("No", [{ name: "Estadía", amount: 100, qty: 2 }, { name: "Tarifa por Mascota", amount: 25, qty: 1 }]);
-  assert.deepEqual(spanish.names, ["Estadía", "Cargo por procesamiento / Processing fee"], "Spanish pet fee dropped on No");
+  assert.deepEqual(spanish.names, ["Estadía", "Cargo por procesamiento"], "Spanish pet fee dropped on No");
 
   for (const n of ["Pet Fee", " PET FEE ", "Tarifa por mascota", "Cargo por Mascotas", "Mascota", "Pet Fee / Tarifa por mascota", "Cargo de mascota - Pet fee", "Tarifa de mascóta"])
     assert.ok(isPetFeeName(n), `"${n}" is the pet fee`);
@@ -117,7 +117,7 @@ async function enrich(hasPets, items, tenant = native) {
   ]);
   assert.equal(inv5.snapshot.charges.rentTotal, 135, "rent comes from GHL's stay line, not stayTotal");
   assert.equal(inv5.snapshot.charges.processingFee, 12, "6% of the whole invoice after the pet check: 6% of 200");
-  assert.equal(inv5.items.find(i => /Processing fee/.test(i.name)).amount, 12, "the appended fee line carries the repriced fee");
+  assert.equal(inv5.items.find(i => /procesamiento/i.test(i.name)).amount, 12, "the appended fee line carries the repriced fee");
   assert.equal(inv5.snapshot.charges.grandTotal, 212);
   assert.deepEqual([inv5.snapshot.payout.basis, inv5.snapshot.payout.owner, inv5.snapshot.payout.manager], [135, 114.75, 20.25], "split follows the real rent");
   assert.equal(inv5.snapshot.stay.nightlyRate, 135);
