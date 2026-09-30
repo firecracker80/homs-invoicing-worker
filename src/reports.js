@@ -71,66 +71,211 @@ function resolveWindow(url) {
   return { from: `${from}T00:00:00.000Z`, to: toExclusive.toISOString(), fromLabel: from, toLabel: to };
 }
 
-// What a client reads, rather than what the database calls it.
+// What a client reads, rather than what the database calls it -- in the
+// language that client reads it in.
 //
 // The summary table printed entry_type and category raw -- "rent_split_owner",
 // "cancellation_rent_refund_manager", "pass_through". We know what those mean;
 // an owner opening their statement does not, and a statement that needs
 // explaining is one the manager has to explain (Yari, 2026-09-30).
 //
-// Every type the code can write is here. An unrecognised one falls back to its
-// slug with the underscores knocked out, so a type added later reads as
-// something rather than as nothing, and this list is never load-bearing for
-// correctness -- only for how it looks.
+// Those labels then landed in English on a product whose clients are in the
+// Dominican Republic, which made the statement readable to us and not to them
+// (Yari, 2026-09-30). A statement is the one artefact an owner opens alone,
+// with nobody beside them to translate it, so its language is not a polish
+// item -- it decides whether the document works at all.
+//
+// Every type the code can write is here, in every locale. An unrecognised type
+// falls back to English and then to its slug with the underscores knocked out,
+// so a type added later reads as something rather than as nothing, and none of
+// this is ever load-bearing for correctness -- only for how it reads.
 const ENTRY_LABELS = {
-  rent_split_owner: "Rent — owner share",
-  rent_split_manager: "Rent — manager share",
-  cleaning_fee: "Cleaning fee",
-  processing_fee: "Payment processing fee",
-  deposit_held: "Security deposit held",
+  en: {
+    rent_split_owner: "Rent — owner share",
+    rent_split_manager: "Rent — manager share",
+    cleaning_fee: "Cleaning fee",
+    processing_fee: "Payment processing fee",
+    deposit_held: "Security deposit held",
 
-  cancellation_charge_owner: "Cancellation charge — owner share",
-  cancellation_charge_manager: "Cancellation charge — manager share",
-  cancellation_rent_refund_owner: "Rent refunded on cancellation — owner share",
-  cancellation_rent_refund_manager: "Rent refunded on cancellation — manager share",
-  cancellation_cleaning_refund: "Cleaning fee refunded on cancellation",
-  cancellation_deposit_refund: "Security deposit returned",
+    cancellation_charge_owner: "Cancellation charge — owner share",
+    cancellation_charge_manager: "Cancellation charge — manager share",
+    cancellation_rent_refund_owner: "Rent refunded on cancellation — owner share",
+    cancellation_rent_refund_manager: "Rent refunded on cancellation — manager share",
+    cancellation_cleaning_refund: "Cleaning fee refunded on cancellation",
+    cancellation_deposit_refund: "Security deposit returned",
 
-  reschedule_admin_fee_owner: "Date-change fee — owner share",
-  reschedule_admin_fee_manager: "Date-change fee — manager share",
-  reschedule_charge_owner: "Additional rent from date change — owner share",
-  reschedule_charge_manager: "Additional rent from date change — manager share",
-  reschedule_refund_owner: "Rent refunded on date change — owner share",
-  reschedule_refund_manager: "Rent refunded on date change — manager share",
+    reschedule_admin_fee_owner: "Date-change fee — owner share",
+    reschedule_admin_fee_manager: "Date-change fee — manager share",
+    reschedule_charge_owner: "Additional rent from date change — owner share",
+    reschedule_charge_manager: "Additional rent from date change — manager share",
+    reschedule_refund_owner: "Rent refunded on date change — owner share",
+    reschedule_refund_manager: "Rent refunded on date change — manager share",
 
-  deposit_refund_inspection: "Security deposit returned after inspection",
-  deposit_claim_retained: "Security deposit retained for damages",
-  shadow_ota_commission: "Booking platform commission — informational",
-  other: "Other",
+    deposit_refund_inspection: "Security deposit returned after inspection",
+    deposit_claim_retained: "Security deposit retained for damages",
+    shadow_ota_commission: "Booking platform commission — informational",
+    other: "Other",
+  },
+  // Formal (usted) throughout, and matching the words the Spanish guest-side
+  // GHL templates already use -- "Limpieza", "Depósito", "Tarifa de
+  // Procesamiento" -- so an owner who reads both does not meet two different
+  // names for one charge.
+  es: {
+    rent_split_owner: "Alquiler — parte del propietario",
+    rent_split_manager: "Alquiler — parte del administrador",
+    cleaning_fee: "Tarifa de limpieza",
+    processing_fee: "Tarifa de procesamiento de pago",
+    deposit_held: "Depósito de garantía retenido",
+
+    cancellation_charge_owner: "Cargo por cancelación — parte del propietario",
+    cancellation_charge_manager: "Cargo por cancelación — parte del administrador",
+    cancellation_rent_refund_owner: "Alquiler reembolsado por cancelación — parte del propietario",
+    cancellation_rent_refund_manager: "Alquiler reembolsado por cancelación — parte del administrador",
+    cancellation_cleaning_refund: "Tarifa de limpieza reembolsada por cancelación",
+    cancellation_deposit_refund: "Depósito de garantía devuelto",
+
+    reschedule_admin_fee_owner: "Cargo por cambio de fechas — parte del propietario",
+    reschedule_admin_fee_manager: "Cargo por cambio de fechas — parte del administrador",
+    reschedule_charge_owner: "Alquiler adicional por cambio de fechas — parte del propietario",
+    reschedule_charge_manager: "Alquiler adicional por cambio de fechas — parte del administrador",
+    reschedule_refund_owner: "Alquiler reembolsado por cambio de fechas — parte del propietario",
+    reschedule_refund_manager: "Alquiler reembolsado por cambio de fechas — parte del administrador",
+
+    deposit_refund_inspection: "Depósito de garantía devuelto tras la inspección",
+    deposit_claim_retained: "Depósito de garantía retenido por daños",
+    shadow_ota_commission: "Comisión de plataforma de reservas — informativo",
+    other: "Otro",
+  },
 };
 
 // "liability" is the guest's own money sitting with the client, and "shadow" is
 // a number recorded for reference and deliberately excluded from the totals.
 // Neither word means that to anybody outside this codebase.
 const CATEGORY_LABELS = {
-  income: "Income",
-  pass_through: "Passed through",
-  liability: "Held",
-  shadow: "Informational",
+  en: { income: "Income", pass_through: "Passed through", liability: "Held", shadow: "Informational" },
+  es: { income: "Ingreso", pass_through: "Transferido", liability: "Retenido", shadow: "Informativo" },
 };
+
+// The statement's own chrome -- headings, column headers, and the notes that
+// say what is and is not counted. Left in English these would leave a Spanish
+// statement half translated, which reads worse than either language alone.
+const UI = {
+  en: {
+    statementHeading: { owner: "Owner statement", manager: "Manager statement" },
+    directOnly: "Direct bookings only. Reservations made through a booking platform are paid out by that platform and do not appear here.",
+    totalEarned: "Total earned",
+    otaNote: (cur, amt) => `A comparable OTA commission on this period&rsquo;s bookings would have been ${cur} ${amt}.`,
+    byType: "By type",
+    detail: "Detail",
+    thEntryType: "Entry type",
+    thCategory: "Category",
+    thTotal: "Total",
+    thCount: "Count",
+    thDate: "Date",
+    thBooking: "Booking",
+    thDescription: "Description",
+    thAmount: "Amount",
+    noEntries: "No entries in this period.",
+
+    plTitle: "Manager P&amp;L",
+    plPeriod: (from, to) => `${from} to ${to}`,
+    plIncome: "Income from bookings",
+    plExpenses: "Expenses",
+    plNet: "Net",
+    plNote: (amt) => `Expenses count only the share the manager cannot recover (amount less Can Reimburse).
+      ${amt} is recoverable from owners and is not treated as a cost here.`,
+    plByCategory: "Expenses by category",
+    plNoExpenses: "No approved expenses in this period.",
+    warnMixedCurrency: (seen) => `<strong>The ledger holds more than one currency for this manager.</strong>
+      Income is not totalled, because adding them would give a number that cannot be right: ${seen}.`,
+    warnUnconverted: (n) => `<strong>${n} expense(s) are in another currency with no converted amount</strong>
+      and are left out of the total. Converting them by guesswork would be a wrong number that looks right.`,
+    warnUnapproved: (n) => `<strong>${n} expense(s) still say &ldquo;Needs Review&rdquo;</strong>
+      and are not in the total yet.`,
+    warnNoAmount: (n) => `<strong>${n} expense(s) have no amount</strong> and cannot be counted.`,
+    warnUndated: (n) => `<strong>${n} expense(s) have no Paid On date</strong>, so they fall
+      into no period at all and will appear on no statement until one is set.`,
+  },
+  es: {
+    statementHeading: { owner: "Estado de cuenta del propietario", manager: "Estado de cuenta del administrador" },
+    directOnly: "Solo reservas directas. Las reservas hechas a través de una plataforma las paga esa plataforma y no aparecen aquí.",
+    totalEarned: "Total generado",
+    otaNote: (cur, amt) => `La comisión equivalente de una plataforma sobre las reservas de este período habría sido ${cur} ${amt}.`,
+    byType: "Por concepto",
+    detail: "Detalle",
+    thEntryType: "Concepto",
+    thCategory: "Categoría",
+    thTotal: "Total",
+    thCount: "Cantidad",
+    thDate: "Fecha",
+    thBooking: "Reserva",
+    thDescription: "Descripción",
+    thAmount: "Monto",
+    noEntries: "No hay movimientos en este período.",
+
+    plTitle: "Estado de resultados del administrador",
+    plPeriod: (from, to) => `del ${from} al ${to}`,
+    plIncome: "Ingresos por reservas",
+    plExpenses: "Gastos",
+    plNet: "Neto",
+    plNote: (amt) => `Los gastos cuentan solo la parte que el administrador no puede recuperar (monto menos Reembolsable).
+      ${amt} es recuperable de los propietarios y no se trata como costo aquí.`,
+    plByCategory: "Gastos por categoría",
+    plNoExpenses: "No hay gastos aprobados en este período.",
+    warnMixedCurrency: (seen) => `<strong>El libro contable tiene más de una moneda para este administrador.</strong>
+      Los ingresos no se suman, porque sumarlos daría una cifra que no puede ser correcta: ${seen}.`,
+    warnUnconverted: (n) => `<strong>${n} gasto(s) están en otra moneda sin monto convertido</strong>
+      y quedan fuera del total. Convertirlos por estimación daría una cifra incorrecta con apariencia de correcta.`,
+    warnUnapproved: (n) => `<strong>${n} gasto(s) siguen marcados como &ldquo;Needs Review&rdquo;</strong>
+      y todavía no están en el total.`,
+    warnNoAmount: (n) => `<strong>${n} gasto(s) no tienen monto</strong> y no pueden contarse.`,
+    warnUndated: (n) => `<strong>${n} gasto(s) no tienen fecha de pago</strong>, así que no caen
+      en ningún período y no aparecerán en ningún estado de cuenta hasta que se les asigne una.`,
+  },
+};
+
+export const STATEMENT_LOCALES = Object.keys(UI);
+
+// Amounts keep the same "USD 1234.56" shape in every locale, deliberately.
+// Spanish convention swaps the separators, and a point where the reader expects
+// a comma turns 1.234,56 into 1234.56 or the reverse -- a misread of three
+// orders of magnitude, on a document whose entire job is a number. An
+// unambiguous format in both languages beats an idiomatic one in each. Dates
+// stay ISO for the same reason: 03/10 is two different days either side of the
+// Atlantic.
 
 const titleCase = (slug) => {
   const s = String(slug || "").replace(/_/g, " ").trim();
   return s ? s[0].toUpperCase() + s.slice(1) : "";
 };
 
-export const entryLabel = (entryType) => ENTRY_LABELS[entryType] || titleCase(entryType);
+// ?lang= wins, so a GHL merge tag can set the language per send on an account
+// with owners who read in different ones; then the tenant's own setting; then
+// English. A merge tag GHL failed to resolve arrives as the literal "{{...}}",
+// and an unknown locale is a typo in a hand-edited registry entry -- both land
+// on English rather than on a half-rendered page.
+export function resolveLocale(url, tenant) {
+  const raw = String(
+    url?.searchParams?.get("lang") || tenant?.statementLocale || tenant?.locale || tenant?.language || ""
+  ).trim().toLowerCase();
+  if (!raw) return "en";
+  const base = raw.split(/[-_]/)[0];
+  if (STATEMENT_LOCALES.includes(base)) return base;
+  if (/^(espa|spanish)/.test(raw)) return "es";
+  return "en";
+}
+
+const strings = (locale) => UI[locale] || UI.en;
+
+export const entryLabel = (entryType, locale = "en") =>
+  ENTRY_LABELS[locale]?.[entryType] || ENTRY_LABELS.en[entryType] || titleCase(entryType);
 // Exported so a test can assert this list keeps pace with the entry types the
 // code writes, rather than inferring coverage from the label's text -- which
 // gives a false alarm on any label that happens to match its own slug
 // ("cleaning_fee" -> "Cleaning fee").
-export const LABELLED_ENTRY_TYPES = new Set(Object.keys(ENTRY_LABELS));
-export const categoryLabel = (category) => CATEGORY_LABELS[category] || titleCase(category);
+export const LABELLED_ENTRY_TYPES = new Set(Object.keys(ENTRY_LABELS.en));
+export const categoryLabel = (category, locale = "en") =>
+  CATEGORY_LABELS[locale]?.[category] || CATEGORY_LABELS.en[category] || titleCase(category);
 
 async function queryStatement(env, locationId, recipient, from, to, recipientName) {
   // recipientName is optional -- a tenant with one owner and one manager
@@ -175,27 +320,28 @@ async function queryStatement(env, locationId, recipient, from, to, recipientNam
   return { summary, detail, incomeTotal, shadowTotal, currency: detail[0]?.currency || summary[0]?.currency || "USD" };
 }
 
-function statementHtml({ brandName, recipientLabel, fromLabel, toLabel, stmt }) {
+function statementHtml({ brandName, heading, recipientName, fromLabel, toLabel, stmt, locale = "en" }) {
+  const t = strings(locale);
   const rows = stmt.detail.map(d => `
     <tr>
       <td>${d.createdAt.slice(0, 10)}</td>
       <td>${escapeHtml(d.bookingId)}</td>
-      <td>${escapeHtml(d.description || entryLabel(d.entryType))}</td>
-      <td class="cat cat-${d.category}">${categoryLabel(d.category)}</td>
+      <td>${escapeHtml(d.description || entryLabel(d.entryType, locale))}</td>
+      <td class="cat cat-${d.category}">${categoryLabel(d.category, locale)}</td>
       <td class="amt">${d.currency} ${d.amount.toFixed(2)}</td>
     </tr>`).join("");
 
   const summaryRows = stmt.summary.map(s => `
     <tr>
-      <td>${escapeHtml(entryLabel(s.entryType))}</td>
-      <td class="cat cat-${s.category}">${categoryLabel(s.category)}</td>
+      <td>${escapeHtml(entryLabel(s.entryType, locale))}</td>
+      <td class="cat cat-${s.category}">${categoryLabel(s.category, locale)}</td>
       <td class="amt">${s.currency} ${s.total.toFixed(2)}</td>
       <td class="amt muted">${s.count}</td>
     </tr>`).join("");
 
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8">
+  return `<!doctype html><html lang="${locale}"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>${escapeHtml(recipientLabel)} statement — ${escapeHtml(brandName)}</title>
+<title>${escapeHtml(heading)} — ${escapeHtml(brandName)}</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Manrope:wght@400;600&display=swap" rel="stylesheet">
@@ -227,7 +373,7 @@ function statementHtml({ brandName, recipientLabel, fromLabel, toLabel, stmt }) 
 </style></head>
 <body><div class="wrap">
   <h1>${escapeHtml(brandName)}</h1>
-  <div class="sub">${escapeHtml(recipientLabel)} statement · ${fromLabel} – ${toLabel}</div>
+  <div class="sub">${escapeHtml(heading)}${recipientName ? ` · ${escapeHtml(recipientName)}` : ""} · ${fromLabel} – ${toLabel}</div>
   <!--
     Money from a booking platform goes to the client directly and never passes
     through GHL, so an OTA booking produces no invoice, no payment and no ledger
@@ -237,21 +383,21 @@ function statementHtml({ brandName, recipientLabel, fromLabel, toLabel, stmt }) 
     partial picture with nothing to say so -- and the better HOMS gets at winning
     direct bookings, the more that gap would read as a decline somewhere else.
   -->
-  <div class="scope-note">Direct bookings only. Reservations made through a booking platform are paid out by that platform and do not appear here.</div>
+  <div class="scope-note">${t.directOnly}</div>
 
   <div class="total-card">
-    <div class="label">Total earned</div>
+    <div class="label">${t.totalEarned}</div>
     <div class="value">${stmt.currency} ${stmt.incomeTotal.toFixed(2)}</div>
-    ${stmt.shadowTotal > 0 ? `<div class="shadow-note">A comparable OTA commission on this period's bookings would have been ${stmt.currency} ${stmt.shadowTotal.toFixed(2)}.</div>` : ""}
+    ${stmt.shadowTotal > 0 ? `<div class="shadow-note">${t.otaNote(stmt.currency, stmt.shadowTotal.toFixed(2))}</div>` : ""}
   </div>
 
-  <h2>By type</h2>
-  <table><thead><tr><th>Entry type</th><th>Category</th><th>Total</th><th>Count</th></tr></thead>
-  <tbody>${summaryRows || `<tr><td colspan="4" class="muted">No entries in this period.</td></tr>`}</tbody></table>
+  <h2>${t.byType}</h2>
+  <table><thead><tr><th>${t.thEntryType}</th><th>${t.thCategory}</th><th>${t.thTotal}</th><th>${t.thCount}</th></tr></thead>
+  <tbody>${summaryRows || `<tr><td colspan="4" class="muted">${t.noEntries}</td></tr>`}</tbody></table>
 
-  <h2>Detail</h2>
-  <table><thead><tr><th>Date</th><th>Booking</th><th>Description</th><th>Category</th><th>Amount</th></tr></thead>
-  <tbody>${rows || `<tr><td colspan="5" class="muted">No entries in this period.</td></tr>`}</tbody></table>
+  <h2>${t.detail}</h2>
+  <table><thead><tr><th>${t.thDate}</th><th>${t.thBooking}</th><th>${t.thDescription}</th><th>${t.thCategory}</th><th>${t.thAmount}</th></tr></thead>
+  <tbody>${rows || `<tr><td colspan="5" class="muted">${t.noEntries}</td></tr>`}</tbody></table>
 </div></body></html>`;
 }
 
@@ -259,7 +405,7 @@ function escapeHtml(s) {
   return String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
-async function handleStatement(request, env, recipient, recipientLabel, tokenField) {
+async function handleStatement(request, env, recipient, tokenField) {
   const url = new URL(request.url);
   const locationId = url.searchParams.get("locationId");
   if (!locationId) return json({ error: "locationId is required" }, 400);
@@ -270,9 +416,10 @@ async function handleStatement(request, env, recipient, recipientLabel, tokenFie
   if (!env.LEDGER_DB) return json({ error: "Ledger not configured (LEDGER_DB binding missing)" }, 500);
 
   const { from, to, fromLabel, toLabel } = resolveWindow(url);
+  const locale = resolveLocale(url, tenant);
   const recipientName = url.searchParams.get("recipientName") || null;
   const stmt = await queryStatement(env, locationId, recipient, from, to, recipientName);
-  const label = recipientName ? `${recipientLabel} — ${recipientName}` : recipientLabel;
+  const heading = strings(locale).statementHeading[recipient];
 
   // brandName can come from the URL (a GHL merge tag like
   // {{custom_values.wbrand_name}} resolves there, since that field is
@@ -281,16 +428,16 @@ async function handleStatement(request, env, recipient, recipientLabel, tokenFie
   const brandName = url.searchParams.get("brandName") || tenant.brandName || locationId;
 
   if ((url.searchParams.get("format") || "html") === "json") {
-    return json({ locationId, recipient, recipientName, from: fromLabel, to: toLabel, ...stmt });
+    return json({ locationId, recipient, recipientName, locale, from: fromLabel, to: toLabel, ...stmt });
   }
-  return html(statementHtml({ brandName, recipientLabel: label, fromLabel, toLabel, stmt }));
+  return html(statementHtml({ brandName, heading, recipientName, fromLabel, toLabel, stmt, locale }));
 }
 
 export async function handleOwnerStatement(request, env) {
-  return handleStatement(request, env, "owner", "Owner", "ownerReportToken");
+  return handleStatement(request, env, "owner", "ownerReportToken");
 }
 export async function handleManagerStatement(request, env) {
-  return handleStatement(request, env, "manager", "Manager", "managerReportToken");
+  return handleStatement(request, env, "manager", "managerReportToken");
 }
 
 // --- manager P&L -----------------------------------------------------------
@@ -310,6 +457,7 @@ export async function handleManagerPL(request, env) {
   if (!pit) return json({ error: "No GHL PIT configured for this tenant -- expenses cannot be read" }, 500);
 
   const { from, to, fromLabel, toLabel } = resolveWindow(url);
+  const locale = resolveLocale(url, tenant);
   const recipientName = url.searchParams.get("recipientName") || null;
   const reportCurrency = (url.searchParams.get("currency") || tenant.currency || "USD").toUpperCase();
 
@@ -322,9 +470,9 @@ export async function handleManagerPL(request, env) {
     const brandName = url.searchParams.get("brandName") || tenant.brandName || locationId;
 
     if ((url.searchParams.get("format") || "html") === "json") {
-      return json({ locationId, from: fromLabel, to: toLabel, recipientName, ...pl });
+      return json({ locationId, from: fromLabel, to: toLabel, recipientName, locale, ...pl });
     }
-    return html(managerPlHtml({ brandName, fromLabel, toLabel, pl }));
+    return html(managerPlHtml({ brandName, fromLabel, toLabel, pl, locale }));
   } catch (err) {
     return json({ error: err.message || "Unknown error" }, err.status && err.status >= 400 && err.status < 600 ? err.status : 502);
   }
@@ -332,7 +480,8 @@ export async function handleManagerPL(request, env) {
 
 const money = (n, cur) => `${cur} ${n < 0 ? "-" : ""}${Math.abs(n).toFixed(2)}`;
 
-function managerPlHtml({ brandName, fromLabel, toLabel, pl }) {
+function managerPlHtml({ brandName, fromLabel, toLabel, pl, locale = "en" }) {
+  const t = strings(locale);
   const cur = pl.currency;
   const rows = pl.byCategory.map((c) =>
     `<tr><td>${escapeHtml(c.label)}</td><td class="n">${c.count}</td><td class="n">${money(c.total, cur)}</td></tr>`).join("");
@@ -342,33 +491,29 @@ function managerPlHtml({ brandName, fromLabel, toLabel, pl }) {
   const warn = [];
   if (pl.mixedIncomeCurrency) {
     const seen = pl.incomeByCurrency.map((c) => `${c.currency} ${c.total.toFixed(2)}`).join(", ");
-    warn.push(`<p class="warn"><strong>The ledger holds more than one currency for this manager.</strong>
-      Income is not totalled, because adding them would give a number that cannot be right: ${escapeHtml(seen)}.</p>`);
+    warn.push(`<p class="warn">${t.warnMixedCurrency(escapeHtml(seen))}</p>`);
   }
   const unconverted = pl.excluded.filter((e) => e.issues.includes("unconverted_currency"));
   const unapproved = pl.excluded.filter((e) => e.issues.includes("not_approved"));
   const noAmount = pl.excluded.filter((e) => e.issues.includes("no_amount"));
   if (unconverted.length) {
-    warn.push(`<p class="warn"><strong>${unconverted.length} expense(s) are in another currency with no converted amount</strong>
-      and are left out of the total. Converting them by guesswork would be a wrong number that looks right.</p>`);
+    warn.push(`<p class="warn">${t.warnUnconverted(unconverted.length)}</p>`);
   }
   if (unapproved.length) {
-    warn.push(`<p class="warn"><strong>${unapproved.length} expense(s) still say &ldquo;Needs Review&rdquo;</strong>
-      and are not in the total yet.</p>`);
+    warn.push(`<p class="warn">${t.warnUnapproved(unapproved.length)}</p>`);
   }
   if (noAmount.length) {
-    warn.push(`<p class="warn"><strong>${noAmount.length} expense(s) have no amount</strong> and cannot be counted.</p>`);
+    warn.push(`<p class="warn">${t.warnNoAmount(noAmount.length)}</p>`);
   }
   if (pl.undated.length) {
-    warn.push(`<p class="warn"><strong>${pl.undated.length} expense(s) have no Paid On date</strong>, so they fall
-      into no period at all and will appear on no statement until one is set.</p>`);
+    warn.push(`<p class="warn">${t.warnUndated(pl.undated.length)}</p>`);
   }
 
   const netClass = pl.net < 0 ? "neg" : "pos";
   const dash = pl.mixedIncomeCurrency ? "&mdash;" : null;
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8">
+  return `<!doctype html><html lang="${locale}"><head><meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
-    <title>${escapeHtml(brandName)} &mdash; Manager P&amp;L</title><style>
+    <title>${escapeHtml(brandName)} &mdash; ${t.plTitle}</title><style>
     :root{--ink:#111;--muted:#666;--line:#e5e5e5;--pos:#0a7d55;--neg:#b3261e;--warnbg:#fff8e1;--warnline:#e6c860}
     body{font:15px/1.55 -apple-system,Segoe UI,Roboto,sans-serif;color:var(--ink);margin:0;padding:24px;max-width:760px}
     h1{font-size:20px;margin:0 0 4px}h2{font-size:15px;margin:28px 0 8px}
@@ -382,20 +527,19 @@ function managerPlHtml({ brandName, fromLabel, toLabel, pl }) {
     .warn{background:var(--warnbg);border-left:3px solid var(--warnline);padding:10px 12px;margin:8px 0}
     .note{color:var(--muted);font-size:13px}
     </style></head><body>
-    <h1>${escapeHtml(brandName)} &mdash; Manager P&amp;L</h1>
-    <p class="period">${escapeHtml(fromLabel)} to ${escapeHtml(toLabel)}</p>
+    <h1>${escapeHtml(brandName)} &mdash; ${t.plTitle}</h1>
+    <p class="period">${t.plPeriod(escapeHtml(fromLabel), escapeHtml(toLabel))}</p>
     ${warn.join("")}
     <table>
-      <tr><td>Income from bookings</td><td class="n">${dash || money(pl.income, cur)}</td></tr>
-      <tr><td>Expenses</td><td class="n">${money(-pl.expenses, cur)}</td></tr>
-      <tr class="tot"><td>Net</td><td class="n ${netClass}">${dash || money(pl.net, cur)}</td></tr>
+      <tr><td>${t.plIncome}</td><td class="n">${dash || money(pl.income, cur)}</td></tr>
+      <tr><td>${t.plExpenses}</td><td class="n">${money(-pl.expenses, cur)}</td></tr>
+      <tr class="tot"><td>${t.plNet}</td><td class="n ${netClass}">${dash || money(pl.net, cur)}</td></tr>
     </table>
-    <p class="note">Expenses count only the share the manager cannot recover (amount less Can Reimburse).
-      ${money(pl.reimbursableOutstanding, cur)} is recoverable from owners and is not treated as a cost here.</p>
-    <h2>Expenses by category</h2>
+    <p class="note">${t.plNote(money(pl.reimbursableOutstanding, cur))}</p>
+    <h2>${t.plByCategory}</h2>
     ${rows
-      ? `<table><tr><th>Category</th><th class="n">Count</th><th class="n">Amount</th></tr>${rows}</table>`
-      : `<p class="note">No approved expenses in this period.</p>`}
+      ? `<table><tr><th>${t.thCategory}</th><th class="n">${t.thCount}</th><th class="n">${t.thAmount}</th></tr>${rows}</table>`
+      : `<p class="note">${t.plNoExpenses}</p>`}
     </body></html>`;
 }
 

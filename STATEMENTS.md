@@ -50,6 +50,33 @@ nav item) — GHL's Custom Menu Link access control is per-sub-account, not
 per-logged-in-user, so there's no way for one shared menu item to show
 different content to different people automatically.
 
+## Language: `statementLocale`, or `&lang=`
+
+Statements render in **English (`en`) or Spanish (`es`)** — every part of them,
+not just the labels: headings, column headers, the direct-bookings-only note,
+and the manager P&L including its warnings. Set it per tenant:
+
+```json
+{ "statementLocale": "es" }
+```
+
+`locale` and `language` work as aliases, and `es-DO`, `ES`, `Español` and
+`spanish` all resolve to `es`. Set nothing and the statement is English, which
+is what every account built before 2026-09-30 gets.
+
+`&lang=es` on the URL overrides the tenant setting, for an account whose owners
+don't all read the same language — a GHL merge tag resolves there, so one Custom
+Menu Link can carry `&lang={{custom_values.wstatement_lang}}`. A locale nobody
+implemented, or a merge tag GHL failed to resolve, falls back to English rather
+than rendering a page of blank headings.
+
+**Amounts and dates are deliberately identical in both languages** — `USD
+1234.56` and `2026-09-30`. Spanish convention swaps the decimal and thousands
+separators, and `1.234,56` misread as `1234.56` is an error of three orders of
+magnitude on a document whose whole purpose is a number; `03/10` is likewise two
+different days either side of the Atlantic. Don't "fix" this into locale-aware
+formatting without deciding that trade-off on purpose.
+
 ## Example URL
 
 ```
@@ -57,5 +84,6 @@ https://homs-invoicing-worker-0e0e.yari-058.workers.dev/reports/owner-statement
   ?locationId=wLGDbGcQ4QSG3nlT3Sis
   &token=<tenant.ownerReportToken>
   &recipientName=Marco        (omit for a single-owner tenant)
+  &lang=es                    (omit to use tenant.statementLocale, else English)
   &format=html
 ```
