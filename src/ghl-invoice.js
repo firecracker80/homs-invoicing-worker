@@ -140,8 +140,21 @@ export function bookingIdOf(invoice) {
 // Cleaning is GHL-native now and never appended; the deposit is only here for
 // a "tiered_legacy" tenant (the composer leaves it at 0 for everyone else).
 const DEPOSIT_LINE = "Depósito de seguridad / Security deposit";
-const FEE_LINE = "Cargo por procesamiento / Processing fee";
-const OUR_LINES = new Set([DEPOSIT_LINE, FEE_LINE]);
+const FEE_LINE = "Cargo por procesamiento";
+
+// Every name this Worker has ever written, not just the current one.
+//
+// OUR_LINES does two jobs: it strips our own lines before re-enriching a draft,
+// and it is how invoiceHasWorkerLines decides an invoice was already enriched.
+// Both match on the exact string. So renaming FEE_LINE without keeping the old
+// name here would make every invoice enriched before the rename look
+// un-enriched -- its old fee line would survive the strip AND a new one would
+// be appended, and the guest would be charged the processing fee twice.
+//
+// Kept until no unpaid invoice carries the old name, which is not a thing any
+// API can tell us, so in practice: kept.
+const LEGACY_LINES = ["Cargo por procesamiento / Processing fee"];
+const OUR_LINES = new Set([DEPOSIT_LINE, FEE_LINE, ...LEGACY_LINES]);
 
 export function buildAppendItems(snapshot, tenant) {
   const cur = tenant.currency || "USD";
