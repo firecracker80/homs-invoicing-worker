@@ -294,7 +294,7 @@ assert.equal(r10a.mode, "enrich", JSON.stringify(r10a));
 assert.ok(!r10a.idempotent, "a dead run's draft is finished, not skipped");
 assert.equal(lastSendUserId, "u_from_ghl_workflow", "the invoice is sent");
 const finishedPut = calls.slice(putsBefore).filter(c => c.method === "PUT").pop();
-assert.equal(finishedPut.body.invoiceItems.filter(i => /Processing fee/.test(i.name)).length, 1, "our lines are not added twice");
+assert.equal(finishedPut.body.invoiceItems.filter(i => /procesamiento/i.test(i.name)).length, 1, "our lines are not added twice");
 assert.equal(JSON.parse(store.get("E2E-STALE-DRAFT")).ghlInvoice.status, "sent");
 
 // 10b. Our lines are already on it (or it's paid) -> done, never resent.
@@ -439,6 +439,60 @@ console.log("10) Stale 'sending' claim: no Worker lines on the invoice -> finish
   }
 
   console.log("12) An add-on the guest declined comes off every listing charging it, and the basis follows");
+}
+
+// ---- 13. an invoice written before the fee line was renamed -------
+// The fee line dropped its English half on 2026-09-30 ("Cargo por
+// procesamiento / Processing fee" -> "Cargo por procesamiento"), because
+// clients on Stripe pass the fee to the guest through GHL and never see ours.
+//
+// OUR_LINES does two jobs and both match the exact string: it strips our own
+// lines before re-enriching a draft, and it is how invoiceHasWorkerLines
+// decides an invoice was already enriched. So an invoice carrying the OLD name
+// has to still be recognised. If it is not, its old line survives the strip AND
+// a new one is appended, and the guest is charged the processing fee TWICE.
+//
+// There is no API that can tell us when the last invoice carrying the old name
+// has been paid, so the old name stays recognised indefinitely.
+{
+  let putBody = null;
+  const withLegacyLine = async (url, init = {}) => {
+    const u = String(url);
+    const method = init.method || "GET";
+    if (u.includes("/send")) return { ok: true, status: 200, text: async () => "{}" };
+    if (u.includes("/invoices/") && method === "PUT") { putBody = JSON.parse(init.body || "{}"); return { ok: true, status: 200, text: async () => "{}" }; }
+    if (u.includes("/invoices/") && method === "GET") {
+      return { ok: true, status: 200, text: async () => JSON.stringify({
+        invoiceItems: [
+          { name: "Test Villa 3", amount: 330, qty: 1 },
+          { name: "Cleaning Fee", amount: 65, qty: 1 },
+          // Written by a previous version of this Worker.
+          { name: "Cargo por procesamiento / Processing fee", amount: 23.7, qty: 1 },
+        ],
+        invoiceNumber: "000031", name: "n", currency: "USD", issueDate: "2026-09-30", dueDate: "2026-10-05",
+      }) };
+    }
+    return { ok: true, status: 200, text: async () => "{}" };
+  };
+
+  const snapshot = {
+    bookingId: "b3", stay: { nights: 3, nightlyRate: 110, checkIn: "2026-10-01", checkOut: "2026-10-04" },
+    charges: { rentTotal: 330, cleaningFee: 0, processingFee: 0, feePct: 0.06, grandTotal: 330 },
+    securityDeposit: { total: 0, blocks: [] }, payout: { ownerPct: 0.85 },
+  };
+  await enrichAndSendInvoice({
+    env: {}, locationId: "loc1", invoiceId: "inv3", snapshot,
+    tenant: { ghlPit: "p", invoiceSenderUserId: "u", processingFeePct: 0.06, ownerPct: 0.85 },
+    userId: "u", contact: { id: "c1", name: "G", email: "g@x.com" },
+  }, withLegacyLine);
+
+  const fees = putBody.invoiceItems.filter((i) => /procesamiento/i.test(i.name));
+  assert.equal(fees.length, 1, "one processing fee, not the old one plus a new one");
+  assert.equal(fees[0].name, "Cargo por procesamiento", "and it carries the current name");
+  assert.equal(fees[0].amount, 23.7, "6% of 330 + 65, recomputed rather than carried over");
+  assert.ok(!putBody.invoiceItems.some((i) => /Processing fee/.test(i.name)),
+    "the English half is gone, which is the point of the rename");
+  console.log("13) An invoice written before the rename is not charged the processing fee twice");
 }
 
 console.log("\nPASS — all end-to-end assertions held. Existing PayPal-URL flow is provably untouched by this change.");

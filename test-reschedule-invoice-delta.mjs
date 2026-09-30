@@ -139,7 +139,7 @@ const reschedule = async (newCheckOut, { snapshot = paidSnapshot(), invoice } = 
 {
   await reschedule("2026-10-22");
   const items = invoicePuts[0].invoiceItems;
-  const fees = items.filter((i) => i.name === "Cargo por procesamiento / Processing fee");
+  const fees = items.filter((i) => /procesamiento/i.test(i.name));
   assert.strictEqual(fees.length, 1, "exactly one processing fee line, not two");
   assert.ok(fees[0].amount > 23.7, "and it is recomputed for the longer stay, not echoed");
   console.log("3) The Worker's own invoice lines are rebuilt from the new totals, not appended again");
