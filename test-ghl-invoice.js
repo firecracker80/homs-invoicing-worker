@@ -495,4 +495,74 @@ console.log("10) Stale 'sending' claim: no Worker lines on the invoice -> finish
   console.log("13) An invoice written before the rename is not charged the processing fee twice");
 }
 
+// ---- 14. the per-property owner, once the property is known -------
+// composeBooking resolves propertyOwnerNames[propertyCode] at BOOKING time,
+// when propertyCode is still null -- the webhook sends the guest's name in that
+// field and the guard rejects it. The property is only discovered here, from
+// the invoice. Nothing re-resolved the names afterwards, so every booking fell
+// back to the tenant-wide default and propertyOwnerNames never took effect on
+// any account at all.
+//
+// Found on DEMO-HOMS 2026-09-30: booking vlOALINBxTGzjdX76nE7 resolved
+// "Test Villa 3", whose configured owner is Elena Marchetti, and was credited
+// to the account default Carlos Mendoza. The whole point of that config is that
+// an owner's statement shows their own property and nobody else's.
+{
+  const serve = (propertyLine) => async (url, init = {}) => {
+    const u = String(url);
+    const method = init.method || "GET";
+    if (u.includes("/send")) return { ok: true, status: 200, text: async () => "{}" };
+    if (u.includes("/invoices/") && method === "PUT") return { ok: true, status: 200, text: async () => "{}" };
+    if (u.includes("/invoices/") && method === "GET") {
+      return { ok: true, status: 200, text: async () => JSON.stringify({
+        invoiceItems: [{ name: propertyLine, amount: 330, qty: 1 }, { name: "Cleaning Fee", amount: 65, qty: 1 }],
+        invoiceNumber: "000040", name: "n", currency: "USD", issueDate: "2026-09-30", dueDate: "2026-10-05",
+      }) };
+    }
+    return { ok: true, status: 200, text: async () => "{}" };
+  };
+
+  // No propertyCode, exactly as composeBooking leaves it once the guard has
+  // rejected the guest's name -- and the tenant-wide fallback names it settled
+  // for in the absence of one.
+  const fresh = () => ({
+    bookingId: "b4", propertyCode: null,
+    stay: { nights: 3, nightlyRate: 110, checkIn: "2026-10-01", checkOut: "2026-10-04" },
+    charges: { rentTotal: 330, cleaningFee: 0, processingFee: 0, feePct: 0.06, grandTotal: 330 },
+    securityDeposit: { total: 0, blocks: [] },
+    payout: { ownerPct: 0.85, ownerName: "Carlos Mendoza", managerName: "Rosa Jiménez" },
+  });
+  const tenant = {
+    ghlPit: "p", invoiceSenderUserId: "u", processingFeePct: 0.06, ownerPct: 0.85,
+    ownerName: "Carlos Mendoza", managerName: "Rosa Jiménez",
+    propertyOwnerNames: { "Test Villa 3": "Elena Marchetti" },
+    propertyManagerNames: { "Test Villa 3": "Diego Herrera" },
+  };
+  const run = async (line, t = tenant) => {
+    const snapshot = fresh();
+    await enrichAndSendInvoice({
+      env: {}, locationId: "loc1", invoiceId: "inv4", snapshot, tenant: t, userId: "u",
+      contact: { id: "c1", name: "G", email: "g@x.com" },
+    }, serve(line));
+    return snapshot;
+  };
+
+  const s = await run("Test Villa 3");
+  assert.equal(s.propertyCode, "Test Villa 3", "the property is resolved from the invoice, as before");
+  assert.equal(s.payout.ownerName, "Elena Marchetti", "and the owner follows it");
+  assert.equal(s.payout.managerName, "Diego Herrera", "and so does the manager");
+
+  // A property with no entry keeps the tenant-wide name rather than being
+  // blanked -- an account with one owner has no map at all.
+  const other = await run("Test Villa 2");
+  assert.equal(other.payout.ownerName, "Carlos Mendoza", "an unmapped property keeps the account default");
+  assert.equal(other.payout.managerName, "Rosa Jiménez");
+
+  const plain = await run("Test Villa 3", { ...tenant, propertyOwnerNames: undefined, propertyManagerNames: undefined });
+  assert.equal(plain.payout.ownerName, "Carlos Mendoza", "and an account with no map is untouched");
+  assert.equal(plain.payout.managerName, "Rosa Jiménez");
+
+  console.log("14) The per-property owner and manager are resolved once the property is known");
+}
+
 console.log("\nPASS — all end-to-end assertions held. Existing PayPal-URL flow is provably untouched by this change.");
