@@ -71,6 +71,67 @@ function resolveWindow(url) {
   return { from: `${from}T00:00:00.000Z`, to: toExclusive.toISOString(), fromLabel: from, toLabel: to };
 }
 
+// What a client reads, rather than what the database calls it.
+//
+// The summary table printed entry_type and category raw -- "rent_split_owner",
+// "cancellation_rent_refund_manager", "pass_through". We know what those mean;
+// an owner opening their statement does not, and a statement that needs
+// explaining is one the manager has to explain (Yari, 2026-09-30).
+//
+// Every type the code can write is here. An unrecognised one falls back to its
+// slug with the underscores knocked out, so a type added later reads as
+// something rather than as nothing, and this list is never load-bearing for
+// correctness -- only for how it looks.
+const ENTRY_LABELS = {
+  rent_split_owner: "Rent — owner share",
+  rent_split_manager: "Rent — manager share",
+  cleaning_fee: "Cleaning fee",
+  processing_fee: "Payment processing fee",
+  deposit_held: "Security deposit held",
+
+  cancellation_charge_owner: "Cancellation charge — owner share",
+  cancellation_charge_manager: "Cancellation charge — manager share",
+  cancellation_rent_refund_owner: "Rent refunded on cancellation — owner share",
+  cancellation_rent_refund_manager: "Rent refunded on cancellation — manager share",
+  cancellation_cleaning_refund: "Cleaning fee refunded on cancellation",
+  cancellation_deposit_refund: "Security deposit returned",
+
+  reschedule_admin_fee_owner: "Date-change fee — owner share",
+  reschedule_admin_fee_manager: "Date-change fee — manager share",
+  reschedule_charge_owner: "Additional rent from date change — owner share",
+  reschedule_charge_manager: "Additional rent from date change — manager share",
+  reschedule_refund_owner: "Rent refunded on date change — owner share",
+  reschedule_refund_manager: "Rent refunded on date change — manager share",
+
+  deposit_refund_inspection: "Security deposit returned after inspection",
+  deposit_claim_retained: "Security deposit retained for damages",
+  shadow_ota_commission: "Booking platform commission — informational",
+  other: "Other",
+};
+
+// "liability" is the guest's own money sitting with the client, and "shadow" is
+// a number recorded for reference and deliberately excluded from the totals.
+// Neither word means that to anybody outside this codebase.
+const CATEGORY_LABELS = {
+  income: "Income",
+  pass_through: "Passed through",
+  liability: "Held",
+  shadow: "Informational",
+};
+
+const titleCase = (slug) => {
+  const s = String(slug || "").replace(/_/g, " ").trim();
+  return s ? s[0].toUpperCase() + s.slice(1) : "";
+};
+
+export const entryLabel = (entryType) => ENTRY_LABELS[entryType] || titleCase(entryType);
+// Exported so a test can assert this list keeps pace with the entry types the
+// code writes, rather than inferring coverage from the label's text -- which
+// gives a false alarm on any label that happens to match its own slug
+// ("cleaning_fee" -> "Cleaning fee").
+export const LABELLED_ENTRY_TYPES = new Set(Object.keys(ENTRY_LABELS));
+export const categoryLabel = (category) => CATEGORY_LABELS[category] || titleCase(category);
+
 async function queryStatement(env, locationId, recipient, from, to, recipientName) {
   // recipientName is optional -- a tenant with one owner and one manager
   // total never needs it (recipient alone already scopes the whole
@@ -119,15 +180,15 @@ function statementHtml({ brandName, recipientLabel, fromLabel, toLabel, stmt }) 
     <tr>
       <td>${d.createdAt.slice(0, 10)}</td>
       <td>${escapeHtml(d.bookingId)}</td>
-      <td>${escapeHtml(d.description || d.entryType)}</td>
-      <td class="cat cat-${d.category}">${d.category}</td>
+      <td>${escapeHtml(d.description || entryLabel(d.entryType))}</td>
+      <td class="cat cat-${d.category}">${categoryLabel(d.category)}</td>
       <td class="amt">${d.currency} ${d.amount.toFixed(2)}</td>
     </tr>`).join("");
 
   const summaryRows = stmt.summary.map(s => `
     <tr>
-      <td>${escapeHtml(s.entryType)}</td>
-      <td class="cat cat-${s.category}">${s.category}</td>
+      <td>${escapeHtml(entryLabel(s.entryType))}</td>
+      <td class="cat cat-${s.category}">${categoryLabel(s.category)}</td>
       <td class="amt">${s.currency} ${s.total.toFixed(2)}</td>
       <td class="amt muted">${s.count}</td>
     </tr>`).join("");
