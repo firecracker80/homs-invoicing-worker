@@ -107,4 +107,76 @@ const unlinkedFor = async (bookingSource) => {
   console.log("4) The statement says it covers direct bookings only, above the total");
 }
 
+// ---- 5. the statement reads as English, not as column names --------
+// The summary table printed entry_type and category raw. We know what
+// "rent_split_owner" and "pass_through" mean; an owner opening their own
+// statement does not, and a statement that needs explaining is one the manager
+// has to explain (Yari, 2026-09-30).
+{
+  const { entryLabel, categoryLabel, LABELLED_ENTRY_TYPES } = await import("./src/reports.js");
+
+  assert.strictEqual(entryLabel("rent_split_owner"), "Rent — owner share");
+  assert.strictEqual(entryLabel("cancellation_rent_refund_manager"), "Rent refunded on cancellation — manager share");
+  assert.strictEqual(entryLabel("reschedule_admin_fee_owner"), "Date-change fee — owner share");
+  assert.strictEqual(entryLabel("processing_fee"), "Payment processing fee");
+
+  assert.strictEqual(categoryLabel("pass_through"), "Passed through");
+  assert.strictEqual(categoryLabel("liability"), "Held",
+    "the deposit is the guest's own money being held, which \"liability\" says to nobody outside this code");
+
+  // Every entry type the code can write has a label of its own. A slug reaching
+  // a client's statement is the bug this fixes, so the list has to keep pace
+  // with the code rather than with somebody remembering.
+  const { readFile } = await import("node:fs/promises");
+  const written = new Set();
+  for (const f of ["src/ledger.js", "src/cancellation.js", "src/reschedule.js"]) {
+    for (const m of (await readFile(f, "utf8")).matchAll(/entry_type: "([a-z_]+)"/g)) written.add(m[1]);
+  }
+  const unlabelled = [...written].filter((t) => !LABELLED_ENTRY_TYPES.has(t));
+  assert.deepStrictEqual(unlabelled, [],
+    "these entry types would reach a client as a slug: " + unlabelled.join(", "));
+
+  // And one that does not exist yet still reads as words rather than as nothing.
+  assert.strictEqual(entryLabel("some_future_type"), "Some future type");
+  assert.strictEqual(entryLabel(""), "");
+  console.log("5) Every entry type and category is named in words a client reads");
+}
+
+// ---- 6. and the rendered statement actually uses those names -------
+// Case 5 proves entryLabel() returns the right words. It does not prove the
+// statement calls it -- reverting the template to print the slug passed case 5
+// untouched. So this renders the real thing and reads what an owner would see.
+{
+  const { handleOwnerStatement } = await import("./src/reports.js");
+
+  const rows = [
+    { entry_type: "rent_split_owner", category: "income", currency: "USD", total_minor: 62900, entry_count: 1,
+      booking_id: "BK-LBL", amount_minor: 62900, description: null, created_at: "2026-09-30T02:00:00.000Z" },
+    { entry_type: "cancellation_rent_refund_owner", category: "income", currency: "USD", total_minor: -62900, entry_count: 1,
+      booking_id: "BK-LBL", amount_minor: -62900, description: null, created_at: "2026-09-30T03:00:00.000Z" },
+    { entry_type: "processing_fee", category: "pass_through", currency: "USD", total_minor: 4830, entry_count: 1,
+      booking_id: "BK-LBL", amount_minor: 4830, description: null, created_at: "2026-09-30T02:00:00.000Z" },
+  ];
+  const env = {
+    TENANTS: { get: async () => ({ brandName: "Casa Bonita", currency: "USD", ownerReportToken: "tok" }) },
+    LEDGER_DB: { prepare: () => ({ bind: () => ({ all: async () => ({ results: rows }) }) }) },
+  };
+  const res = await handleOwnerStatement(
+    new Request("https://w.dev/reports/owner-statement?locationId=L1&token=tok&format=html"), env);
+  const html = await res.text();
+
+  assert.match(html, /Rent — owner share/, "the summary names the entry type in words");
+  assert.match(html, /Rent refunded on cancellation — owner share/);
+  assert.match(html, /Payment processing fee/);
+  assert.match(html, /Passed through/, "and the category too");
+
+  // The slugs must not survive anywhere an owner can read them. The CSS class
+  // still carries the raw category -- it drives the colour -- so this looks for
+  // the slug as cell text rather than anywhere in the document.
+  assert.doesNotMatch(html, />rent_split_owner</, "no entry_type reaches the page as text");
+  assert.doesNotMatch(html, />cancellation_rent_refund_owner</);
+  assert.doesNotMatch(html, />pass_through</, "and no category does either");
+  console.log("6) The rendered statement prints those names, not the underlying slugs");
+}
+
 console.log("\nPASS — a statement states the scope of the money it reports, and a direct booking stops being reported as a missing channel.");

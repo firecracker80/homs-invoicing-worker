@@ -185,6 +185,30 @@ function gatewayRefFor(snapshot, r) {
   return cap?.gatewayTransactionId || cap?.captureId || cap?.invoiceId || "";
 }
 
+// The name on a row, filled in here rather than at each of the fifteen places
+// that build one.
+//
+// Settlement sets recipientName explicitly. Nothing else did -- every row from
+// cancellation.js and reschedule.js went in with it null. That did not matter
+// while propertyOwnerNames was broken (fixed in #89), because nobody could
+// scope a statement by name. The moment they could, it mattered a great deal:
+// queryStatement filters with `recipient_name = ?`, a SQL equality, and NULL
+// matches nothing. So Elena's statement showed her 629.00 of rent and neither
+// the 629.00 reversal nor the 157.25 cancellation charge -- she would have read
+// it as owed 629.00 when she was owed 157.25.
+//
+// Filled at the boundary instead of at the call sites on purpose: it covers
+// every row type that exists and every one added later, and there is no
+// sixteenth place to forget.
+//
+// guest and platform rows stay unnamed. Neither is a statement recipient, and
+// giving them a name would put the deposit and the gateway's cut on somebody's
+// statement.
+const nameFor = (row, snapshot) => row.recipientName ?? (
+  row.recipient === "owner" ? snapshot.payout?.ownerName :
+  row.recipient === "manager" ? snapshot.payout?.managerName : null
+) ?? null;
+
 export async function writeAndSyncRows(env, tenant, snapshot, rows) {
   const cur = tenant.currency || "USD";
   const now = new Date().toISOString();
@@ -203,7 +227,7 @@ export async function writeAndSyncRows(env, tenant, snapshot, rows) {
       // two separate partial refunds) get distinct references instead.
       const stmts = rows.map(r => env.LEDGER_DB.prepare(sql).bind(
         snapshot.locationId, snapshot.bookingId, null, invoiceId,
-        r.recipient, r.recipientName ?? null, r.category, r.entry_type, toMinor(r.amount), cur,
+        r.recipient, nameFor(r, snapshot), r.category, r.entry_type, toMinor(r.amount), cur,
         r.description, r.source || "payment_confirmed", r.reference || r.entry_type, now
       ));
       await env.LEDGER_DB.batch(stmts);
@@ -307,7 +331,7 @@ async function syncRowsToGHL(env, tenant, snapshot, rows, now) {
         payment_reference: `${snapshot.bookingId}-${r.entry_type}`,
         payment_type: r.entry_type,
         recipient: r.recipient,
-        recipient_name: r.recipientName || "",
+        recipient_name: nameFor(r, snapshot) || "",
         category: r.category,
         // D1 keeps the signed amount (negative = income reversal, for the
         // SUM math statements run on it); GHL just shows how much moved --
