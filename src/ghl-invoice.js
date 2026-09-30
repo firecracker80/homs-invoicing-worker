@@ -736,6 +736,32 @@ export async function enrichAndSendInvoice(
     }
   }
 
+  // The per-property owner and manager, now that we know which property it is.
+  //
+  // composeBooking resolves these from propertyOwnerNames[propertyCode] at
+  // BOOKING time -- when propertyCode is still null, because the webhook sends
+  // the guest's name in that field and the guard in index.js rejects it. The
+  // property is only discovered here, from the invoice. Nothing re-resolved the
+  // names afterwards, so every booking fell back to the tenant-wide default and
+  // propertyOwnerNames never took effect on any account at all.
+  //
+  // Found on DEMO-HOMS 2026-09-30: booking vlOALINBxTGzjdX76nE7 resolved
+  // propertyCode "Test Villa 3", whose configured owner is Elena Marchetti, and
+  // was credited to Carlos Mendoza -- the account default.
+  //
+  // Only overrides where a per-property name exists. An account with one owner
+  // has no map, finds nothing, and keeps the tenant-wide name it already had.
+  //
+  // The bundled path never had this: its children are composed after pairing,
+  // with a real propertyCode in hand, so composeBooking resolves them correctly
+  // the first time.
+  if (snapshot.propertyCode && snapshot.payout) {
+    const owner = tenant.propertyOwnerNames?.[snapshot.propertyCode];
+    const manager = tenant.propertyManagerNames?.[snapshot.propertyCode];
+    if (owner) snapshot.payout.ownerName = owner;
+    if (manager) snapshot.payout.managerName = manager;
+  }
+
   // GHL's own sequential number, untouched (guest-facing on the invoice page,
   // PDF and email). Only a draft with no number at all gets the booking id.
   const invoiceNumber = existing.invoiceNumber || snapshot.bookingId;
