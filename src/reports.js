@@ -176,6 +176,13 @@ const UI = {
     thDescription: "Description",
     thAmount: "Amount",
     noEntries: "No entries in this period.",
+    // A reversal carries category "income" with a negative amount, because that
+    // is what it is in the ledger: income taken back out. Printing it under
+    // "Income" is still wrong to read -- Yari, 2026-10-01: "if there is a
+    // refund, shouldn't that be marked something else not income... it's a loss
+    // of income." The category is unchanged in the database and every total
+    // still nets the same; only the word the client reads changes.
+    refund: "Refund",
 
     plTitle: "Manager P&amp;L",
     plPeriod: (from, to) => `${from} to ${to}`,
@@ -212,6 +219,7 @@ const UI = {
     thDescription: "Descripción",
     thAmount: "Monto",
     noEntries: "No hay movimientos en este período.",
+    refund: "Reembolso",
 
     plTitle: "Estado de resultados del administrador",
     plPeriod: (from, to) => `del ${from} al ${to}`,
@@ -277,6 +285,27 @@ export const LABELLED_ENTRY_TYPES = new Set(Object.keys(ENTRY_LABELS.en));
 export const categoryLabel = (category, locale = "en") =>
   CATEGORY_LABELS[locale]?.[category] || CATEGORY_LABELS.en[category] || titleCase(category);
 
+// Negative income is money going back out. It nets correctly either way -- this
+// is what the row is CALLED, not how it is counted.
+export const isRefund = (category, amount) => category === "income" && Number(amount) < 0;
+export const categoryLabelFor = (category, amount, locale = "en") =>
+  isRefund(category, amount) ? strings(locale).refund : categoryLabel(category, locale);
+// Drives the colour. Refunds get their own, so a reversal is visible at a
+// glance rather than reading as ordinary income with a minus sign.
+export const categoryClassFor = (category, amount) => (isRefund(category, amount) ? "refund" : category);
+
+// A row's stored description is written in English when the booking settles and
+// carries detail no label can ("Cancellation charge 20% (under_336h), owner
+// share"). On an English statement that detail is worth more than the label. On
+// a Spanish one it is a paragraph of English in the middle of a Spanish page --
+// which is what Yari saw on 2026-10-01: "the bottom half of the manager
+// statement is english". Every row in D1 has a description, so this cell never
+// fell back to the label and the labels never reached the detail table at all.
+export const describeEntry = (row, locale = "en") =>
+  locale === "en"
+    ? row.description || entryLabel(row.entryType, locale)
+    : entryLabel(row.entryType, locale);
+
 async function queryStatement(env, locationId, recipient, from, to, recipientName) {
   // recipientName is optional -- a tenant with one owner and one manager
   // total never needs it (recipient alone already scopes the whole
@@ -326,15 +355,15 @@ function statementHtml({ brandName, heading, recipientName, fromLabel, toLabel, 
     <tr>
       <td>${d.createdAt.slice(0, 10)}</td>
       <td>${escapeHtml(d.bookingId)}</td>
-      <td>${escapeHtml(d.description || entryLabel(d.entryType, locale))}</td>
-      <td class="cat cat-${d.category}">${categoryLabel(d.category, locale)}</td>
+      <td>${escapeHtml(describeEntry(d, locale))}</td>
+      <td class="cat cat-${categoryClassFor(d.category, d.amount)}">${categoryLabelFor(d.category, d.amount, locale)}</td>
       <td class="amt">${d.currency} ${d.amount.toFixed(2)}</td>
     </tr>`).join("");
 
   const summaryRows = stmt.summary.map(s => `
     <tr>
       <td>${escapeHtml(entryLabel(s.entryType, locale))}</td>
-      <td class="cat cat-${s.category}">${categoryLabel(s.category, locale)}</td>
+      <td class="cat cat-${categoryClassFor(s.category, s.total)}">${categoryLabelFor(s.category, s.total, locale)}</td>
       <td class="amt">${s.currency} ${s.total.toFixed(2)}</td>
       <td class="amt muted">${s.count}</td>
     </tr>`).join("");
@@ -369,6 +398,7 @@ function statementHtml({ brandName, heading, recipientName, fromLabel, toLabel, 
   .cat-income { background:#E6F6EF; color:var(--teal); }
   .cat-liability, .cat-pass_through { background:#F3F4F6; color:var(--muted); }
   .cat-shadow { background:#FFF1EC; color:var(--coral); }
+  .cat-refund { background:#FFF1EC; color:var(--coral); font-weight:600; }
   a { color:var(--coral); }
 </style></head>
 <body><div class="wrap">
