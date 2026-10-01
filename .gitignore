@@ -1,0 +1,12 @@
+# Wrangler's local state: caches the Cloudflare account id and name, and holds
+# local D1/KV simulation data. Never belongs in the repo -- there was no root
+# .gitignore before 2026-09-30 and a `git add -A` picked it up.
+.wrangler/
+node_modules/
+
+# Secrets live here and in Worker secrets, never in git.
+.dev.vars
+.dev.vars.*
+
+# Scratch renders from the statement templates.
+statement-*.html
