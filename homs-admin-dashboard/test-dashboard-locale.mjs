@@ -46,7 +46,10 @@ function makeDocument(body) {
       let i = -1;
       return { currentNode: null, nextNode() { i += 1; this.currentNode = nodes[i]; return i < nodes.length ? nodes[i] : null; } };
     },
-    querySelector: () => null,
+    // loadData writes to #fetchedAt and #loading without a null check, so this
+    // has to hand back a usable element rather than null, or the function dies
+    // before reaching the line being tested.
+    querySelector: () => new El("div"),
     querySelectorAll: () => [],
     addEventListener() {},
   };
@@ -64,6 +67,9 @@ function loadApp(search, body) {
     MutationObserver: class { observe() {} },
     console,
     navigator: { language: "en" },
+    // getLocationId caches the id here; without it loadData throws before it
+    // reaches anything this test is about.
+    localStorage: (() => { const m = new Map(); return { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: (k) => m.delete(k) }; })(),
     window: {},
     fetch: async () => ({ ok: true, json: async () => ({}) }),
     setTimeout,
@@ -73,6 +79,7 @@ function loadApp(search, body) {
   vm.runInContext(src, sandbox);
   // Top-level `let LOCALE` is a lexical binding, not a property of the sandbox,
   // so it can only be set by running code inside the same context.
+  sandbox.vmEval = (code) => vm.runInContext(code, sandbox);
   sandbox.setLocale = (l) => vm.runInContext(`LOCALE = ${JSON.stringify(l)}; localize();`, sandbox);
   return sandbox;
 }
@@ -192,6 +199,74 @@ const textsOf = (root) => textNodesOf(root).map((n) => n.nodeValue.trim());
     assert.strictEqual(app.resolveLocale(v), viaStatement, `the two disagree on ${JSON.stringify(v)}`);
   }
   console.log("6) The dashboard and the statement resolve every locale identically");
+}
+
+// ---- 7. the two strings the DOM walker cannot reach ---------------
+// "Updated" is concatenated with a timestamp in JS, so no text node ever holds
+// it on its own. The search placeholder is rewritten at load time to drop
+// ", OTA channel" on every account that does not show that tab -- which is all
+// of them -- so the string actually on screen never matched the dictionary key,
+// which held the full version. Both were still English on the live dashboard.
+{
+  const app = loadApp("", page());
+  app.setLocale("es");
+  assert.strictEqual(app.vmEval(JSON.stringify("Updated").replace(/^/, "tr(").replace(/$/, ")")), "Actualizado",
+    "the header timestamp label, built in JS and unreachable by the walker");
+  assert.strictEqual(app.vmEval("tr(\"Refresh\")"), "Actualizar");
+
+  const body = page();
+  const stripped = new El("input", {
+    placeholder: "Search by name, property, booking ID, cleaner, transaction...",
+  });
+  body.children.push(stripped);
+  const app2 = loadApp("", body);
+  app2.setLocale("es");
+  assert.ok(stripped.getAttribute("placeholder").startsWith("Buscar por"),
+    "the OTA-stripped placeholder is the one actually displayed, so it has to translate too");
+  console.log("7) The header timestamp and the OTA-stripped search placeholder both translate");
+}
+
+// ---- 8. the statement panel starts in the account language --------
+// That panel is a separate bilingual implementation -- its own string table,
+// its own t(), and an EN/ES toggle a viewer can click. It was already complete
+// in Spanish and simply defaulted to English, so a Spanish account opened it in
+// English and had to be switched by hand every time.
+//
+// This runs the REAL loadData against a stubbed /api/data. Asserting that the
+// binding is merely writable is not enough: deleting the assignment outright
+// passed that version of this test. The only thing that proves it is loading an
+// account and reading what the panel ended up set to.
+//
+// It also covers a hazard that would be worse than English. The assignment sits
+// roughly 1300 lines ABOVE the `let statementState` that declares it, so it is
+// only legal because loadData runs after the script has finished evaluating. If
+// that ever stopped being true it would throw on the temporal dead zone and
+// take the whole dashboard down.
+{
+  const withAccount = async (statementLocale) => {
+    const app = loadApp("?locationId=L1", page());
+    app.fetch = async () => ({
+      ok: true,
+      json: async () => ({
+        statementLocale, branding: {}, fetchedAt: "2026-10-01T03:00:00.000Z",
+        tenantLabel: "DEMO", properties: [], transactions: [], expenses: [],
+        otaChannels: [], checklists: [], inventory: [], contacts: [],
+      }),
+    });
+    await app.vmEval("loadData()");
+    return app.vmEval("statementState.lang");
+  };
+
+  // Before any account loads -- and on an account whose data call fails -- the
+  // panel shows this. It must not guess Spanish for an English client.
+  assert.strictEqual(loadApp("", page()).vmEval("statementState.lang"), "en",
+    "the pre-load default stays English, which is what a failed load leaves on screen");
+
+  assert.strictEqual(await withAccount("es"), "es",
+    "a Spanish account opens the statement panel in Spanish, without the viewer clicking ES");
+  assert.strictEqual(await withAccount("en-US"), "en", "an English account is unaffected");
+  assert.strictEqual(await withAccount(null), "en", "and so is one that sets nothing");
+  console.log("8) Loading a Spanish account opens the statement panel in Spanish");
 }
 
 console.log("\nPASS — the dashboard renders in the account's language, and the data in none.");

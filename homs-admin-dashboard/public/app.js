@@ -28,8 +28,11 @@ const I18N = {
     "Reports": "Informes",
     "Owner Statement": "Estado de Cuenta del Propietario",
     "Refresh": "Actualizar",
+    "Updated": "Actualizado",
     "Search by name, property, booking ID, cleaner, transaction, OTA channel...":
       "Buscar por nombre, propiedad, ID de reserva, limpiador, transacción, canal OTA...",
+    "Search by name, property, booking ID, cleaner, transaction...":
+      "Buscar por nombre, propiedad, ID de reserva, limpiador, transacción...",
     "Loading live data from GHL…": "Cargando datos en vivo desde GHL…",
 
     // Access
@@ -443,6 +446,10 @@ async function loadData() {
     if (!res.ok) throw new Error(json.error || tr("Failed to load data"));
     DATA = json;
     LOCALE = resolveLocale(json.statementLocale);
+    // The statement panel keeps its own language state so a viewer can switch
+    // one statement without re-rendering the dashboard. It starts where the
+    // account is, rather than always at English.
+    statementState.lang = LOCALE;
     applyBranding(json.branding);
     // Hidden rather than removed, so turning the flag on needs no deploy.
     const otaTab = document.querySelector('.tab[data-tab="ota"]');
