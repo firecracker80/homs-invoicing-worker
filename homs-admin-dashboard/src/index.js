@@ -11,6 +11,7 @@ import {
 } from "./normalize.js";
 import { getTenant, resolvePit } from "./tenants.js";
 import { requireAdmin, requireProvision, requireServices, handleLogin, handleLogout } from "./auth.js";
+import { invoicingFetch } from "./invoicing.js";
 import { provision } from "./provision.js";
 import { handleVendorData } from "./vendor.js";
 import { mapCsvRows, loadExistingExpenses, importRows } from "./expenses-import.js";
@@ -701,23 +702,14 @@ export default {
     if (url.pathname === "/api/manager-pl") {
       const locationId = url.searchParams.get("locationId");
       if (!locationId) return Response.json({ error: "locationId is required" }, { status: 400 });
-      if (!env.INVOICING_WORKER_URL || !env.INVOICING_ADMIN_SECRET) {
-        return Response.json({
-          error: "Manager statement unavailable",
-          detail: "INVOICING_WORKER_URL and INVOICING_ADMIN_SECRET must both be set on this Worker; the statement is computed by the invoicing Worker, not here.",
-        }, { status: 503 });
-      }
-
-      const target = new URL(`${String(env.INVOICING_WORKER_URL).replace(/\/+$/, "")}/reports/manager-pl`);
-      target.searchParams.set("locationId", locationId);
-      target.searchParams.set("format", "json");
+      const query = { locationId, format: "json" };
       for (const k of ["from", "to", "recipientName", "currency", "lang"]) {
         const v = url.searchParams.get(k);
-        if (v) target.searchParams.set(k, v);
+        if (v) query[k] = v;
       }
 
       try {
-        const res = await fetch(target, { headers: { "X-Admin-Secret": env.INVOICING_ADMIN_SECRET } });
+        const res = await invoicingFetch(env, "/reports/manager-pl", { query });
         const text = await res.text();
         // Pass the Worker's own status and body through. A 404 for an unknown
         // locationId or a 500 for a missing PIT says more than anything this
@@ -727,10 +719,14 @@ export default {
           headers: { "Content-Type": "application/json" },
         });
       } catch (err) {
+        // A configuration gap is the dashboard's fault and fixable; an
+        // unreachable Worker is not. They are different problems and get
+        // different statuses.
+        const misconfigured = err.reason === "no_admin_secret" || err.reason === "no_invoicing_worker_url";
         return Response.json({
-          error: "Could not reach the invoicing Worker",
+          error: misconfigured ? "Manager statement unavailable" : "Could not reach the invoicing Worker",
           detail: err.message || String(err),
-        }, { status: 502 });
+        }, { status: misconfigured ? 503 : 502 });
       }
     }
 

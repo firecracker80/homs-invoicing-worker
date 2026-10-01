@@ -28,6 +28,7 @@ import { BLUEPRINT } from "./blueprint.js";
 import { importProperties, loadExistingPropertyNames, listingNameKey } from "./portfolio-import.js";
 import { fetchCustomValues } from "./ghl.js";
 import { settingsFromQuiz } from "./quiz-map.js";
+import { invoicingFetch } from "./invoicing.js";
 
 const blank = (v) => v === null || v === undefined || String(v).trim() === "";
 
@@ -240,23 +241,16 @@ export function blockersFor(intake, { brandName, accountBrand, rows }) {
 // in one call, whereas throwing here would leave the caller unsure which of the
 // two halves had happened.
 export async function provisionTenantRecord(env, { locationId, pit, invoiceSenderUserId, paypalSecretName }) {
-  const base = env.INVOICING_WORKER_URL;
-  if (!base) {
-    return { ok: false, reason: "no_invoicing_worker_url", detail: "INVOICING_WORKER_URL is not set on this Worker, so the tenant record cannot be built." };
-  }
-  if (!env.INVOICING_ADMIN_SECRET) {
-    return { ok: false, reason: "no_admin_secret", detail: "INVOICING_ADMIN_SECRET is not set, and /admin/provision-tenant accepts nothing else." };
-  }
-
-  const params = new URLSearchParams({ locationId, ghlPit: pit, force: "true" });
-  if (invoiceSenderUserId) params.set("invoiceSenderUserId", invoiceSenderUserId);
-  if (paypalSecretName) params.set("paypalSecretName", paypalSecretName);
+  // Goes through the service binding for the same reason the manager statement
+  // does: a plain fetch() between two Workers on one zone is refused with error
+  // 1042, and this call had never been exercised end to end, so it would have
+  // failed the first time a real client was provisioned.
+  const query = { locationId, ghlPit: pit, force: "true" };
+  if (invoiceSenderUserId) query.invoiceSenderUserId = invoiceSenderUserId;
+  if (paypalSecretName) query.paypalSecretName = paypalSecretName;
 
   try {
-    const res = await fetch(`${base.replace(/\/$/, "")}/admin/provision-tenant?${params}`, {
-      method: "POST",
-      headers: { "X-Admin-Secret": env.INVOICING_ADMIN_SECRET },
-    });
+    const res = await invoicingFetch(env, "/admin/provision-tenant", { query, method: "POST" });
     const text = await res.text();
     let body;
     try { body = text ? JSON.parse(text) : {}; } catch { body = { raw: text.slice(0, 300) }; }
@@ -274,6 +268,7 @@ export async function provisionTenantRecord(env, { locationId, pit, invoiceSende
       mergedWithExisting: Boolean(body.mergedWithExisting),
     };
   } catch (err) {
+    if (err.reason) return { ok: false, reason: err.reason, detail: err.message };
     return { ok: false, reason: "provision_unreachable", detail: err.message };
   }
 }
