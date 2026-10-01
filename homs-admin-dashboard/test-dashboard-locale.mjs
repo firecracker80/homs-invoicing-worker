@@ -298,6 +298,14 @@ const textsOf = (root) => textNodesOf(root).map((n) => n.nodeValue.trim());
         mixedIncomeCurrency: true,
         byCategory: [{ category: "pest_control", label: "Pest Control", total: 35, count: 1 }],
         excluded: [{ id: "e1" }], undated: [{ id: "e2" }],
+        ownerPayouts: {
+          owners: [
+            { name: "Carlos Mendoza", owed: 4972.08, entries: 36, mixedCurrency: false, currency: "USD" },
+            { name: "Elena Marchetti", owed: 157.25, entries: 3, mixedCurrency: false, currency: "USD" },
+          ],
+          total: 5129.33,
+          unattributed: { owed: 88, entries: 2 },
+        },
         cleaning: {
           collected: 475, paidToCleaners: 100, margin: 375, jobsCounted: 2,
           byTurnover: [{ turnover: "deep_clean", label: "Deep Clean", total: 90, count: 1 }],
@@ -318,6 +326,8 @@ const textsOf = (root) => textNodesOf(root).map((n) => n.nodeValue.trim());
   // Every warning fired, so none of their phrasing goes unchecked.
   assert.ok(html.includes("no cleaner cost recorded"), "uncosted cleans are warned about");
   assert.ok(html.includes("is owed to cleaners"), "so are unpaid cleaners");
+  assert.ok(html.includes("is not attributed to any owner"), "and so is an unattributed payout");
+  assert.ok(html.includes("Carlos Mendoza") && html.includes("US$4972.08"), "each owner and what they are owed");
 
   const dict = app.vmEval("JSON.stringify(Object.keys(I18N.es))");
   const keys = new Set(JSON.parse(dict));
@@ -327,7 +337,8 @@ const textsOf = (root) => textNodesOf(root).map((n) => n.nodeValue.trim());
     // Data, numbers and punctuation are not labels and are never translated.
     .filter((s) => /[A-Za-z]{3}/.test(s))
     .filter((s) => !/^(US\$|\(US\$|RD\$|€)/.test(s))
-    .filter((s) => !["Pest Control", "Deep Clean", "September 2026", "DEMO"].includes(s));
+    .filter((s) => !["Pest Control", "Deep Clean", "September 2026", "DEMO",
+                      "Carlos Mendoza", "Elena Marchetti"].includes(s));
 
   const untranslatable = [...new Set(prose)].filter((s) => !keys.has(s));
   assert.deepStrictEqual(untranslatable, [],

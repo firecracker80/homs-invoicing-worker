@@ -359,6 +359,75 @@ export async function queryManagerCleaningIncome(env, locationId, from, to, reci
   return fromMinor(res.results?.[0]?.total_minor ?? 0);
 }
 
+
+// --- owner payouts ----------------------------------------------------------
+//
+// "What do I owe each owner this period" existed nowhere. The manager opened
+// each owner's statement one at a time and added them up by hand, which is why
+// Yari asked for this beside the manager statement rather than as its own link
+// -- it is the manager's payout run, and an owner must never see it.
+//
+// Only possible since the recipient_name backfill of 2026-10-01: before that,
+// 52 of the owner rows carried no name at all and could not be attributed to
+// anybody.
+//
+// IMPORTANT: this is what the period GENERATED for each owner, not an accounts
+// payable balance. Nothing in the ledger records that a payout was actually
+// made, so a manager who has already paid Carlos will still see Carlos here.
+// The page has to say so; implying otherwise would have a manager pay twice.
+export async function queryOwnerPayouts(env, locationId, from, to) {
+  const res = await env.LEDGER_DB.prepare(
+    `SELECT recipient_name, currency,
+            SUM(amount_minor) AS total_minor,
+            COUNT(*) AS n
+       FROM ledger_entries
+      WHERE location_id = ?1 AND recipient = 'owner' AND category = 'income'
+        AND created_at >= ?2 AND created_at < ?3
+      GROUP BY recipient_name, currency`
+  ).bind(locationId, from, to).all();
+
+  const rows = res.results || [];
+  const byName = new Map();
+  let unattributed = null;
+
+  for (const r of rows) {
+    const total = fromMinor(r.total_minor);
+    // A row with no name cannot be paid to anybody. It is reported as its own
+    // line rather than dropped, because a missing payout is the one error a
+    // manager would not notice until an owner complained.
+    const key = r.recipient_name || null;
+    if (key === null) {
+      unattributed = {
+        owed: round2((unattributed?.owed || 0) + total),
+        entries: (unattributed?.entries || 0) + r.n,
+      };
+      continue;
+    }
+    const prev = byName.get(key) || { name: key, owed: 0, entries: 0, currencies: new Set() };
+    prev.owed = round2(prev.owed + total);
+    prev.entries += r.n;
+    prev.currencies.add(String(r.currency || "").toUpperCase());
+    byName.set(key, prev);
+  }
+
+  const owners = [...byName.values()]
+    .map((o) => ({
+      name: o.name,
+      owed: o.owed,
+      entries: o.entries,
+      // Two currencies for one owner cannot be added. Said, not blended.
+      mixedCurrency: o.currencies.size > 1,
+      currency: o.currencies.size === 1 ? [...o.currencies][0] : null,
+    }))
+    .sort((a, b) => b.owed - a.owed);
+
+  return {
+    owners,
+    total: round2(owners.reduce((s, o) => s + o.owed, 0)),
+    unattributed,
+  };
+}
+
 export function buildManagerPL({ income, records, from, to, reportCurrency, jobs = [], cleaningCollected = 0 }) {
   const inPeriod = [];
   const undated = [];
