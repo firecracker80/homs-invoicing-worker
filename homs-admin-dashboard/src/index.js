@@ -711,6 +711,19 @@ export default {
       try {
         const res = await invoicingFetch(env, "/reports/manager-pl", { query });
         const text = await res.text();
+
+        // Never pass an upstream 401 through as a 401. apiFetch() in the page
+        // treats ANY 401 as "this person's session expired" and opens the admin
+        // key prompt -- so the reader is asked to re-enter a key that cannot
+        // help, and told they are unauthorized when their session is fine. What
+        // actually failed is this Worker's own credential against the invoicing
+        // Worker, which is a configuration problem and nothing the reader holds.
+        if (res.status === 401 || res.status === 403) {
+          return Response.json({
+            error: "The invoicing Worker rejected this dashboard's credential",
+            detail: "Your session is fine -- this is not your login. INVOICING_ADMIN_SECRET on the dashboard must match the invoicing Worker's ADMIN_SECRET, or that tenant's own adminSecret.",
+          }, { status: 502 });
+        }
         // Pass the Worker's own status and body through. A 404 for an unknown
         // locationId or a 500 for a missing PIT says more than anything this
         // route could invent on its behalf.
