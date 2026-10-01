@@ -684,6 +684,56 @@ export default {
       if (denied) return denied;
     }
 
+    // The manager statement comes from the invoicing Worker, not from here.
+    //
+    // It cannot be computed from this Worker's data: the transactions object
+    // carries booking_total, platform_fee and net_payout and nothing else --
+    // no cleaning fee, no commission split. The manager's own economics exist
+    // only in the Worker's ledger (Yari, 2026-10-01, scoping the panel). So
+    // this proxies rather than recomputes, and there is one definition of the
+    // manager's money instead of two that drift.
+    //
+    // Authenticated with the admin secret the dashboard already holds for
+    // provisioning, so no per-tenant report token has to be copied into this
+    // Worker's KV and kept in step.
+    // Already behind the default-deny gate above; a second requireAdmin here
+    // would imply that gate is not trusted, which is worse than terse.
+    if (url.pathname === "/api/manager-pl") {
+      const locationId = url.searchParams.get("locationId");
+      if (!locationId) return Response.json({ error: "locationId is required" }, { status: 400 });
+      if (!env.INVOICING_WORKER_URL || !env.INVOICING_ADMIN_SECRET) {
+        return Response.json({
+          error: "Manager statement unavailable",
+          detail: "INVOICING_WORKER_URL and INVOICING_ADMIN_SECRET must both be set on this Worker; the statement is computed by the invoicing Worker, not here.",
+        }, { status: 503 });
+      }
+
+      const target = new URL(`${String(env.INVOICING_WORKER_URL).replace(/\/+$/, "")}/reports/manager-pl`);
+      target.searchParams.set("locationId", locationId);
+      target.searchParams.set("format", "json");
+      for (const k of ["from", "to", "recipientName", "currency", "lang"]) {
+        const v = url.searchParams.get(k);
+        if (v) target.searchParams.set(k, v);
+      }
+
+      try {
+        const res = await fetch(target, { headers: { "X-Admin-Secret": env.INVOICING_ADMIN_SECRET } });
+        const text = await res.text();
+        // Pass the Worker's own status and body through. A 404 for an unknown
+        // locationId or a 500 for a missing PIT says more than anything this
+        // route could invent on its behalf.
+        return new Response(text, {
+          status: res.status,
+          headers: { "Content-Type": "application/json" },
+        });
+      } catch (err) {
+        return Response.json({
+          error: "Could not reach the invoicing Worker",
+          detail: err.message || String(err),
+        }, { status: 502 });
+      }
+    }
+
     if (url.pathname === "/api/data") {
       const locationId = url.searchParams.get("locationId");
       const { tenant, pit, error } = await resolveTenantPit(env, locationId);

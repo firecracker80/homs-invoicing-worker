@@ -48,8 +48,13 @@ function makeDocument(body) {
     },
     // loadData writes to #fetchedAt and #loading without a null check, so this
     // has to hand back a usable element rather than null, or the function dies
-    // before reaching the line being tested.
-    querySelector: () => new El("div"),
+    // before reaching the line being tested. Cached by selector, so what a
+    // render writes into a panel can be read back out again.
+    querySelector(sel) {
+      if (!this._bySel) this._bySel = new Map();
+      if (!this._bySel.has(sel)) this._bySel.set(sel, new El("div"));
+      return this._bySel.get(sel);
+    },
     querySelectorAll: () => [],
     addEventListener() {},
   };
@@ -267,6 +272,68 @@ const textsOf = (root) => textNodesOf(root).map((n) => n.nodeValue.trim());
   assert.strictEqual(await withAccount("en-US"), "en", "an English account is unaffected");
   assert.strictEqual(await withAccount(null), "en", "and so is one that sets nothing");
   console.log("8) Loading a Spanish account opens the statement panel in Spanish");
+}
+
+// ---- 9. every label the manager panel emits is translatable --------
+// The panel renders English and lets localize() swap it, which only works on
+// WHOLE text nodes. A number interpolated mid-sentence makes that sentence
+// match nothing and silently stay English -- which is how the P&L note and the
+// warning lines were originally written, and why they are now built with the
+// figure outside the sentence.
+//
+// So rather than checking a handful of strings by hand, this renders the panel
+// and asserts that every piece of prose in it is a dictionary key. A label
+// added later without a translation fails here instead of on Yari's screen.
+{
+  const app = loadApp("?locationId=L1", page());
+
+  // Give it a payload shaped like the Worker's, with every optional block
+  // populated so no branch of the template goes unrendered.
+  app.vmEval(`
+    DATA = { transactions: [{ checkinDate: "2026-09-04" }], expenses: [{ paidOn: "2026-09-10" }] };
+    managerPl = {
+      month: "2026-09", loading: false, error: null,
+      data: {
+        currency: "USD", income: 1380.17, expenses: 100, net: 1280.17, reimbursableOutstanding: 215,
+        mixedIncomeCurrency: true,
+        byCategory: [{ category: "pest_control", label: "Pest Control", total: 35, count: 1 }],
+        excluded: [{ id: "e1" }], undated: [{ id: "e2" }],
+        cleaning: {
+          collected: 475, paidToCleaners: 100, margin: 375, jobsCounted: 2,
+          byTurnover: [{ turnover: "deep_clean", label: "Deep Clean", total: 90, count: 1 }],
+          jobsWithoutCost: [{ id: "j1" }], unpaidCleaners: 35, unpaidCleanerJobs: 1,
+        },
+      },
+    };
+    renderManagerStatement();
+    __html = $("#panel-managerstmt").innerHTML;
+  `);
+  const html = app.vmEval("__html");
+  assert.ok(html && html.length > 200, "the panel rendered something");
+
+  // The figures, which must NOT be translated.
+  assert.ok(html.includes("US$1280.17"), "the net is on the page");
+  assert.ok(html.includes("US$375.00"), "and what was kept on cleaning");
+
+  // Every warning fired, so none of their phrasing goes unchecked.
+  assert.ok(html.includes("no cleaner cost recorded"), "uncosted cleans are warned about");
+  assert.ok(html.includes("is owed to cleaners"), "so are unpaid cleaners");
+
+  const dict = app.vmEval("JSON.stringify(Object.keys(I18N.es))");
+  const keys = new Set(JSON.parse(dict));
+
+  const prose = [...html.matchAll(/>([^<>]+)</g)]
+    .map((mm) => mm[1].trim())
+    // Data, numbers and punctuation are not labels and are never translated.
+    .filter((s) => /[A-Za-z]{3}/.test(s))
+    .filter((s) => !/^(US\$|\(US\$|RD\$|€)/.test(s))
+    .filter((s) => !["Pest Control", "Deep Clean", "September 2026", "DEMO"].includes(s));
+
+  const untranslatable = [...new Set(prose)].filter((s) => !keys.has(s));
+  assert.deepStrictEqual(untranslatable, [],
+    `these would stay English on a Spanish page: ${JSON.stringify(untranslatable)}`);
+  assert.ok(prose.length >= 12, "and there was real prose to check, not an empty panel");
+  console.log(`9) All ${new Set(prose).size} labels in the manager panel are dictionary keys, so none can stay English`);
 }
 
 console.log("\nPASS — the dashboard renders in the account's language, and the data in none.");

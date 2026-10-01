@@ -27,6 +27,31 @@ const I18N = {
     "Property Inventory": "Inventario de Propiedades",
     "Reports": "Informes",
     "Owner Statement": "Estado de Cuenta del Propietario",
+    // The manager statement panel. Every one of these is a whole text node in
+    // the rendered page, which is what lets the walker swap it.
+    "Manager Statement": "Estado de Cuenta del Administrador",
+    "Income from bookings": "Ingresos por reservas",
+    "Count": "Cantidad",
+    "All time": "Histórico",
+    "Net": "Neto",
+    "Recoverable from owners": "Recuperable de los propietarios",
+    "Expenses count only the share the manager cannot recover, plus what was paid to cleaners. Money recoverable from owners is listed but not treated as a cost.":
+      "Los gastos cuentan solo la parte que el administrador no puede recuperar, más lo pagado a los limpiadores. El monto recuperable de los propietarios se indica, pero no se trata como costo.",
+    "Cleaning": "Limpieza",
+    "Part of the income above, not additional to it.": "Forma parte de los ingresos de arriba, no se suma a ellos.",
+    "Cleaning fees collected": "Tarifas de limpieza cobradas",
+    "Paid to cleaners": "Pagado a los limpiadores",
+    "Kept on cleaning": "Retenido por limpieza",
+    "Turnover Type": "Tipo de Limpieza",
+    "The ledger holds more than one currency for this manager, so income is not totalled.":
+      "El libro contable tiene más de una moneda para este administrador, así que los ingresos no se suman.",
+    "clean(s) here have no cleaner cost recorded, so the cleaning figure below is too high.":
+      "limpieza(s) aquí no tienen costo de limpiador registrado, así que la cifra de limpieza de abajo es más alta de lo real.",
+    "is owed to cleaners for completed cleans with no payment date.":
+      "se deben a los limpiadores por limpiezas completadas sin fecha de pago.",
+    "expense(s) are left out of the total.": "gasto(s) quedan fuera del total.",
+    "expense(s) have no Paid On date, so they fall into no period at all.":
+      "gasto(s) no tienen fecha de pago, así que no caen en ningún período.",
     "Refresh": "Actualizar",
     "Updated": "Actualizado",
     "Search by name, property, booking ID, cleaner, transaction, OTA channel...":
@@ -480,6 +505,158 @@ function renderTab(tabKey) {
   if (fn) fn();
 }
 
+// --- manager statement ------------------------------------------------------
+//
+// Rendered from the invoicing Worker's figures, never recomputed here. This
+// Worker's transactions object carries booking_total, platform_fee and
+// net_payout and nothing else -- no cleaning fee, no commission split -- so the
+// manager's own economics simply do not exist in this dataset. Proxied through
+// /api/manager-pl so there is one definition of the manager's money.
+//
+// Yari, 2026-09-30, on the manager statement that already existed: "what we
+// have is great but they already have that in the transactions tab under
+// payments." The payments tab lists what GUESTS paid. This answers what the
+// MANAGER earned, which is a different number and was visible nowhere.
+//
+// Labels are emitted in English on purpose: localize() walks the rendered DOM
+// and swaps them, so Spanish comes from the same dictionary as the rest of the
+// page rather than a second one that drifts. That walker matches whole text
+// nodes, so every number is kept OUT of its sentence -- a figure interpolated
+// mid-sentence makes that sentence match nothing and silently stay English.
+let managerPl = { month: null, data: null, error: null, loading: false };
+
+async function loadManagerPl() {
+  const locationId = getLocationId();
+  if (!locationId) return;
+  managerPl.loading = true;
+  managerPl.error = null;
+  renderManagerStatement();
+
+  const params = new URLSearchParams({ locationId });
+  if (managerPl.month) {
+    const [y, m] = managerPl.month.split("-").map(Number);
+    params.set("from", `${managerPl.month}-01`);
+    // The Worker's window treats `to` as inclusive of that whole day, so the
+    // last day of the month is the right end, not the first of the next.
+    params.set("to", new Date(Date.UTC(y, m, 0)).toISOString().slice(0, 10));
+  }
+  try {
+    const res = await apiFetch("/api/manager-pl?" + params.toString());
+    const json = await res.json();
+    if (!res.ok) throw new Error(json.detail || json.error || `HTTP ${res.status}`);
+    managerPl.data = json;
+  } catch (err) {
+    managerPl.data = null;
+    managerPl.error = err.message || String(err);
+  } finally {
+    managerPl.loading = false;
+    renderManagerStatement();
+  }
+}
+
+function managerMonths() {
+  const months = new Set();
+  (DATA?.transactions || []).forEach((x) => x.checkinDate && months.add(x.checkinDate.slice(0, 7)));
+  (DATA?.expenses || []).forEach((x) => x.paidOn && months.add(x.paidOn.slice(0, 7)));
+  return [...months].sort().reverse();
+}
+
+// Number outside the sentence, so the sentence can be translated.
+const warnLine = (figure, phrase) => `<p class="warn"><strong>${esc(String(figure))}</strong> <span>${phrase}</span></p>`;
+
+function renderManagerStatement() {
+  const panel = $("#panel-managerstmt");
+  if (!panel) return;
+
+  const months = managerMonths();
+  const monthOptions = [`<option value="">All time</option>`]
+    .concat(months.map((m) => `<option value="${m}"${m === managerPl.month ? " selected" : ""}>${esc(monthLabel(m))}</option>`))
+    .join("");
+
+  const toolbar = `
+    <div class="panel-toolbar">
+      <select id="mgrMonth" class="filter-select">${monthOptions}</select>
+      <button class="btn" id="mgrPrint">Print / Save as PDF</button>
+    </div>`;
+
+  if (managerPl.loading) {
+    panel.innerHTML = toolbar + `<div class="state-msg">Loading live data from GHL…</div>`;
+    return;
+  }
+  if (managerPl.error) {
+    panel.innerHTML = toolbar + `<div class="state-msg error">${esc(managerPl.error)}</div>`;
+    return;
+  }
+  const pl = managerPl.data;
+  if (!pl) {
+    panel.innerHTML = toolbar + `<div class="state-msg">No entries in this period.</div>`;
+    return;
+  }
+
+  const cur = pl.currency || "USD";
+  const m = (n) => moneyIn(n, cur);
+  const c = pl.cleaning || {};
+
+  // Anything left out of a total is shown as loudly as the total. A manager
+  // statement that quietly omits a cost is the problem this was built to fix.
+  const warn = [];
+  if (pl.mixedIncomeCurrency) {
+    warn.push(warnLine("!", "The ledger holds more than one currency for this manager, so income is not totalled."));
+  }
+  if (c.jobsWithoutCost?.length) {
+    warn.push(warnLine(c.jobsWithoutCost.length, "clean(s) here have no cleaner cost recorded, so the cleaning figure below is too high."));
+  }
+  if (c.unpaidCleanerJobs) {
+    warn.push(warnLine(m(c.unpaidCleaners), "is owed to cleaners for completed cleans with no payment date."));
+  }
+  if (pl.excluded?.length) {
+    warn.push(warnLine(pl.excluded.length, "expense(s) are left out of the total."));
+  }
+  if (pl.undated?.length) {
+    warn.push(warnLine(pl.undated.length, "expense(s) have no Paid On date, so they fall into no period at all."));
+  }
+
+  const catRows = (pl.byCategory || [])
+    .map((x) => `<tr><td>${esc(x.label || x.category)}</td><td class="n">${x.count}</td><td class="n">${m(x.total)}</td></tr>`)
+    .join("") || emptyRow(3, "No approved expenses in this period.");
+
+  const turnRows = (c.byTurnover || [])
+    .map((x) => `<tr><td>${esc(x.label)}</td><td class="n">${x.count}</td><td class="n">${m(x.total)}</td></tr>`)
+    .join("");
+
+  panel.innerHTML = toolbar + `
+    <div class="statement-sheet" id="managerSheet">
+      <h2>Manager Statement</h2>
+      <p class="statement-period">${managerPl.month ? esc(monthLabel(managerPl.month)) : "All time"}</p>
+      ${warn.join("")}
+
+      <table class="statement-summary">
+        <tbody>
+          <tr><td>Income from bookings</td><td>${pl.mixedIncomeCurrency ? "—" : m(pl.income)}</td></tr>
+          <tr><td>Expenses</td><td>(${m(pl.expenses)})</td></tr>
+          <tr class="statement-net"><td>Net</td><td>${m(pl.net)}</td></tr>
+          <tr><td>Recoverable from owners</td><td>${m(pl.reimbursableOutstanding)}</td></tr>
+        </tbody>
+      </table>
+      <p class="note">Expenses count only the share the manager cannot recover, plus what was paid to cleaners. Money recoverable from owners is listed but not treated as a cost.</p>
+
+      ${c.collected || c.paidToCleaners ? `
+      <h3>Cleaning</h3>
+      <p class="note">Part of the income above, not additional to it.</p>
+      <table class="statement-summary">
+        <tbody>
+          <tr><td>Cleaning fees collected</td><td>${m(c.collected)}</td></tr>
+          <tr><td>Paid to cleaners</td><td>(${m(c.paidToCleaners)})</td></tr>
+          <tr class="statement-net"><td>Kept on cleaning</td><td>${m(c.margin)}</td></tr>
+        </tbody>
+      </table>
+      ${turnRows ? `<table><tr><th>Turnover Type</th><th class="n">Count</th><th class="n">Amount</th></tr>${turnRows}</table>` : ""}` : ""}
+
+      <h3>Expenses by category</h3>
+      <table><tr><th>Category</th><th class="n">Count</th><th class="n">Amount</th></tr>${catRows}</table>
+    </div>`;
+}
+
 function renderAll() {
   // A vendor tenant (HOMS itself) is its own book, not a client account. Nothing
   // below applies to it -- no properties, no bookings, no guests.
@@ -493,6 +670,10 @@ function renderAll() {
   renderInventory();
   renderReports();
   renderStatement();
+  renderManagerStatement();
+  // Fetched rather than computed, so it arrives after the first paint. Not
+  // awaited: the rest of the dashboard must not wait on the invoicing Worker.
+  loadManagerPl();
 }
 
 // ---------- Vendor P&L (own book) ----------
@@ -2168,6 +2349,11 @@ document.addEventListener("DOMContentLoaded", () => {
       statementState.month = null;
       renderStatement();
     }
+    if (e.target.id === "mgrMonth") {
+      managerPl.month = e.target.value || null;
+      loadManagerPl();
+      return;
+    }
     if (e.target.id === "stmtMonth") {
       statementState.month = e.target.value;
       renderStatement();
@@ -2180,6 +2366,10 @@ document.addEventListener("DOMContentLoaded", () => {
       else delete filterState[tab][field];
       renderTab(tab);
     }
+  });
+
+  document.addEventListener("click", (e) => {
+    if (e.target.id === "mgrPrint") window.print();
   });
 
   $("#detailClose").addEventListener("click", () => ($("#detailOverlay").hidden = true));
