@@ -328,6 +328,8 @@ const textsOf = (root) => textNodesOf(root).map((n) => n.nodeValue.trim());
   assert.ok(html.includes("is owed to cleaners"), "so are unpaid cleaners");
   assert.ok(html.includes("is not attributed to any owner"), "and so is an unattributed payout");
   assert.ok(html.includes("Carlos Mendoza") && html.includes("US$4972.08"), "each owner and what they are owed");
+  assert.ok(html.includes("pay through your own payout method"),
+    "and that the account holder pays them, not this system");
 
   const dict = app.vmEval("JSON.stringify(Object.keys(I18N.es))");
   const keys = new Set(JSON.parse(dict));

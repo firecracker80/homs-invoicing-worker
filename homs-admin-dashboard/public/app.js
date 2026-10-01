@@ -30,11 +30,11 @@ const I18N = {
     // The manager statement panel. Every one of these is a whole text node in
     // the rendered page, which is what lets the walker swap it.
     "Manager Statement": "Estado de Cuenta del Administrador",
-    "Owner payouts": "Pagos a propietarios",
+    "Owed to owners": "Adeudado a propietarios",
     "Owner": "Propietario",
-    "Total to owners": "Total a propietarios",
-    "What this period earned for each owner. It does not record whether a payout has been made.":
-      "Lo que este período generó para cada propietario. No registra si el pago ya se realizó.",
+    "Total owed": "Total adeudado",
+    "What this period earned for each owner, for you to pay through your own payout method. This page does not move money and does not record whether you have paid.":
+      "Lo que este período generó para cada propietario, para que usted lo pague por su propio método. Esta página no transfiere dinero ni registra si ya pagó.",
     "is not attributed to any owner, and cannot be paid to anybody until those rows carry a name.":
       "no está atribuido a ningún propietario, y no se le puede pagar a nadie hasta que esos registros lleven un nombre.",
     "Income from bookings": "Ingresos por reservas",
@@ -665,12 +665,12 @@ function renderManagerStatement() {
       ${turnRows ? `<table><tr><th>Turnover Type</th><th class="n">Count</th><th class="n">Amount</th></tr>${turnRows}</table>` : ""}` : ""}
 
       ${payouts.owners?.length ? `
-      <h3>Owner payouts</h3>
-      <p class="note">What this period earned for each owner. It does not record whether a payout has been made.</p>
+      <h3>Owed to owners</h3>
+      <p class="note">What this period earned for each owner, for you to pay through your own payout method. This page does not move money and does not record whether you have paid.</p>
       <table>
         <tr><th>Owner</th><th class="n">Count</th><th class="n">Amount</th></tr>
         ${payouts.owners.map((o) => `<tr><td>${esc(o.name)}</td><td class="n">${o.entries}</td><td class="n">${o.mixedCurrency ? "—" : moneyIn(o.owed, o.currency || cur)}</td></tr>`).join("")}
-        <tr class="statement-net"><td>Total to owners</td><td class="n"></td><td class="n">${m(payouts.total)}</td></tr>
+        <tr class="statement-net"><td>Total owed</td><td class="n"></td><td class="n">${m(payouts.total)}</td></tr>
       </table>` : ""}
 
       <h3>Expenses by category</h3>

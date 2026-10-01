@@ -117,17 +117,20 @@ const run = (rows) => queryOwnerPayouts(db(rows), "LOC", "2026-09-01T00:00:00.00
     new Request("https://w.dev/reports/manager-pl?locationId=l&token=t"), envFor(tenant))).text();
 
   const en = await render({});
-  assert.match(en, /Owner payouts/, "the block is on the page");
+  assert.match(en, /Owed to owners/, "the block is on the page");
   assert.ok(en.includes("Carlos Mendoza") && en.includes("USD 4972.08"));
-  assert.match(en, /does not record whether a payout has been made/,
+  assert.match(en, /pay through your own payout method/,
+    "and says who pays, because this system does not");
+  assert.match(en, /does not move money and does not record whether you have paid/,
     "and says what it is NOT, so a manager does not pay twice");
   assert.match(en, /USD 88\.00 across 2 entr\(ies\) is not attributed/, "the unattributed money is called out");
 
   const es = await render({ statementLocale: "es" });
-  assert.match(es, /Pagos a propietarios/);
-  assert.match(es, /No registra si el pago ya se realizó/);
+  assert.match(es, /Adeudado a propietarios/);
+  assert.match(es, /su propio método/);
+  assert.match(es, /ni registra si ya pagó/);
   assert.ok(es.includes("Carlos Mendoza"), "an owner's name is data and stays as it is");
-  assert.ok(!es.includes("Owner payouts"), "and no English heading survives");
+  assert.ok(!es.includes("Owed to owners"), "and no English heading survives");
   console.log("8) The payout block renders on the page, in either language, and says what it is not");
 }
 
