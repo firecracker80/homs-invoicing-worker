@@ -21,7 +21,10 @@
 // is already the materialized split (see ledger.js) -- no split logic gets
 // recomputed here.
 
-import { queryManagerIncome, fetchExpenseRecords, buildManagerPL } from "./manager-pl.js";
+import {
+  queryManagerIncome, fetchExpenseRecords, buildManagerPL,
+  fetchCleaningJobs, queryManagerCleaningIncome,
+} from "./manager-pl.js";
 
 const GHL_BASE = "https://services.leadconnectorhq.com";
 const GHL_VERSION = "2021-07-28";
@@ -193,6 +196,16 @@ const UI = {
       ${amt} is recoverable from owners and is not treated as a cost here.`,
     plByCategory: "Expenses by category",
     plNoExpenses: "No approved expenses in this period.",
+    plCleaning: "Cleaning",
+    plCleaningCollected: "Cleaning fees collected",
+    plCleaningPaid: "Paid to cleaners",
+    plCleaningMargin: "Kept on cleaning",
+    plCleaningNote: (n) => `Across ${n} clean(s) paid for in this period.`,
+    warnNoCleanerCost: (n) => `<strong>${n} clean(s) in this period have no cleaner cost recorded.</strong>
+      Each one makes the cleaning figure above too high, by an amount nobody can see. Add the cost on the
+      cleaning job to correct it.`,
+    warnUnpaidCleaners: (amt, n) => `<strong>${amt} is owed to cleaners</strong> across ${n} completed clean(s)
+      with no payment date. Not counted as a cost this period, because it has not been paid yet.`,
     warnMixedCurrency: (seen) => `<strong>The ledger holds more than one currency for this manager.</strong>
       Income is not totalled, because adding them would give a number that cannot be right: ${seen}.`,
     warnUnconverted: (n) => `<strong>${n} expense(s) are in another currency with no converted amount</strong>
@@ -230,6 +243,16 @@ const UI = {
       ${amt} es recuperable de los propietarios y no se trata como costo aquí.`,
     plByCategory: "Gastos por categoría",
     plNoExpenses: "No hay gastos aprobados en este período.",
+    plCleaning: "Limpieza",
+    plCleaningCollected: "Tarifas de limpieza cobradas",
+    plCleaningPaid: "Pagado a los limpiadores",
+    plCleaningMargin: "Retenido por limpieza",
+    plCleaningNote: (n) => `Sobre ${n} limpieza(s) pagada(s) en este período.`,
+    warnNoCleanerCost: (n) => `<strong>${n} limpieza(s) de este período no tienen costo de limpiador registrado.</strong>
+      Cada una hace que la cifra de limpieza de arriba sea más alta de lo real, por un monto que nadie puede ver.
+      Agregue el costo en el registro de limpieza para corregirlo.`,
+    warnUnpaidCleaners: (amt, n) => `<strong>Se deben ${amt} a los limpiadores</strong> por ${n} limpieza(s)
+      completada(s) sin fecha de pago. No se cuenta como costo de este período porque aún no se ha pagado.`,
     warnMixedCurrency: (seen) => `<strong>El libro contable tiene más de una moneda para este administrador.</strong>
       Los ingresos no se suman, porque sumarlos daría una cifra que no puede ser correcta: ${seen}.`,
     warnUnconverted: (n) => `<strong>${n} gasto(s) están en otra moneda sin monto convertido</strong>
@@ -492,11 +515,13 @@ export async function handleManagerPL(request, env) {
   const reportCurrency = (url.searchParams.get("currency") || tenant.currency || "USD").toUpperCase();
 
   try {
-    const [income, records] = await Promise.all([
+    const [income, records, jobs, cleaningCollected] = await Promise.all([
       queryManagerIncome(env, locationId, from, to, recipientName),
       fetchExpenseRecords(pit, locationId),
+      fetchCleaningJobs(pit, locationId),
+      queryManagerCleaningIncome(env, locationId, from, to, recipientName),
     ]);
-    const pl = buildManagerPL({ income, records, from, to, reportCurrency });
+    const pl = buildManagerPL({ income, records, from, to, reportCurrency, jobs, cleaningCollected });
     const brandName = url.searchParams.get("brandName") || tenant.brandName || locationId;
 
     if ((url.searchParams.get("format") || "html") === "json") {
@@ -535,6 +560,14 @@ function managerPlHtml({ brandName, fromLabel, toLabel, pl, locale = "en" }) {
   if (noAmount.length) {
     warn.push(`<p class="warn">${t.warnNoAmount(noAmount.length)}</p>`);
   }
+  // The cleaning figure is only as honest as the costs behind it, so a clean
+  // with no cost recorded is reported as loudly as a mixed currency.
+  if (pl.cleaning?.jobsWithoutCost?.length) {
+    warn.push(`<p class="warn">${t.warnNoCleanerCost(pl.cleaning.jobsWithoutCost.length)}</p>`);
+  }
+  if (pl.cleaning?.unpaidCleanerJobs) {
+    warn.push(`<p class="warn">${t.warnUnpaidCleaners(money(pl.cleaning.unpaidCleaners, cur), pl.cleaning.unpaidCleanerJobs)}</p>`);
+  }
   if (pl.undated.length) {
     warn.push(`<p class="warn">${t.warnUndated(pl.undated.length)}</p>`);
   }
@@ -566,6 +599,15 @@ function managerPlHtml({ brandName, fromLabel, toLabel, pl, locale = "en" }) {
       <tr class="tot"><td>${t.plNet}</td><td class="n ${netClass}">${dash || money(pl.net, cur)}</td></tr>
     </table>
     <p class="note">${t.plNote(money(pl.reimbursableOutstanding, cur))}</p>
+    ${pl.cleaning && (pl.cleaning.collected || pl.cleaning.paidToCleaners) ? `
+    <h2>${t.plCleaning}</h2>
+    <table>
+      <tr><td>${t.plCleaningCollected}</td><td class="n">${money(pl.cleaning.collected, cur)}</td></tr>
+      <tr><td>${t.plCleaningPaid}</td><td class="n">${money(-pl.cleaning.paidToCleaners, cur)}</td></tr>
+      <tr class="tot"><td>${t.plCleaningMargin}</td><td class="n ${pl.cleaning.margin < 0 ? "neg" : "pos"}">${money(pl.cleaning.margin, cur)}</td></tr>
+    </table>
+    <p class="note">${t.plCleaningNote(pl.cleaning.jobsCounted)}</p>` : ""}
+
     <h2>${t.plByCategory}</h2>
     ${rows
       ? `<table><tr><th>${t.thCategory}</th><th class="n">${t.thCount}</th><th class="n">${t.thAmount}</th></tr>${rows}</table>`
