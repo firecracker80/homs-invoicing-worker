@@ -23,7 +23,7 @@
 
 import {
   queryManagerIncome, fetchExpenseRecords, buildManagerPL,
-  fetchCleaningJobs, queryManagerCleaningIncome,
+  fetchCleaningJobs, queryManagerCleaningIncome, queryOwnerPayouts,
 } from "./manager-pl.js";
 
 const GHL_BASE = "https://services.leadconnectorhq.com";
@@ -196,6 +196,12 @@ const UI = {
       ${amt} is recoverable from owners and is not treated as a cost here.`,
     plByCategory: "Expenses by category",
     plNoExpenses: "No approved expenses in this period.",
+    plOwnerPayouts: "Owner payouts",
+    plOwnerPayoutsNote: "What this period earned for each owner. It does not record whether a payout has been made.",
+    plOwnerPayoutsTotal: "Total to owners",
+    thOwner: "Owner",
+    warnUnattributedPayout: (amt, n) => `<strong>${amt} across ${n} entr(ies) is not attributed to any owner.</strong>
+      It cannot be paid to anybody until those rows carry a name, and it is not in the total below.`,
     plCleaning: "Cleaning",
     plCleaningCollected: "Cleaning fees collected",
     plCleaningPaid: "Paid to cleaners",
@@ -243,6 +249,12 @@ const UI = {
       ${amt} es recuperable de los propietarios y no se trata como costo aquí.`,
     plByCategory: "Gastos por categoría",
     plNoExpenses: "No hay gastos aprobados en este período.",
+    plOwnerPayouts: "Pagos a propietarios",
+    plOwnerPayoutsNote: "Lo que este período generó para cada propietario. No registra si el pago ya se realizó.",
+    plOwnerPayoutsTotal: "Total a propietarios",
+    thOwner: "Propietario",
+    warnUnattributedPayout: (amt, n) => `<strong>${amt} en ${n} registro(s) no está atribuido a ningún propietario.</strong>
+      No se le puede pagar a nadie hasta que esos registros lleven un nombre, y no está incluido en el total de abajo.`,
     plCleaning: "Limpieza",
     plCleaningCollected: "Tarifas de limpieza cobradas",
     plCleaningPaid: "Pagado a los limpiadores",
@@ -515,13 +527,16 @@ export async function handleManagerPL(request, env) {
   const reportCurrency = (url.searchParams.get("currency") || tenant.currency || "USD").toUpperCase();
 
   try {
-    const [income, records, jobs, cleaningCollected] = await Promise.all([
+    const [income, records, jobs, cleaningCollected, ownerPayouts] = await Promise.all([
       queryManagerIncome(env, locationId, from, to, recipientName),
       fetchExpenseRecords(pit, locationId),
       fetchCleaningJobs(pit, locationId),
       queryManagerCleaningIncome(env, locationId, from, to, recipientName),
+      // Deliberately NOT scoped by recipientName: that names the MANAGER, and
+      // scoping owners by it would return nothing on every account.
+      queryOwnerPayouts(env, locationId, from, to),
     ]);
-    const pl = buildManagerPL({ income, records, from, to, reportCurrency, jobs, cleaningCollected });
+    const pl = { ...buildManagerPL({ income, records, from, to, reportCurrency, jobs, cleaningCollected }), ownerPayouts };
     const brandName = url.searchParams.get("brandName") || tenant.brandName || locationId;
 
     if ((url.searchParams.get("format") || "html") === "json") {
@@ -607,6 +622,16 @@ function managerPlHtml({ brandName, fromLabel, toLabel, pl, locale = "en" }) {
       <tr class="tot"><td>${t.plCleaningMargin}</td><td class="n ${pl.cleaning.margin < 0 ? "neg" : "pos"}">${money(pl.cleaning.margin, cur)}</td></tr>
     </table>
     <p class="note">${t.plCleaningNote(pl.cleaning.jobsCounted)}</p>` : ""}
+
+    ${pl.ownerPayouts?.owners?.length ? `
+    <h2>${t.plOwnerPayouts}</h2>
+    <p class="note">${t.plOwnerPayoutsNote}</p>
+    ${pl.ownerPayouts.unattributed ? `<p class="warn">${t.warnUnattributedPayout(money(pl.ownerPayouts.unattributed.owed, cur), pl.ownerPayouts.unattributed.entries)}</p>` : ""}
+    <table>
+      <tr><th>${t.thOwner}</th><th class="n">${t.thCount}</th><th class="n">${t.thAmount}</th></tr>
+      ${pl.ownerPayouts.owners.map((o) => `<tr><td>${escapeHtml(o.name)}</td><td class="n">${o.entries}</td><td class="n">${o.mixedCurrency ? "&mdash;" : money(o.owed, o.currency || cur)}</td></tr>`).join("")}
+      <tr class="tot"><td>${t.plOwnerPayoutsTotal}</td><td class="n"></td><td class="n">${money(pl.ownerPayouts.total, cur)}</td></tr>
+    </table>` : ""}
 
     <h2>${t.plByCategory}</h2>
     ${rows
