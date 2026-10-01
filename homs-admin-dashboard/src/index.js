@@ -706,6 +706,9 @@ export default {
         // that had it visible yesterday loses a tab it was not using; an
         // account that wants it gets it back without a deploy.
         data.showOtaChannels = tenant.showOtaChannels === true;
+        // Same field the statement reads, so one account setting cannot give a
+        // Spanish statement and an English dashboard.
+        data.statementLocale = tenant.statementLocale || tenant.locale || tenant.language || null;
         data.branding = tenant.branding?.primary ? tenant.branding : DEFAULT_BRANDING;
         return Response.json(data);
       } catch (err) {

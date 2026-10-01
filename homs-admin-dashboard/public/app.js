@@ -1,3 +1,203 @@
+// --- Spanish -------------------------------------------------------------
+//
+// Yari, 2026-09-30, the night before the conference: the dashboard is on
+// display and it is a key feature. Its audience is Dominican, and every string
+// in it was English.
+//
+// This translates the RENDERED PAGE rather than the ~95 call sites that build
+// it. A dictionary keyed by the exact English text, applied to text nodes and
+// to the two attributes a user can read, after each render. The reason is risk:
+// touching 95 template literals the night before a demo is 95 chances to break
+// a layout, and this is one function that cannot change any markup, any number
+// or any logic. If it is wrong, the page is still the page.
+//
+// English is untouched: localize() returns immediately unless a Spanish locale
+// was resolved, so the default path does not even walk the DOM.
+const I18N = {
+  es: {
+    // Shell and navigation
+    "HOMS Admin Dashboard": "Panel de Administración HOMS",
+    "Admin Dashboard": "Panel de Administración",
+    "Overview": "Resumen",
+    "Properties": "Propiedades",
+    "OTA Channels": "Canales OTA",
+    "Transactions": "Transacciones",
+    "Cleaning Checklists": "Listas de Limpieza",
+    "Expenses": "Gastos",
+    "Property Inventory": "Inventario de Propiedades",
+    "Reports": "Informes",
+    "Owner Statement": "Estado de Cuenta del Propietario",
+    "Refresh": "Actualizar",
+    "Search by name, property, booking ID, cleaner, transaction, OTA channel...":
+      "Buscar por nombre, propiedad, ID de reserva, limpiador, transacción, canal OTA...",
+    "Loading live data from GHL…": "Cargando datos en vivo desde GHL…",
+
+    // Access
+    "Admin key required": "Se requiere clave de administrador",
+    "Admin key": "Clave de administrador",
+    "Unlock": "Desbloquear",
+    "Cancel": "Cancelar",
+
+    // Expense entry
+    "+ Add Expense": "+ Agregar Gasto",
+    "Add Expense": "Agregar Gasto",
+    "Submit Expense": "Enviar Gasto",
+    "Property": "Propiedad",
+    "Paid On": "Fecha de Pago",
+    "Paid on": "Fecha de pago",
+    "Category": "Categoría",
+    "Description": "Descripción",
+    "Amount": "Monto",
+    "Note": "Nota",
+    "Notes": "Notas",
+    "Vendor": "Proveedor",
+    "Status": "Estado",
+    "Type": "Tipo",
+    "Recurrence": "Recurrencia",
+    "Currency:": "Moneda:",
+    "Cancellation:": "Cancelación:",
+    "— None —": "— Ninguno —",
+    "New expenses are flagged \"Needs Review\" until confirmed.":
+      "Los gastos nuevos quedan marcados como “Requiere Revisión” hasta confirmarse.",
+
+    // Filters and export
+    "Year": "Año",
+    "Year: All": "Año: Todos",
+    "Month: All": "Mes: Todos",
+    "Clear filters": "Limpiar filtros",
+    "All expenses": "Todos los gastos",
+    "Export CSV": "Exportar CSV",
+    "Download CSV": "Descargar CSV",
+    "Print / Save as PDF": "Imprimir / Guardar como PDF",
+
+    // Reports and P&L
+    "Profit & Loss": "Estado de Resultados",
+    "— cash basis": "— base de efectivo",
+    "Revenue": "Ingresos",
+    "Gross revenue": "Ingresos brutos",
+    "Less platform fees": "Menos comisiones de plataforma",
+    "Net revenue": "Ingresos netos",
+    "Recorded revenue": "Ingresos registrados",
+    "Operating expenses": "Gastos operativos",
+    "Total operating expenses": "Total de gastos operativos",
+    "Expenses by category": "Gastos por categoría",
+    "Month by month": "Mes a mes",
+    "Net revenue in, expenses out, by the month money actually moved.":
+      "Ingresos netos y gastos, según el mes en que el dinero realmente se movió.",
+    "Revenue by property": "Ingresos por propiedad",
+    "Revenue — all time": "Ingresos — histórico",
+    "GHL payments collected": "Pagos cobrados en GHL",
+    "MRR (GHL subscriptions)": "MRR (suscripciones GHL)",
+    "Fixed monthly burn": "Gasto fijo mensual",
+    "By source": "Por origen",
+    "By payer": "Por pagador",
+    "Year-end P&L statement": "Estado de resultados de fin de año",
+
+    // Overview cards
+    "Bookings by OTA channel": "Reservas por canal OTA",
+    "Cleaning checklists by status": "Listas de limpieza por estado",
+    "Transactions by payment status": "Transacciones por estado de pago",
+    "Checklists needing follow-up or failed": "Listas con seguimiento pendiente o fallidas",
+    "Inventory needing replacement / missing": "Inventario por reponer / faltante",
+    "OTA channels disconnected / erroring": "Canales OTA desconectados / con error",
+    "Transactions missing links / failed payment": "Transacciones sin enlace / pago fallido",
+    "Needs attention": "Requiere atención",
+    "Contacts": "Contactos",
+    "Inventory Items": "Artículos de Inventario",
+    "Listing name": "Nombre del listado",
+    "Nightly rate": "Tarifa por noche",
+
+    // Empty states
+    "No checklists yet": "Aún no hay listas",
+    "No transactions yet": "Aún no hay transacciones",
+
+    // Status badges. These come from the data, but they are a fixed vocabulary
+    // the account writes, not free text, so they translate safely.
+    "Connected": "Conectado",
+    "Approved": "Aprobado",
+    "Paid": "Pagado",
+    "Pending": "Pendiente",
+    "Needs Review": "Requiere Revisión",
+    "Needs Follow-up": "Requiere Seguimiento",
+    "Failed Inspection": "Inspección Fallida",
+    "Pass — Guest Ready": "Aprobado — Listo para Huéspedes",
+    "adjustment": "ajuste",
+    "incomplete": "incompleto",
+
+    // Import screens
+    "Import expenses": "Importar gastos",
+    "Import the portfolio workbook": "Importar el libro de portafolio",
+    "Read receipts with": "Leer recibos con",
+    "Using": "Usando",
+    "Line": "Línea",
+    "Row": "Fila",
+    "Line number within its own file — hover a row for the file name":
+      "Número de línea dentro de su archivo — pase el cursor sobre una fila para ver el nombre",
+    "It will have to be set on the account by hand.":
+      "Habrá que configurarlo manualmente en la cuenta.",
+  },
+};
+
+let LOCALE = "en";
+
+// Same rules as the Worker's statement resolver, so one account setting cannot
+// give a Spanish statement and an English dashboard. ?lang= wins, then whatever
+// /api/data reported from the tenant config, then English.
+function resolveLocale(fromTenant) {
+  const raw = String(
+    new URLSearchParams(location.search).get("lang") || fromTenant || ""
+  ).trim().toLowerCase();
+  if (!raw) return "en";
+  const base = raw.split(/[-_]/)[0];
+  if (I18N[base]) return base;
+  if (/^(espa|spanish)/.test(raw)) return "es";
+  return "en";
+}
+
+// Walks the rendered page and swaps exact matches. Only whole-string matches,
+// so a partial sentence is never half-replaced; anything not in the dictionary
+// is left exactly as it was.
+function localize(root) {
+  const dict = I18N[LOCALE];
+  if (!dict) return;
+  const node = root || document.body;
+
+  const walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT);
+  const pending = [];
+  while (walker.nextNode()) {
+    const hit = dict[walker.currentNode.nodeValue.trim()];
+    if (hit) pending.push([walker.currentNode, hit]);
+  }
+  // Collected first, then written -- mutating during a walk skips nodes.
+  for (const [n, hit] of pending) n.nodeValue = n.nodeValue.replace(n.nodeValue.trim(), hit);
+
+  for (const el of node.querySelectorAll("[placeholder],[title]")) {
+    for (const attr of ["placeholder", "title"]) {
+      const hit = dict[(el.getAttribute(attr) || "").trim()];
+      if (hit) el.setAttribute(attr, hit);
+    }
+  }
+  document.documentElement.lang = LOCALE;
+}
+
+// Dynamic strings, built by concatenation, so the DOM walker cannot match them.
+const tr = (s) => (I18N[LOCALE] && I18N[LOCALE][s]) || s;
+
+// One observer instead of ninety call sites: every render, overlay and filter
+// redraw passes through the DOM, so watching it catches all of them. The guard
+// stops localize()'s own writes from re-entering; the pass it queues finds
+// nothing left to change and settles.
+let localizing = false;
+function startLocalizeObserver() {
+  if (!I18N[LOCALE]) return;
+  new MutationObserver(() => {
+    if (localizing) return;
+    localizing = true;
+    try { localize(); } finally { localizing = false; }
+  }).observe(document.body, { childList: true, subtree: true, characterData: true });
+  localize();
+}
+
 let DATA = null;
 let activeTab = "overview";
 
@@ -240,8 +440,9 @@ async function loadData() {
   try {
     const res = await apiFetch("/api/data?locationId=" + encodeURIComponent(locationId));
     const json = await res.json();
-    if (!res.ok) throw new Error(json.error || "Failed to load data");
+    if (!res.ok) throw new Error(json.error || tr("Failed to load data"));
     DATA = json;
+    LOCALE = resolveLocale(json.statementLocale);
     applyBranding(json.branding);
     // Hidden rather than removed, so turning the flag on needs no deploy.
     const otaTab = document.querySelector('.tab[data-tab="ota"]');
@@ -252,15 +453,16 @@ async function loadData() {
     if (search && !showOta()) {
       search.placeholder = search.placeholder.replace(/,\s*OTA channel/i, "");
     }
-    $("#fetchedAt").textContent = "Updated " + new Date(json.fetchedAt).toLocaleTimeString();
+    $("#fetchedAt").textContent = tr("Updated") + " " + new Date(json.fetchedAt).toLocaleTimeString();
     // The header used to carry a hardcoded "DEMO" pill from when this only ran
     // against DEMO-HOMS -- it showed on every tenant regardless of account.
     const label = $("#tenantLabel");
     if (label) label.textContent = json.tenantLabel || "Admin Dashboard";
     renderAll();
+    startLocalizeObserver();
   } catch (err) {
     $("#error").hidden = false;
-    $("#error").textContent = "Couldn't load data: " + err.message;
+    $("#error").textContent = tr("Couldn't load data:") + " " + err.message;
   } finally {
     $("#loading").hidden = true;
   }

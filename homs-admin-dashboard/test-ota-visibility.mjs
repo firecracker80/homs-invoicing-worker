@@ -92,4 +92,19 @@ const dataFor = async (tenant) => {
   console.log("4) The channels are still fetched and still on the payload, just not shown");
 }
 
+// ---- 5. the payload carries the account language -------------------
+// The dashboard front end cannot read KV. If this field stops being sent the
+// page silently falls back to English, and a Spanish client sees an English
+// dashboard with no error anywhere -- which is exactly how it behaved before
+// 2026-09-30.
+{
+  assert.strictEqual((await dataFor({ statementLocale: "es" })).body.statementLocale, "es",
+    "the account language reaches the page, or the page cannot render in it");
+  assert.strictEqual((await dataFor({ locale: "en-US" })).body.statementLocale, "en-US",
+    "falling back to the locale field, in the same order the statement uses");
+  assert.strictEqual((await dataFor({})).body.statementLocale, null,
+    "an account that sets neither sends null, so the absence is explicit rather than undefined");
+  console.log("5) The account language is on the payload, so the front end can act on it");
+}
+
 console.log("\nPASS — OTA Channels are hidden until a client asks, and nothing about them is deleted.");
