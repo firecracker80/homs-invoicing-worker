@@ -40,8 +40,21 @@ function round2(n) { return Math.round(n * 100) / 100; }
 
 function adminAuthorized(request, tenant, env) {
   const given = request.headers?.get?.("X-Admin-Secret") || "";
-  const expected = tenant?.adminSecret || env.ADMIN_SECRET;
-  return expected && given === expected;
+  if (!given) return false;
+  // EITHER the tenant's own secret or the operator's global one.
+  //
+  // This used to be `tenant?.adminSecret || env.ADMIN_SECRET`, so a tenant that
+  // had its own secret REPLACED the global rather than adding to it -- and the
+  // admin dashboard, which holds exactly one secret, was then locked out of
+  // precisely those accounts. DEMO-HOMS has one, which is why its manager
+  // statement 401'd while every other account would have worked (Yari,
+  // 2026-10-01).
+  //
+  // It grants nothing new. env.ADMIN_SECRET already provisions and reconfigures
+  // any account, and already worked for every tenant without an override -- and
+  // for new tenants, where there is no record to carry one. The old rule was an
+  // inconsistency, not a boundary.
+  return [tenant?.adminSecret, env.ADMIN_SECRET].some((expected) => expected && given === expected);
 }
 
 // Owner/manager statements are meant to be iframed (GHL Custom Menu Link),

@@ -137,4 +137,27 @@ const call = async (qs, env = baseEnv, headers = { Authorization: "Bearer admin-
   console.log("8) An unreachable invoicing Worker reports a reachability problem, not an empty statement");
 }
 
+// ---- 9. an upstream 401 is never handed to the page as a 401 -------
+// Yari, 2026-10-01: "when i enter the admin key it says i am unauthorized but
+// everything else opens."
+//
+// apiFetch() in the page treats ANY 401 as "this person's session expired" and
+// opens the admin key prompt. Passing the invoicing Worker's 401 straight
+// through therefore asks the reader to re-enter a key that cannot help, and
+// tells them they are unauthorized when their session was never in question.
+// What actually failed is this Worker's credential against that one, which is
+// configuration and nothing the reader holds.
+{
+  for (const upstream of [401, 403]) {
+    serveWorker(upstream, { error: "Unauthorized" });
+    const out = await call(`locationId=${CLIENT}`);
+    assert.notStrictEqual(out.status, 401,
+      `an upstream ${upstream} must not reach the page as a 401, or it re-prompts for a key that cannot help`);
+    assert.strictEqual(out.status, 502, "it is an upstream problem, and says so");
+    assert.match(out.body.detail, /not your login/i, "and tells the reader their session is fine");
+    assert.match(out.body.detail, /INVOICING_ADMIN_SECRET/, "and names the setting that actually has to change");
+  }
+  console.log("9) An upstream 401 becomes a 502 that names the real problem, instead of re-prompting for a key");
+}
+
 console.log("\nPASS — one definition of the manager's money, fetched under the dashboard's own gate.");
