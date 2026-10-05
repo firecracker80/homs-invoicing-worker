@@ -19,7 +19,17 @@ class Text {
   constructor(v) { this.nodeValue = v; this.children = []; this.attrs = {}; }
 }
 class El {
-  constructor(tag, attrs = {}) { this.tagName = tag; this.attrs = attrs; this.children = []; this.nodeValue = null; }
+  constructor(tag, attrs = {}) {
+    this.tagName = tag; this.attrs = attrs; this.children = []; this.nodeValue = null;
+    this.dataset = {};
+    // Only what paintLangToggle touches. If it starts needing more, this breaks
+    // loudly rather than quietly passing.
+    this.classes = new Set(String(attrs.class || "").split(/\s+/).filter(Boolean));
+    this.classList = {
+      toggle: (c, on) => (on ? this.classes.add(c) : this.classes.delete(c)),
+      contains: (c) => this.classes.has(c),
+    };
+  }
   getAttribute(k) { return k in this.attrs ? this.attrs[k] : null; }
   setAttribute(k, v) { this.attrs[k] = v; }
   querySelectorAll() { // only ever called as "[placeholder],[title]"
@@ -85,7 +95,10 @@ function loadApp(search, body) {
   // Top-level `let LOCALE` is a lexical binding, not a property of the sandbox,
   // so it can only be set by running code inside the same context.
   sandbox.vmEval = (code) => vm.runInContext(code, sandbox);
-  sandbox.setLocale = (l) => vm.runInContext(`LOCALE = ${JSON.stringify(l)}; localize();`, sandbox);
+  // Renders at a locale outright, which is what the tests below it mean. NOT
+  // the app's own setLocale(): that is a real function now and has its own
+  // tests, and overwriting it here would hide them.
+  sandbox.forceLocale = (l) => vm.runInContext(`LOCALE = ${JSON.stringify(l)}; localize();`, sandbox);
   return sandbox;
 }
 
@@ -121,7 +134,7 @@ const textsOf = (root) => textNodesOf(root).map((n) => n.nodeValue.trim());
   const body = page();
   const app = loadApp("", body);
   assert.strictEqual(app.resolveLocale(null), "en");
-  app.setLocale("en");
+  app.forceLocale("en");
   assert.ok(textsOf(body).includes("Overview"), "English is left exactly as it was");
   assert.ok(textsOf(body).includes("Profit & Loss"));
   console.log("1) An account with no locale set renders English, untouched");
@@ -133,7 +146,7 @@ const textsOf = (root) => textNodesOf(root).map((n) => n.nodeValue.trim());
 {
   const body = page();
   const app = loadApp("", body);
-  app.setLocale(app.resolveLocale("es"));
+  app.forceLocale(app.resolveLocale("es"));
   const t = textsOf(body);
   assert.ok(t.includes("Resumen"), "the tab");
   assert.ok(t.includes("Estado de Cuenta del Propietario"));
@@ -151,7 +164,7 @@ const textsOf = (root) => textNodesOf(root).map((n) => n.nodeValue.trim());
 {
   const body = page();
   const app = loadApp("", body);
-  app.setLocale("es");
+  app.forceLocale("es");
   const t = textsOf(body);
   assert.ok(t.includes("Casa Bonita"), "a property name is data, not a label");
   assert.ok(t.includes("$1234.56"), "and so is an amount -- untouched, same separators");
@@ -171,7 +184,7 @@ const textsOf = (root) => textNodesOf(root).map((n) => n.nodeValue.trim());
 {
   const body = page();
   const app = loadApp("", body);
-  app.setLocale("es");
+  app.forceLocale("es");
   const t = textsOf(body);
   for (const leak of ["Overview", "Owner Statement", "Refresh", "Profit & Loss", "Gross revenue", "Needs Review", "No checklists yet"]) {
     assert.ok(!t.includes(leak), `"${leak}" is still in English`);
@@ -214,7 +227,7 @@ const textsOf = (root) => textNodesOf(root).map((n) => n.nodeValue.trim());
 // which held the full version. Both were still English on the live dashboard.
 {
   const app = loadApp("", page());
-  app.setLocale("es");
+  app.forceLocale("es");
   assert.strictEqual(app.vmEval(JSON.stringify("Updated").replace(/^/, "tr(").replace(/$/, ")")), "Actualizado",
     "the header timestamp label, built in JS and unreachable by the walker");
   assert.strictEqual(app.vmEval("tr(\"Refresh\")"), "Actualizar");
@@ -225,7 +238,7 @@ const textsOf = (root) => textNodesOf(root).map((n) => n.nodeValue.trim());
   });
   body.children.push(stripped);
   const app2 = loadApp("", body);
-  app2.setLocale("es");
+  app2.forceLocale("es");
   assert.ok(stripped.getAttribute("placeholder").startsWith("Buscar por"),
     "the OTA-stripped placeholder is the one actually displayed, so it has to translate too");
   console.log("7) The header timestamp and the OTA-stripped search placeholder both translate");
@@ -349,4 +362,149 @@ const textsOf = (root) => textNodesOf(root).map((n) => n.nodeValue.trim());
   console.log(`9) All ${new Set(prose).size} labels in the manager panel are dictionary keys, so none can stay English`);
 }
 
-console.log("\nPASS — the dashboard renders in the account's language, and the data in none.");
+// ---- 10. switching back restores English exactly --------------------
+// Yari, 2026-10-05: "the dashboard did not change back to english once the
+// language switched back to english."
+//
+// The first version of localize() only went one way. Re-rendered panels came
+// back English on their own because they are rebuilt through tr(), but the
+// static shell -- tabs, header, search box -- is never rebuilt, so it stayed
+// Spanish until a full page reload. With a toggle on the page that is the
+// second click, so the round trip is the feature, not an edge case.
+{
+  const body = page();
+  const app = loadApp("", body);
+  const input = body.children.find((c) => c.tagName === "input");
+
+  const before = textsOf(body);
+  const placeholderBefore = input.getAttribute("placeholder");
+
+  app.setLocale("es");
+  assert.ok(textsOf(body).includes("Resumen"), "switched to Spanish");
+
+  app.setLocale("en");
+  assert.deepStrictEqual(textsOf(body), before,
+    "every text node is back to the English it started as, in the same order");
+  assert.strictEqual(input.getAttribute("placeholder"), placeholderBefore,
+    "including the search placeholder, which is an attribute and not a text node");
+  assert.strictEqual(app.document.documentElement.lang, "en", "and the document says so again");
+
+  // And it is not a one-shot: a second round trip has to work too, which is
+  // what rules out a restore that consumes its own record.
+  app.setLocale("es");
+  assert.ok(textsOf(body).includes("Resumen"), "and it can go back to Spanish again");
+  app.setLocale("en");
+  assert.deepStrictEqual(textsOf(body), before, "and back to English again");
+  console.log("10) Switching to Spanish and back restores English exactly, repeatably");
+}
+
+// ---- 11. a viewer's own pick survives the next visit ----------------
+// The dashboard is left open on a display, and whoever reads it may not be the
+// person the account was configured for. A pick made from the toggle is that
+// person's, so it outranks the account default -- but not a ?lang= link, which
+// is an explicit instruction for the view being opened right now.
+{
+  const app = loadApp("", page());
+  assert.strictEqual(app.resolveLocale("en-US"), "en", "nothing stored yet, the account decides");
+
+  app.setLocale("es");
+  assert.strictEqual(app.resolveLocale("en-US"), "es",
+    "once picked, it outranks an English account on the next load");
+  assert.strictEqual(app.resolveLocale(null), "es");
+
+  app.setLocale("en");
+  assert.strictEqual(app.resolveLocale("es"), "en",
+    "and picking English outranks a Spanish account, which is the case that matters");
+
+  // A stored pick is per browser, so it must not leak into a fresh one.
+  assert.strictEqual(loadApp("", page()).resolveLocale("es"), "es",
+    "another browser is unaffected and still follows the account");
+
+  // The link still wins, or a statement sent to one owner in their language
+  // would open in whatever the sender's browser happened to remember.
+  //
+  // The stored pick has to be the OPPOSITE of the link for this to mean
+  // anything, and it has to be stored for real: setLocale returns early when
+  // asked for the language the page is already in, so going out to Spanish
+  // first is what makes the second call write "en".
+  const linked = loadApp("?lang=es", page());
+  linked.setLocale("es");
+  linked.setLocale("en");
+  assert.strictEqual(linked.vmEval("localStorage.getItem(\"homs_lang\")"), "en",
+    "English really is the stored pick, so the next line is a contest and not a coincidence");
+  assert.strictEqual(linked.resolveLocale("en-US"), "es", "?lang= outranks a stored pick");
+  console.log("11) A pick from the toggle sticks for that browser, and ?lang= still outranks it");
+}
+
+// ---- 12. the toggle is wired to the page, not to the statement ------
+// The owner statement has its own EN/ES, which changes THAT STATEMENT and not
+// the page -- that is how Elena's statement gets printed in Spanish while the
+// manager works in English. The two must not share a class, or printing one
+// statement in Spanish would flip the whole dashboard.
+{
+  const html = fs.readFileSync("./public/index.html", "utf8");
+  assert.match(html, /id="langToggle"/, "the toggle is in the topbar markup");
+  assert.match(html, /class="btn ui-lang-btn active" data-lang="en"/);
+  assert.match(html, /data-lang="es"/);
+
+  const app = loadApp("", page());
+  const src = fs.readFileSync("./public/app.js", "utf8");
+  assert.ok(src.includes('closest(".ui-lang-btn")'), "its handler is scoped to its own class");
+  assert.ok(src.includes('closest(".lang-btn")'),
+    "and the statement's own switch is still handled separately");
+  // .ui-lang-btn must not be matchable as .lang-btn, which is why the name is
+  // a separate class rather than an extra one on the same buttons.
+  //
+  // Token-exact on purpose. A /\blang-btn\b/ test also matches INSIDE
+  // "ui-lang-btn" -- the very string being allowed here -- so it would have
+  // passed whatever the markup said.
+  const classTokens = [...html.matchAll(/class="([^"]*)"/g)].flatMap((m) => m[1].trim().split(/\s+/));
+  assert.ok(!classTokens.includes("lang-btn"),
+    "the topbar buttons do not also carry .lang-btn, which would trigger both handlers");
+
+  // paintLangToggle shows the language the page is in, not the button clicked.
+  const buttons = [new El("button", { class: "btn ui-lang-btn active" }), new El("button", { class: "btn ui-lang-btn" })];
+  buttons[0].dataset.lang = "en";
+  buttons[1].dataset.lang = "es";
+  app.document.querySelectorAll = (sel) => (sel === ".ui-lang-btn" ? buttons : []);
+  app.setLocale("es");
+  assert.ok(!buttons[0].classList.contains("active") && buttons[1].classList.contains("active"),
+    "ES is lit after switching to Spanish");
+  app.setLocale("en");
+  assert.ok(buttons[0].classList.contains("active") && !buttons[1].classList.contains("active"),
+    "and EN again after switching back");
+  console.log("12) The topbar toggle has its own class and handler, and lights the active language");
+}
+
+// ---- 13. switching language does not refetch the manager figures ----
+// The manager statement is the one panel whose numbers come from the invoicing
+// Worker over the network. Re-rendering it is necessary -- its labels are built
+// through tr() and cannot be swapped in the DOM -- but refetching is not: the
+// figures are already in managerPl. Without this, every click on the toggle
+// would blank the panel and wait on another Worker.
+{
+  const app = loadApp("", page());
+  const PANELS = ["renderOverview", "renderProperties", "renderOta", "renderTransactions",
+                  "renderChecklists", "renderExpenses", "renderInventory", "renderReports",
+                  "renderStatement", "renderManagerStatement", "loadManagerPl"];
+  // Each of those is a top-level function declaration, so it is a property of
+  // the sandbox global and can be swapped for a recorder.
+  app.vmEval('DATA = { kind: "client" }; __calls = []; ' +
+    JSON.stringify(PANELS) + '.forEach((n) => { globalThis[n] = () => __calls.push(n); });');
+  app.vmEval("renderAll(); __first = __calls.slice();");
+  assert.ok(app.vmEval("__first").includes("loadManagerPl"),
+    "a normal load still fetches the manager figures");
+
+  app.vmEval("__calls = [];");
+  app.setLocale("es");
+  const onSwitch = app.vmEval("__calls");
+  assert.ok(onSwitch.includes("renderManagerStatement"),
+    "a language switch repaints the manager panel, so its labels change");
+  assert.ok(!onSwitch.includes("loadManagerPl"),
+    "but does not go back to the invoicing Worker for figures it already has");
+  assert.ok(onSwitch.includes("renderOverview") && onSwitch.includes("renderExpenses"),
+    "and every other panel is rebuilt, since their labels are built in JS too");
+  console.log("13) A language switch rebuilds every panel without refetching the manager figures");
+}
+
+console.log("\nPASS — the dashboard renders in the account's language, switches both ways, and translates no data.");
