@@ -664,6 +664,10 @@ async function loadManagerPl() {
   renderManagerStatement();
 
   const params = new URLSearchParams({ locationId });
+  // No month selected is the "All time" entry in the dropdown, and it has to
+  // say so. Sending nothing got the Worker's 30-day default, so the panel
+  // claimed All time while hiding every record older than a month.
+  if (!managerPl.month) params.set("period", "all");
   if (managerPl.month) {
     const [y, m] = managerPl.month.split("-").map(Number);
     params.set("from", `${managerPl.month}-01`);

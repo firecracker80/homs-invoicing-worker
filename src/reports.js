@@ -77,6 +77,25 @@ function statementAuthorized(request, tenant, env, url, tokenField) {
 // Default window: last 30 days, if the caller didn't specify one.
 function resolveWindow(url) {
   const now = new Date();
+
+  // period=all means every dated record, which the caller has to ask for.
+  //
+  // The dashboard's dropdown said "All time" while sending no range at all, so
+  // it got the 30-day default and silently hid everything older -- Yari,
+  // 2026-10-05: "the all-time is not reflecting the 215 dop from july". The
+  // label was not wrong about what she wanted, it was wrong about what it did.
+  //
+  // Open at both ends rather than "up to today": an expense dated forward, or a
+  // booking paid in advance, is still a record of this account and "all" is not
+  // a word that should quietly stop at this morning.
+  if ((url.searchParams.get("period") || "").toLowerCase() === "all") {
+    return {
+      from: "0001-01-01T00:00:00.000Z",
+      to: "9999-12-31T00:00:00.000Z",
+      fromLabel: null, toLabel: null, allTime: true,
+    };
+  }
+
   const to = url.searchParams.get("to") || now.toISOString().slice(0, 10);
   const fromDefault = new Date(now.getTime() - 30 * 86400000).toISOString().slice(0, 10);
   const from = url.searchParams.get("from") || fromDefault;
@@ -84,7 +103,10 @@ function resolveWindow(url) {
   // of that whole day, matching how a human reads a date-range statement.
   const toExclusive = new Date(`${to}T00:00:00.000Z`);
   toExclusive.setUTCDate(toExclusive.getUTCDate() + 1);
-  return { from: `${from}T00:00:00.000Z`, to: toExclusive.toISOString(), fromLabel: from, toLabel: to };
+  return {
+    from: `${from}T00:00:00.000Z`, to: toExclusive.toISOString(),
+    fromLabel: from, toLabel: to, allTime: false,
+  };
 }
 
 // What a client reads, rather than what the database calls it -- in the
@@ -202,6 +224,7 @@ const UI = {
 
     plTitle: "Manager P&amp;L",
     plPeriod: (from, to) => `${from} to ${to}`,
+    plPeriodAllTime: "All time",
     plIncome: "Income from bookings",
     plExpenses: "Expenses",
     plNet: "Net",
@@ -269,6 +292,7 @@ const UI = {
 
     plTitle: "Estado de resultados del administrador",
     plPeriod: (from, to) => `del ${from} al ${to}`,
+    plPeriodAllTime: "Todo el período",
     plIncome: "Ingresos por reservas",
     plExpenses: "Gastos",
     plNet: "Neto",
@@ -425,7 +449,7 @@ async function queryStatement(env, locationId, recipient, from, to, recipientNam
   return { summary, detail, incomeTotal, shadowTotal, currency: detail[0]?.currency || summary[0]?.currency || "USD" };
 }
 
-function statementHtml({ brandName, heading, recipientName, fromLabel, toLabel, stmt, locale = "en" }) {
+function statementHtml({ brandName, heading, recipientName, fromLabel, toLabel, allTime = false, stmt, locale = "en" }) {
   const t = strings(locale);
   const rows = stmt.detail.map(d => `
     <tr>
@@ -479,7 +503,8 @@ function statementHtml({ brandName, heading, recipientName, fromLabel, toLabel, 
 </style></head>
 <body><div class="wrap">
   <h1>${escapeHtml(brandName)}</h1>
-  <div class="sub">${escapeHtml(heading)}${recipientName ? ` · ${escapeHtml(recipientName)}` : ""} · ${fromLabel} – ${toLabel}</div>
+  <div class="sub">${escapeHtml(heading)}${recipientName ? ` · ${escapeHtml(recipientName)}` : ""} · ${
+    allTime ? strings(locale).plPeriodAllTime : `${fromLabel} – ${toLabel}`}</div>
   <!--
     Money from a booking platform goes to the client directly and never passes
     through GHL, so an OTA booking produces no invoice, no payment and no ledger
@@ -521,7 +546,7 @@ async function handleStatement(request, env, recipient, tokenField) {
   if (!statementAuthorized(request, tenant, env, url, tokenField)) return json({ error: "Unauthorized" }, 401);
   if (!env.LEDGER_DB) return json({ error: "Ledger not configured (LEDGER_DB binding missing)" }, 500);
 
-  const { from, to, fromLabel, toLabel } = resolveWindow(url);
+  const { from, to, fromLabel, toLabel, allTime } = resolveWindow(url);
   const locale = resolveLocale(url, tenant);
   const recipientName = url.searchParams.get("recipientName") || null;
   const stmt = await queryStatement(env, locationId, recipient, from, to, recipientName);
@@ -536,7 +561,7 @@ async function handleStatement(request, env, recipient, tokenField) {
   if ((url.searchParams.get("format") || "html") === "json") {
     return json({ locationId, recipient, recipientName, locale, from: fromLabel, to: toLabel, ...stmt });
   }
-  return html(statementHtml({ brandName, heading, recipientName, fromLabel, toLabel, stmt, locale }));
+  return html(statementHtml({ brandName, heading, recipientName, fromLabel, toLabel, allTime, stmt, locale }));
 }
 
 export async function handleOwnerStatement(request, env) {
@@ -562,7 +587,7 @@ export async function handleManagerPL(request, env) {
   const pit = tenant.ghlPit || (tenant.ghlPitSecretName && env[tenant.ghlPitSecretName]);
   if (!pit) return json({ error: "No GHL PIT configured for this tenant -- expenses cannot be read" }, 500);
 
-  const { from, to, fromLabel, toLabel } = resolveWindow(url);
+  const { from, to, fromLabel, toLabel, allTime } = resolveWindow(url);
   const locale = resolveLocale(url, tenant);
   const recipientName = url.searchParams.get("recipientName") || null;
   const reportCurrency = (url.searchParams.get("currency") || tenant.currency || "USD").toUpperCase();
@@ -581,9 +606,9 @@ export async function handleManagerPL(request, env) {
     const brandName = url.searchParams.get("brandName") || tenant.brandName || locationId;
 
     if ((url.searchParams.get("format") || "html") === "json") {
-      return json({ locationId, from: fromLabel, to: toLabel, recipientName, locale, ...pl });
+      return json({ locationId, from: fromLabel, to: toLabel, allTime, recipientName, locale, ...pl });
     }
-    return html(managerPlHtml({ brandName, fromLabel, toLabel, pl, locale }));
+    return html(managerPlHtml({ brandName, fromLabel, toLabel, allTime, pl, locale }));
   } catch (err) {
     return json({ error: err.message || "Unknown error" }, err.status && err.status >= 400 && err.status < 600 ? err.status : 502);
   }
@@ -591,7 +616,7 @@ export async function handleManagerPL(request, env) {
 
 const money = (n, cur) => `${cur} ${n < 0 ? "-" : ""}${Math.abs(n).toFixed(2)}`;
 
-function managerPlHtml({ brandName, fromLabel, toLabel, pl, locale = "en" }) {
+function managerPlHtml({ brandName, fromLabel, toLabel, allTime = false, pl, locale = "en" }) {
   const t = strings(locale);
   const cur = pl.currency;
   const rows = pl.byCategory.map((c) =>
@@ -652,7 +677,7 @@ function managerPlHtml({ brandName, fromLabel, toLabel, pl, locale = "en" }) {
     .note{color:var(--muted);font-size:13px}
     </style></head><body>
     <h1>${escapeHtml(brandName)} &mdash; ${t.plTitle}</h1>
-    <p class="period">${t.plPeriod(escapeHtml(fromLabel), escapeHtml(toLabel))}</p>
+    <p class="period">${allTime ? t.plPeriodAllTime : t.plPeriod(escapeHtml(fromLabel), escapeHtml(toLabel))}</p>
     ${warn.join("")}
     <table>
       <tr><td>${t.plIncome}</td><td class="n">${dash || money(pl.income, cur)}</td></tr>

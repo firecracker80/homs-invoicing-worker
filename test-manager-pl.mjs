@@ -467,4 +467,84 @@ const approved = { review_status: "approved", paid_on: "2026-09-10", category: "
   console.log("18) The page converts DOP before showing it, shows the original too, and withholds a total it cannot compute");
 }
 
-console.log("\nPASS — manager P&L: a reimbursable cost is not an expense, every currency is converted at its own recorded rate or not at all, and nothing is quietly left out.");
+// ---- 19. "All time" has to mean all time -----------------------------
+// Yari, 2026-10-05, before merging the currency fix: "the all-time is not
+// reflecting the 215 dop from july."
+//
+// The dropdown said All time and sent no range at all, so the Worker applied
+// its 30-day default and the panel quietly hid everything older than a month.
+// Her two July expenses -- 180 + 35 DOP -- were not excluded, flagged or
+// counted anywhere. They were simply out of frame, under a label promising
+// otherwise, which is the worst of the three.
+{
+  const { handleManagerPL } = await import("./src/reports.js");
+
+  // Dated in July. Today is well past the 30-day default, which is the point.
+  const july = [
+    rec({ expense_name: "Test Villa 1 - Carpet Wash", review_status: "approved", category: "maintenance_repairs",
+          paid_on: "2026-07-20", amount: { value: 180, currency: "DOP" }, currency: "DOP",
+          converted_amount: { value: 3.06 }, exchange_rate: 0.016961163,
+          can_reimburse: { value: 180 } }, "jul1"),
+    rec({ expense_name: "Test Villa 1 - Pest Control", review_status: "approved", category: "pest_control",
+          paid_on: "2026-07-15", amount: { value: 35, currency: "DOP" }, currency: "DOP",
+          converted_amount: { value: 0.6 }, exchange_rate: 0.016961163,
+          can_reimburse: { value: 35 } }, "jul2"),
+  ];
+  globalThis.fetch = async (url) => ({
+    ok: true, status: 200,
+    text: async () => JSON.stringify(String(url).includes("/records/search") ? { records: july } : {}),
+  });
+  const env = {
+    TENANTS: { get: async () => ({ brandName: "B", currency: "USD", managerReportToken: "t", ghlPit: "pit" }) },
+    LEDGER_DB: { prepare: () => ({ bind: () => ({ all: async () => ({ results: [{ currency: "USD", total_minor: 50000, n: 1 }] }) }) }) },
+  };
+  const get = async (qs) => {
+    const res = await handleManagerPL(new Request(`https://w.dev/reports/manager-pl?locationId=l&token=t&${qs}`), env);
+    return res.json();
+  };
+
+  // The default is unchanged: a caller that asks for nothing still gets 30 days
+  // and therefore does not see July. Changing that silently would move every
+  // other report in the system.
+  const dflt = await get("format=json");
+  assert.strictEqual(dflt.allTime, false);
+  assert.deepStrictEqual(dflt.reimbursableByCurrency, [], "the default window still ends before July");
+
+  const all = await get("format=json&period=all");
+  assert.strictEqual(all.allTime, true);
+  assert.deepStrictEqual(all.reimbursableByCurrency, [{ currency: "DOP", total: 215, entries: 2 }],
+    "180 + 35 DOP, the exact figure Yari was looking for");
+  assert.ok(Math.abs(all.reimbursableOutstanding - 3.66) < 0.02,
+    `and about US$3.66 once converted (got ${all.reimbursableOutstanding})`);
+
+  // The page says All time rather than printing the sentinel dates that make it
+  // work -- "0001-01-01 to 9999-12-31" is a correct range and a useless label.
+  const page = await (await handleManagerPL(
+    new Request("https://w.dev/reports/manager-pl?locationId=l&token=t&period=all"), env)).text();
+  assert.ok(/All time/.test(page), "the period line reads All time");
+  assert.ok(!/0001-01-01|9999/.test(page), "and never shows the sentinel dates");
+
+  const es = await (await handleManagerPL(
+    new Request("https://w.dev/reports/manager-pl?locationId=l&token=t&period=all"),
+    { ...env, TENANTS: { get: async () => ({ brandName: "B", currency: "USD", managerReportToken: "t", ghlPit: "pit", statementLocale: "es" }) } })).text();
+  assert.ok(/Todo el período/.test(es), "in Spanish too");
+  assert.ok(!/All time/.test(es));
+
+  // Open at the far end as well as the near one. An expense dated forward --
+  // an annual insurance premium, a prepaid booking -- is still a record of this
+  // account, and "all" is not a word that should quietly stop at this morning.
+  const nextYear = `${new Date().getUTCFullYear() + 1}-06-30`;
+  globalThis.fetch = async (url) => ({
+    ok: true, status: 200,
+    text: async () => JSON.stringify(String(url).includes("/records/search") ? {
+      records: [rec({ expense_name: "Insurance, paid ahead", review_status: "approved", category: "insurance",
+                      paid_on: nextYear, amount: usd(500), can_reimburse: usd(500) }, "fwd")],
+    } : {}),
+  });
+  const ahead = await get("format=json&period=all");
+  assert.strictEqual(ahead.reimbursableOutstanding, 500,
+    "a forward-dated record is inside all time, not beyond its far edge");
+  console.log("19) period=all covers every dated record, including July, and labels itself honestly");
+}
+
+console.log("\nPASS — manager P&L: a reimbursable cost is not an expense, every currency is converted at its own recorded rate or not at all, all time means all time, and nothing is quietly left out.");

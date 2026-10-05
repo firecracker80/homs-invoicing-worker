@@ -670,4 +670,35 @@ const textsOf = (root) => textNodesOf(root).map((n) => n.nodeValue.trim());
   console.log("16) localize() settles after one pass, so it cannot drive the observer that calls it");
 }
 
-console.log("\nPASS — the dashboard renders in the account's language, switches both ways, settles after one pass, translates no data, and states no figure it cannot know.");
+// ---- 17. the panel asks for the period its label promises -----------
+// Yari, 2026-10-05: "the all-time is not reflecting the 215 dop from july."
+//
+// The dropdown's "All time" entry sent no date range at all, so the Worker
+// applied its 30-day default and the panel hid every older record under a label
+// saying otherwise. The Worker now understands period=all; this asserts the
+// page actually asks for it, which is the half that was wrong.
+{
+  const app = loadApp("?locationId=L1", page());
+  const asked = [];
+  app.fetch = async (url) => { asked.push(String(url)); return { ok: true, json: async () => ({}) }; };
+
+  app.vmEval("managerPl.month = null; loadManagerPl();");
+  await new Promise((r) => setTimeout(r, 0));
+  const allTimeCall = asked.find((u) => u.includes("/api/manager-pl"));
+  assert.ok(allTimeCall, "it called the manager P&L route");
+  assert.match(allTimeCall, /period=all/,
+    "with no month selected it asks for all time, rather than leaving the Worker to default to 30 days");
+
+  // A chosen month must NOT carry period=all, or picking September would still
+  // return everything and the dropdown would do nothing at all.
+  asked.length = 0;
+  app.vmEval('managerPl.month = "2026-09"; loadManagerPl();');
+  await new Promise((r) => setTimeout(r, 0));
+  const monthCall = asked.find((u) => u.includes("/api/manager-pl"));
+  assert.ok(!/period=all/.test(monthCall), "a chosen month is a real window, not all time");
+  assert.match(monthCall, /from=2026-09-01/);
+  assert.match(monthCall, /to=2026-09-30/, "and ends on the last day of that month, inclusive");
+  console.log("17) All time asks the Worker for all time; a chosen month asks for that month");
+}
+
+console.log("\nPASS — the dashboard renders in the account's language, switches both ways, settles after one pass, translates no data, asks for the period it names, and states no figure it cannot know.");
