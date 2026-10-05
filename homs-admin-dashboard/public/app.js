@@ -47,6 +47,12 @@ const I18N = {
     "Cleaning": "Limpieza",
     "Part of the income above, not additional to it.": "Forma parte de los ingresos de arriba, no se suma a ellos.",
     "Cleaning fees collected": "Tarifas de limpieza cobradas",
+    "Kept on cleaning (at most)": "Retenido por limpieza (como máximo)",
+    "Net (at most)": "Neto (como máximo)",
+    "At most: cleans with no cleaner cost recorded are missing from this, so the real figure is lower.":
+      "Como máximo: las limpiezas sin costo de limpiador registrado no están incluidas, así que la cifra real es menor.",
+    "No cleaner cost is recorded for any clean in this period, so what was kept on cleaning cannot be worked out. The fee collected is shown; the rest is left blank because there is nothing to base it on.":
+      "No hay costo de limpiador registrado para ninguna limpieza de este período, así que no se puede calcular lo retenido por limpieza. Se muestra la tarifa cobrada; el resto queda en blanco porque no hay con qué calcularlo.",
     "Paid to cleaners": "Pagado a los limpiadores",
     "Kept on cleaning": "Retenido por limpieza",
     "Turnover Type": "Tipo de Limpieza",
@@ -736,10 +742,11 @@ function renderManagerStatement() {
         <tbody>
           <tr><td>Income from bookings</td><td>${pl.mixedIncomeCurrency ? "—" : m(pl.income)}</td></tr>
           <tr><td>Expenses</td><td>(${m(pl.expenses)})</td></tr>
-          <tr class="statement-net"><td>Net</td><td>${m(pl.net)}</td></tr>
+          <tr class="statement-net"><td>${pl.netIsCeiling ? "Net (at most)" : "Net"}</td><td>${m(pl.net)}</td></tr>
           <tr><td>Recoverable from owners</td><td>${m(pl.reimbursableOutstanding)}</td></tr>
         </tbody>
       </table>
+      ${pl.netIsCeiling ? `<p class="note">At most: cleans with no cleaner cost recorded are missing from this, so the real figure is lower.</p>` : ""}
       <p class="note">Expenses count only the share the manager cannot recover, plus what was paid to cleaners. Money recoverable from owners is listed but not treated as a cost.</p>
 
       ${c.collected || c.paidToCleaners ? `
@@ -748,10 +755,12 @@ function renderManagerStatement() {
       <table class="statement-summary">
         <tbody>
           <tr><td>Cleaning fees collected</td><td>${m(c.collected)}</td></tr>
-          <tr><td>Paid to cleaners</td><td>(${m(c.paidToCleaners)})</td></tr>
-          <tr class="statement-net"><td>Kept on cleaning</td><td>${m(c.margin)}</td></tr>
+          <tr><td>Paid to cleaners</td><td>${c.marginKnown === false ? "—" : `(${m(c.paidToCleaners)})`}</td></tr>
+          <tr class="statement-net"><td>${c.marginIsCeiling ? "Kept on cleaning (at most)" : "Kept on cleaning"}</td><td>${c.marginKnown === false ? "—" : m(c.margin)}</td></tr>
         </tbody>
       </table>
+      ${c.marginKnown === false ? `<p class="note">No cleaner cost is recorded for any clean in this period, so what was kept on cleaning cannot be worked out. The fee collected is shown; the rest is left blank because there is nothing to base it on.</p>` : ""}
+      ${c.marginIsCeiling ? `<p class="note">At most: cleans with no cleaner cost recorded are missing from this, so the real figure is lower.</p>` : ""}
       ${turnRows ? `<table><tr><th>Turnover Type</th><th class="n">Count</th><th class="n">Amount</th></tr>${turnRows}</table>` : ""}` : ""}
 
       ${payouts.owners?.length ? `

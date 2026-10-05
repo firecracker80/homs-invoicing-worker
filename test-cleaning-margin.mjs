@@ -268,4 +268,175 @@ const WINDOW = { from: "2026-09-01T00:00:00.000Z", to: "2026-10-01T00:00:00.000Z
   console.log("11) The rendered P&L shows the cleaning block and both warnings, in either language");
 }
 
-console.log("\nPASS — the cleaning fee is revenue, the cleaner is a cost, and an unrecorded cost is never a free clean.");
+// ---- 12. three states, because "unknown" is not "zero" ---------------
+// Yari, 2026-10-05, on how the cleaner cost gets captured: "that will depend on
+// what the client is paying his employee or cleaning service. we can't set
+// that." HOMS provides the field; the number is the client's, and plenty of
+// accounts will leave it empty.
+//
+// So an empty field is the normal case, not a defect to warn about and move on
+// from. The margin is fee MINUS cleaner: with no cleaner figure, "collected
+// - 0" is not a margin earned at no cost, it is an unknown printed as profit.
+{
+  const costed = (id, on) => job({ id, cleaner_cost: { value: 50 }, cleaner_paid_on: on });
+  const uncosted = (id) => job({ id, completion_date: "2026-09-25" });
+
+  const exact = buildCleaningSummary({ ...WINDOW, collected: 300, jobs: [costed("a", "2026-09-10")] });
+  assert.strictEqual(exact.marginKnown, true);
+  assert.strictEqual(exact.marginIsCeiling, false, "nothing is missing, so the figure is the figure");
+  assert.strictEqual(exact.margin, 250);
+
+  const ceiling = buildCleaningSummary({ ...WINDOW, collected: 300, jobs: [costed("a", "2026-09-10"), uncosted("b")] });
+  assert.strictEqual(ceiling.marginKnown, true, "some cost is known, so a figure can still be given");
+  assert.strictEqual(ceiling.marginIsCeiling, true, "but only as an upper bound");
+  assert.strictEqual(ceiling.costMissing, 1);
+  assert.strictEqual(ceiling.margin, 250, "the arithmetic is unchanged -- only what it is called");
+
+  const unknown = buildCleaningSummary({ ...WINDOW, collected: 300, jobs: [uncosted("b"), uncosted("c")] });
+  assert.strictEqual(unknown.marginKnown, false, "no cost anywhere means there is no margin to state");
+  assert.strictEqual(unknown.marginIsCeiling, false, "and it is not a ceiling either -- it is nothing");
+  assert.strictEqual(unknown.costMissing, 2);
+
+  // An account that records no cleaning jobs at all is not the same as one that
+  // records them and leaves the cost blank. Nothing is missing, so nothing is
+  // doubtful -- this is the ordinary case for every account before cleaning is
+  // set up, and it must not sprout warnings.
+  const none = buildCleaningSummary({ ...WINDOW, collected: 300, jobs: [] });
+  assert.strictEqual(none.marginKnown, true);
+  assert.strictEqual(none.marginIsCeiling, false);
+  assert.strictEqual(none.costMissing, 0);
+  console.log("12) Margin is exact, a ceiling, or unknown -- and an empty cost is never read as a free clean");
+}
+
+// ---- 13. the page refuses to invent the figure ----------------------
+// Case 12 proves the flags. It does not prove the page honours them: leaving
+// the template alone passes all of it, and the template is the only thing
+// anybody reads. This renders the real handler with every clean uncosted and
+// asserts the fabricated number is GONE, in both languages.
+{
+  const { handleManagerPL } = await import("./src/reports.js");
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    const body = init?.body ? JSON.parse(init.body) : {};
+    const isJobs = String(url).includes("jobs_tmpl");
+    return {
+      ok: true, status: 200,
+      text: async () => JSON.stringify({
+        records: isJobs && body.page === 1
+          ? [job({ id: "n1", completion_date: "2026-09-12", property_name: "Vila Verde" }),
+             job({ id: "n2", completion_date: "2026-09-20", property_name: "Casa Azul" })]
+          : [],
+      }),
+    };
+  };
+  const env = {
+    TENANTS: { get: async (k, o) => ({ brandName: "Casa Bonita", currency: "USD", managerReportToken: "t", ghlPit: "pit" }) },
+    LEDGER_DB: {
+      prepare: (sql) => ({
+        bind: () => ({
+          all: async () => ({
+            results: sql.includes("cleaning_fee") ? [{ total_minor: 30000 }]
+                                                  : [{ currency: "USD", total_minor: 100000, n: 4 }],
+          }),
+        }),
+      }),
+    },
+  };
+  const page = await (await handleManagerPL(
+    new Request("https://w.dev/reports/manager-pl?locationId=l&token=t&from=2026-09-01&to=2026-09-30"), env)).text();
+
+  assert.ok(page.includes("USD 300.00"), "the fee collected is known and still shown");
+
+  // Scoped to the cleaning block. "USD 0.00" appears legitimately above it --
+  // expenses really are zero here -- so checking the whole page would fail on
+  // a true figure and prove nothing about the false one.
+  const start = page.indexOf("Cleaning fees collected");
+  const block = page.slice(start, page.indexOf("</table>", start));
+  assert.ok(!block.includes("USD 0.00"),
+    "nothing in the cleaning block claims zero was paid to cleaners -- the fabrication this fixes");
+  assert.strictEqual((block.match(/USD 300\.00/g) || []).length, 1,
+    "the fee appears once, as collected, and is not restated as what the manager kept");
+  assert.match(page, /cannot be worked out/, "the page says why it is blank instead of leaving a gap");
+
+  // The bottom line was overstated by the same missing cost, so it is marked too.
+  assert.match(page, /Net \(at most\)/, "the net says it is an upper bound");
+
+  const es = await (await handleManagerPL(
+    new Request("https://w.dev/reports/manager-pl?locationId=l&token=t&from=2026-09-01&to=2026-09-30"),
+    { ...env, TENANTS: { get: async () => ({ brandName: "Casa Bonita", currency: "USD", managerReportToken: "t", ghlPit: "pit", statementLocale: "es" }) } })).text();
+  // \s+ because the source string wraps across lines, as the English one does.
+  assert.match(es, /no\s+se puede calcular/, "the explanation translates");
+  assert.match(es, /Neto \(como máximo\)/, "and so does the bound on the net");
+  assert.ok(!es.includes("cannot be worked out"), "with no English left behind");
+  assert.ok(!es.includes("Net (at most)"));
+
+  globalThis.fetch = realFetch;
+  console.log("13) With no cleaner cost recorded, the page shows no margin and says why, in either language");
+}
+
+// ---- 14. a partial record is labelled, not silently averaged --------
+// The commonest real state: a client fills some jobs in and not others. The
+// figure is still useful -- it is the most the manager can have kept -- but
+// printing it unqualified is the same overstatement in a smaller size.
+{
+  const { handleManagerPL } = await import("./src/reports.js");
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    const body = init?.body ? JSON.parse(init.body) : {};
+    return {
+      ok: true, status: 200,
+      text: async () => JSON.stringify({
+        records: String(url).includes("jobs_tmpl") && body.page === 1
+          ? [job({ id: "c", cleaner_cost: { value: 100 }, cleaner_paid_on: "2026-09-10" }),
+             job({ id: "n", completion_date: "2026-09-25" })]
+          : [],
+      }),
+    };
+  };
+  const page = await (await handleManagerPL(
+    new Request("https://w.dev/reports/manager-pl?locationId=l&token=t&from=2026-09-01&to=2026-09-30"),
+    {
+      TENANTS: { get: async () => ({ brandName: "B", currency: "USD", managerReportToken: "t", ghlPit: "pit" }) },
+      LEDGER_DB: { prepare: (sql) => ({ bind: () => ({ all: async () => ({
+        results: sql.includes("cleaning_fee") ? [{ total_minor: 30000 }] : [{ currency: "USD", total_minor: 100000, n: 4 }],
+      }) }) }) },
+    })).text();
+
+  assert.match(page, /Kept on cleaning \(at most\)/, "the figure is given, and bounded");
+  assert.ok(page.includes("USD 200.00"), "with the arithmetic unchanged");
+  assert.match(page, /the real\s+figure is lower/, "and the reason stated once, near the figure");
+  assert.match(page, /Net \(at most\)/, "and the bottom line carries the same bound");
+
+  // The other half of the same claim: a period where every clean IS costed must
+  // come out completely unqualified. Without this, marking everything "at most"
+  // unconditionally passes -- which is its own kind of wrong, because a hedge
+  // on every figure teaches the reader to ignore it on the ones that mean it.
+  globalThis.fetch = async (url, init) => {
+    const body = init?.body ? JSON.parse(init.body) : {};
+    return {
+      ok: true, status: 200,
+      text: async () => JSON.stringify({
+        records: String(url).includes("jobs_tmpl") && body.page === 1
+          ? [job({ id: "c1", cleaner_cost: { value: 60 }, cleaner_paid_on: "2026-09-10" }),
+             job({ id: "c2", cleaner_cost: { value: 40 }, cleaner_paid_on: "2026-09-25" })]
+          : [],
+      }),
+    };
+  };
+  const complete = await (await handleManagerPL(
+    new Request("https://w.dev/reports/manager-pl?locationId=l&token=t&from=2026-09-01&to=2026-09-30"),
+    {
+      TENANTS: { get: async () => ({ brandName: "B", currency: "USD", managerReportToken: "t", ghlPit: "pit" }) },
+      LEDGER_DB: { prepare: (sql) => ({ bind: () => ({ all: async () => ({
+        results: sql.includes("cleaning_fee") ? [{ total_minor: 30000 }] : [{ currency: "USD", total_minor: 100000, n: 4 }],
+      }) }) }) },
+    })).text();
+
+  assert.ok(!complete.includes("(at most)"), "a fully-costed period is stated flatly, with no hedging");
+  assert.ok(!complete.includes("figure is lower"), "and carries no bounding note");
+  assert.ok(complete.includes("USD 200.00"), "while still giving the figure");
+  globalThis.fetch = realFetch;
+  console.log("14) A partly-recorded period is bounded; a fully-recorded one is stated flatly");
+}
+
+console.log("\nPASS — the cleaning fee is revenue, the cleaner is a cost, an unrecorded cost is never a free clean, and an unknown margin is never printed as one.");

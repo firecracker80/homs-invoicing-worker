@@ -320,10 +320,26 @@ export function buildCleaningSummary({ jobs, collected, from, to }) {
     byTurnover.set(key, prev);
   }
 
+  // What was kept on cleaning is fee MINUS cleaner, so it can only be stated
+  // when the cleaner side is known. With no cost recorded anywhere, "collected
+  // - 0" is not a margin earned at no cost -- it is an unknown presented as a
+  // fact, and it was being printed as the manager's profit on cleaning.
+  //
+  // Three states, not two:
+  //   exact    every clean in the period has a cost
+  //   ceiling  some do; the real figure can only be LOWER than this
+  //   unknown  none do; there is no figure to give
+  const costMissing = noCost.length;
+  const marginKnown = !(costMissing > 0 && paidInPeriod.length === 0);
+  const marginIsCeiling = marginKnown && costMissing > 0;
+
   return {
     collected: round2(collected || 0),
     paidToCleaners,
     margin: round2((collected || 0) - paidToCleaners),
+    marginKnown,
+    marginIsCeiling,
+    costMissing,
     jobsCounted: paidInPeriod.length,
     byTurnover: [...byTurnover.values()].sort((a, b) => b.total - a.total),
     // Cleans done in this period with no cost on them. Every one of these makes
@@ -455,6 +471,10 @@ export function buildManagerPL({ income, records, from, to, reportCurrency, jobs
     expensesBeforeCleaners: summary.expenses,
     expenses: round2(summary.expenses + cleaning.paidToCleaners),
     net: round2(summary.net - cleaning.paidToCleaners),
+    // A clean with no cost recorded is a cost missing from this net, so the
+    // real figure is lower. Said here rather than only in the cleaning block:
+    // somebody reading just the top three lines is reading an overstatement.
+    netIsCeiling: cleaning.costMissing > 0,
     // An expense with no paid_on cannot be put in any period. Silently dropping
     // it is how a cost disappears from every report at once.
     undated: undated.map((e) => ({ id: e.id, name: e.name, gross: e.gross, currency: e.currency })),

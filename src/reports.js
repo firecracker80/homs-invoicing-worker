@@ -219,7 +219,15 @@ const UI = {
     plCleaningCollected: "Cleaning fees collected",
     plCleaningPaid: "Paid to cleaners",
     plCleaningMargin: "Kept on cleaning",
+    plCleaningMarginCeiling: "Kept on cleaning (at most)",
+    plNetCeiling: "Net (at most)",
     plCleaningNote: (n) => `Across ${n} clean(s) paid for in this period.`,
+    plCleaningUnknownNote: (n) =>
+      `None of the ${n} clean(s) in this period has a cleaner cost recorded, so what was kept on cleaning
+      cannot be worked out. The fee collected is shown; the rest is left blank because there is nothing
+      to base it on.`,
+    plCeilingNote: `At most: cleans with no cleaner cost recorded are missing from this, so the real
+      figure is lower.`,
     warnNoCleanerCost: (n) => `<strong>${n} clean(s) in this period have no cleaner cost recorded.</strong>
       Each one makes the cleaning figure above too high, by an amount nobody can see. Add the cost on the
       cleaning job to correct it.`,
@@ -272,7 +280,15 @@ const UI = {
     plCleaningCollected: "Tarifas de limpieza cobradas",
     plCleaningPaid: "Pagado a los limpiadores",
     plCleaningMargin: "Retenido por limpieza",
+    plCleaningMarginCeiling: "Retenido por limpieza (como máximo)",
+    plNetCeiling: "Neto (como máximo)",
     plCleaningNote: (n) => `Sobre ${n} limpieza(s) pagada(s) en este período.`,
+    plCleaningUnknownNote: (n) =>
+      `Ninguna de las ${n} limpieza(s) de este período tiene un costo de limpiador registrado, así que no
+      se puede calcular lo retenido por limpieza. Se muestra la tarifa cobrada; el resto queda en blanco
+      porque no hay con qué calcularlo.`,
+    plCeilingNote: `Como máximo: las limpiezas sin costo de limpiador registrado no están incluidas, así
+      que la cifra real es menor.`,
     warnNoCleanerCost: (n) => `<strong>${n} limpieza(s) de este período no tienen costo de limpiador registrado.</strong>
       Cada una hace que la cifra de limpieza de arriba sea más alta de lo real, por un monto que nadie puede ver.
       Agregue el costo en el registro de limpieza para corregirlo.`,
@@ -624,17 +640,19 @@ function managerPlHtml({ brandName, fromLabel, toLabel, pl, locale = "en" }) {
     <table>
       <tr><td>${t.plIncome}</td><td class="n">${dash || money(pl.income, cur)}</td></tr>
       <tr><td>${t.plExpenses}</td><td class="n">${money(-pl.expenses, cur)}</td></tr>
-      <tr class="tot"><td>${t.plNet}</td><td class="n ${netClass}">${dash || money(pl.net, cur)}</td></tr>
+      <tr class="tot"><td>${pl.netIsCeiling ? t.plNetCeiling : t.plNet}</td><td class="n ${netClass}">${dash || money(pl.net, cur)}</td></tr>
     </table>
+    ${pl.netIsCeiling ? `<p class="note">${t.plCeilingNote}</p>` : ""}
     <p class="note">${t.plNote(money(pl.reimbursableOutstanding, cur))}</p>
     ${pl.cleaning && (pl.cleaning.collected || pl.cleaning.paidToCleaners) ? `
     <h2>${t.plCleaning}</h2>
     <table>
       <tr><td>${t.plCleaningCollected}</td><td class="n">${money(pl.cleaning.collected, cur)}</td></tr>
-      <tr><td>${t.plCleaningPaid}</td><td class="n">${money(-pl.cleaning.paidToCleaners, cur)}</td></tr>
-      <tr class="tot"><td>${t.plCleaningMargin}</td><td class="n ${pl.cleaning.margin < 0 ? "neg" : "pos"}">${money(pl.cleaning.margin, cur)}</td></tr>
+      <tr><td>${t.plCleaningPaid}</td><td class="n">${pl.cleaning.marginKnown ? money(-pl.cleaning.paidToCleaners, cur) : "&mdash;"}</td></tr>
+      <tr class="tot"><td>${pl.cleaning.marginIsCeiling ? t.plCleaningMarginCeiling : t.plCleaningMargin}</td><td class="n ${pl.cleaning.marginKnown ? (pl.cleaning.margin < 0 ? "neg" : "pos") : ""}">${pl.cleaning.marginKnown ? money(pl.cleaning.margin, cur) : "&mdash;"}</td></tr>
     </table>
-    <p class="note">${t.plCleaningNote(pl.cleaning.jobsCounted)}</p>` : ""}
+    <p class="note">${pl.cleaning.marginKnown ? t.plCleaningNote(pl.cleaning.jobsCounted) : t.plCleaningUnknownNote(pl.cleaning.costMissing)}</p>
+    ${pl.cleaning.marginIsCeiling ? `<p class="note">${t.plCeilingNote}</p>` : ""}` : ""}
 
     ${pl.ownerPayouts?.owners?.length ? `
     <h2>${t.plOwnerPayouts}</h2>
