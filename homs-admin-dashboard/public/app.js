@@ -248,12 +248,34 @@ function localize(root) {
     pending.push([n, english, hit]);
   }
   // Collected first, then written -- mutating during a walk skips nodes.
+  //
+  // Every write here is guarded by a comparison, and that guard is the whole
+  // reason this function terminates. It runs from a MutationObserver, and
+  // assigning a text node the value it already holds STILL fires a
+  // characterData record (measured in Chrome: three assignments, three
+  // records, two of them no-ops). So an unconditional rewrite feeds the
+  // observer, which calls this again, which rewrites again -- forever, with no
+  // frame ever painted. That froze the whole dashboard on 2026-10-05.
+  //
+  // The version before the toggle was accidentally safe: it matched on each
+  // node's CURRENT text, which stopped matching the dictionary once
+  // translated, so its second pass found nothing. Keying off the stored
+  // English original removed that accident -- the original always matches --
+  // and the guard is what puts it back deliberately.
+  //
+  // The guard on the TRANSLATE branch is the load-bearing one, and is the one
+  // the test exercises. The restore branch below cannot loop on its own
+  // whatever it does, because it deletes the node's record, so the next pass
+  // skips the node entirely; its guard is there to avoid one pointless write,
+  // and no test can distinguish it. Said plainly so nobody later reads the
+  // symmetry as proof that both are covered.
   for (const [n, english, hit] of pending) {
     if (hit) {
       if (!ORIGINAL_TEXT.has(n)) ORIGINAL_TEXT.set(n, english);
-      n.nodeValue = english.replace(english.trim(), hit);
+      const next = english.replace(english.trim(), hit);
+      if (n.nodeValue !== next) n.nodeValue = next;
     } else if (ORIGINAL_TEXT.has(n)) {
-      n.nodeValue = english;
+      if (n.nodeValue !== english) n.nodeValue = english;
       ORIGINAL_TEXT.delete(n);
     }
   }
@@ -264,11 +286,15 @@ function localize(root) {
       if (el.getAttribute(attr) === null) continue;
       const english = attr in saved ? saved[attr] : el.getAttribute(attr);
       const hit = dict ? dict[String(english).trim()] : null;
+      // Guarded for the same reason as the text nodes above. Attributes are not
+      // in this observer's filter today, so this one cannot loop on its own --
+      // it is written this way so that adding attributes to the filter later
+      // cannot reintroduce the freeze.
       if (hit) {
         if (!(attr in saved)) { saved[attr] = english; ORIGINAL_ATTRS.set(el, saved); }
-        el.setAttribute(attr, hit);
+        if (el.getAttribute(attr) !== hit) el.setAttribute(attr, hit);
       } else if (attr in saved) {
-        el.setAttribute(attr, saved[attr]);
+        if (el.getAttribute(attr) !== saved[attr]) el.setAttribute(attr, saved[attr]);
         delete saved[attr];
       }
     }

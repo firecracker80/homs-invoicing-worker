@@ -15,8 +15,17 @@ import fs from "node:fs";
 import vm from "node:vm";
 
 // ---- the smallest DOM that localize() can run against ----------------
+// Writes are counted, not just outcomes. localize() runs from a
+// MutationObserver, and in a real browser assigning a text node the value it
+// already holds still fires a characterData record -- so a pass that "changes
+// nothing" but writes anyway feeds the observer and never terminates. Asserting
+// the final text is identical cannot see that; only counting writes can.
+let TEXT_WRITES = 0;
+let ATTR_WRITES = 0;
 class Text {
-  constructor(v) { this.nodeValue = v; this.children = []; this.attrs = {}; }
+  constructor(v) { this._v = v; this.children = []; this.attrs = {}; }
+  get nodeValue() { return this._v; }
+  set nodeValue(v) { TEXT_WRITES += 1; this._v = v; }
 }
 class El {
   constructor(tag, attrs = {}) {
@@ -31,7 +40,7 @@ class El {
     };
   }
   getAttribute(k) { return k in this.attrs ? this.attrs[k] : null; }
-  setAttribute(k, v) { this.attrs[k] = v; }
+  setAttribute(k, v) { ATTR_WRITES += 1; this.attrs[k] = v; }
   querySelectorAll() { // only ever called as "[placeholder],[title]"
     const out = [];
     (function walk(n) {
@@ -611,4 +620,54 @@ const textsOf = (root) => textNodesOf(root).map((n) => n.nodeValue.trim());
   console.log("15) Every string the unknown-margin case introduces has a Spanish translation");
 }
 
-console.log("\nPASS — the dashboard renders in the account's language, switches both ways, translates no data, and states no figure it cannot know.");
+// ---- 16. localize() settles, or the dashboard freezes ---------------
+// Yari, 2026-10-05: "this has been stuck like this since 102 merged." The
+// dashboard never got past "Loading live data from GHL…" on DEMO-HOMS, which
+// resolves to Spanish.
+//
+// The toggle's reversible localize() keys off each node's stored English
+// original, and an original ALWAYS matches the dictionary -- so every pass
+// rewrote every translated node. In a browser that write fires a characterData
+// record even when the value is identical, the observer fires, localize() runs
+// again, and nothing ever paints. Measured on the live page: a second pass at
+// the same locale wrote 29 records.
+//
+// The version before the toggle was accidentally safe -- it matched on current
+// text, which stopped matching once translated. This asserts that property
+// deliberately, by counting writes rather than comparing text: every earlier
+// case here passed throughout the freeze, because the text was correct. It was
+// correct and rewritten forever.
+{
+  const body = page();
+  const app = loadApp("", body);
+
+  TEXT_WRITES = 0; ATTR_WRITES = 0;
+  app.forceLocale("es");
+  assert.ok(TEXT_WRITES > 0, "the first pass really did translate something to rewrite");
+
+  TEXT_WRITES = 0; ATTR_WRITES = 0;
+  app.vmEval("localize()");
+  assert.strictEqual(TEXT_WRITES, 0,
+    "a second pass at the same locale writes NOTHING -- any write re-enters the observer");
+  assert.strictEqual(ATTR_WRITES, 0, "and that goes for placeholders and titles too");
+
+  // Ten passes, as the observer would do. Still nothing.
+  for (let i = 0; i < 10; i += 1) app.vmEval("localize()");
+  assert.strictEqual(TEXT_WRITES, 0, "and it stays settled however many times it runs");
+
+  // The same has to hold after switching back, where every node is restored
+  // from its record rather than translated -- a different branch, same hazard.
+  app.setLocale("en");
+  TEXT_WRITES = 0; ATTR_WRITES = 0;
+  for (let i = 0; i < 5; i += 1) app.vmEval("localize()");
+  assert.strictEqual(TEXT_WRITES, 0, "an English page settles too, having nothing to restore twice");
+  assert.strictEqual(ATTR_WRITES, 0);
+
+  // And the text is still right -- settling by doing nothing at all would also
+  // pass the counts above.
+  app.setLocale("es");
+  assert.ok(textsOf(body).includes("Resumen"), "while still actually being translated");
+  console.log("16) localize() settles after one pass, so it cannot drive the observer that calls it");
+}
+
+console.log("\nPASS — the dashboard renders in the account's language, switches both ways, settles after one pass, translates no data, and states no figure it cannot know.");
