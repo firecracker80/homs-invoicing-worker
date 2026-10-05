@@ -296,4 +296,255 @@ const approved = { review_status: "approved", paid_on: "2026-09-10", category: "
   console.log("13) Every excluded expense is stated on the page, not quietly omitted");
 }
 
-console.log("\nPASS — manager P&L: a reimbursable cost is not an expense, currencies are never mixed, and nothing is quietly left out.");
+// ---- 14. a reimbursable in another currency is converted, not relabelled ----
+// Yari, 2026-10-05, reading her own statement: "the recoverable amount that is
+// the dop expenses should not reflect usd if they are not usd, that is
+// misleading and problematic."
+//
+// The expense TOTAL already converted correctly. reimbursableOutstanding did
+// not: it summed the raw can_reimburse and the page printed it with the report
+// currency's symbol. Her real record is below -- 150 DOP shown as US$150.00,
+// about 59x the true figure, on every statement of every account that spends in
+// DOP. The figure was not merely mislabelled; it was added to a USD total.
+{
+  // DEMO-HOMS expense 6aa945f0491c584adfd0c0f0, verbatim in the fields that matter.
+  const dopExpense = {
+    id: "e-dop",
+    properties: {
+      expense_name: "RL Santana Refrigeración",
+      category: "maintenance_repairs",
+      amount: { currency: "default", value: 150 },
+      paid_on: "2026-09-15",
+      review_status: "approved",
+      currency: "dop",
+      converted_amount: { currency: "default", value: 2.54 },
+      exchange_rate: 0.016961163,
+      can_reimburse: { currency: "default", value: 150 },
+    },
+  };
+
+  const row = managerExpenseOf(dopExpense, "USD");
+  assert.strictEqual(row.reimbursable, 150, "what the record says, in the currency the record says it in");
+  assert.strictEqual(row.currency, "DOP");
+  assert.ok(Math.abs(row.reimbursableInReport - 2.54) < 0.01,
+    `150 DOP is about US$2.54, not US$150.00 (got ${row.reimbursableInReport})`);
+
+  const pl = summarisePL(1000, [row]);
+  assert.ok(Math.abs(pl.reimbursableOutstanding - 2.54) < 0.01,
+    "and the total is the converted figure, which is what the US$ symbol beside it claims");
+  assert.notStrictEqual(pl.reimbursableOutstanding, 150, "the exact bug Yari caught");
+
+  // The original is still reported, so DOP can be seen as DOP rather than only
+  // as its converted shadow -- which is what she actually asked for.
+  assert.deepStrictEqual(pl.reimbursableByCurrency, [{ currency: "DOP", total: 150, entries: 1 }]);
+  assert.deepStrictEqual(pl.reimbursableUnconvertible, []);
+  console.log("14) A reimbursable recorded in DOP is converted before totalling, and still shown as DOP");
+}
+
+// ---- 15. an account already in the report currency is untouched -----
+// Every tenant that spends in its own currency, which is most of them. A fix
+// that "converts" those too would be a rate applied to nothing.
+{
+  const plain = managerExpenseOf({
+    id: "e-usd",
+    properties: {
+      expense_name: "Pest Control", amount: { value: 35 }, paid_on: "2026-09-10",
+      review_status: "approved", can_reimburse: { value: 35 },
+    },
+  }, "USD");
+  assert.strictEqual(plain.reimbursableInReport, 35, "no conversion, no rounding drift");
+  const pl = summarisePL(100, [plain]);
+  assert.strictEqual(pl.reimbursableOutstanding, 35);
+  assert.deepStrictEqual(pl.reimbursableByCurrency, [{ currency: "USD", total: 35, entries: 1 }]);
+  console.log("15) An expense already in the report currency is passed through untouched");
+}
+
+// ---- 16. no rate means no total, and the record is named --------------
+// The same refusal the expense total already makes. A reimbursable that cannot
+// be converted must not silently vanish from the sum -- that leaves a figure
+// short by an unknown amount, which is the failure this line just had.
+{
+  const noRate = managerExpenseOf({
+    id: "e-norate",
+    properties: {
+      expense_name: "Ferretería", amount: { value: 900 }, paid_on: "2026-09-12",
+      review_status: "approved", currency: "dop", can_reimburse: { value: 900 },
+    },
+  }, "USD");
+  assert.strictEqual(noRate.reimbursableInReport, null, "nothing to convert it with");
+
+  const good = managerExpenseOf({
+    id: "e-ok",
+    properties: {
+      expense_name: "Pest Control", amount: { value: 35 }, paid_on: "2026-09-10",
+      review_status: "approved", can_reimburse: { value: 35 },
+    },
+  }, "USD");
+
+  const pl = summarisePL(1000, [good, noRate]);
+  assert.strictEqual(pl.reimbursableOutstanding, null,
+    "one unconvertible row makes the total unknowable, not approximate");
+  assert.notStrictEqual(pl.reimbursableOutstanding, 35,
+    "and it must not quietly fall back to the rows it happened to understand");
+  assert.deepStrictEqual(pl.reimbursableUnconvertible.map((e) => e.name), ["Ferretería"],
+    "the record is named, because 'a figure is missing' is not actionable");
+  console.log("16) One unconvertible reimbursable withholds the total and names the record");
+}
+
+// ---- 17. an unapproved expense is still money the manager is owed ----
+// It is excluded from the EXPENSE total because it is not approved, but the
+// manager paid it either way. This was already true and must stay true -- the
+// currency fix must not quietly narrow what the line covers.
+{
+  const pending = managerExpenseOf({
+    id: "e-pending",
+    properties: {
+      expense_name: "Pending thing", amount: { value: 80 }, paid_on: "2026-09-11",
+      review_status: "needs_review", can_reimburse: { value: 80 },
+    },
+  }, "USD");
+  assert.strictEqual(pending.counted, false, "not in the expense total");
+  const pl = summarisePL(500, [pending]);
+  assert.strictEqual(pl.expenses, 0);
+  assert.strictEqual(pl.reimbursableOutstanding, 80, "but still owed back to the manager");
+  console.log("17) An unapproved expense stays out of the total and stays in what the owner owes");
+}
+
+// ---- 18. the page, which is the only thing Yari actually read -------
+// Cases 14-17 prove the arithmetic; none of them prove the page shows it.
+// Leaving the template alone passes all four, and the template is where the
+// US$150.00 was. This renders the real handler.
+{
+  const { handleManagerPL } = await import("./src/reports.js");
+  // The default window is the last 30 days, so a record has to be dated inside
+  // it to reach the page at all -- an undated expense is dropped long before
+  // anything renders, which is its own case above.
+  const TODAY = new Date().toISOString().slice(0, 10);
+  const envWith = (records) => {
+    globalThis.fetch = async (url) => ({
+      ok: true, status: 200,
+      text: async () => JSON.stringify(String(url).includes("/records/search") ? { records } : {}),
+    });
+    return {
+      TENANTS: { get: async () => ({ brandName: "B", currency: "USD", managerReportToken: "t", ghlPit: "pit" }) },
+      LEDGER_DB: { prepare: () => ({ bind: () => ({ all: async () => ({ results: [{ currency: "USD", total_minor: 50000, n: 1 }] }) }) }) },
+    };
+  };
+  const render = async (records) => (await handleManagerPL(
+    new Request("https://w.dev/reports/manager-pl?locationId=l&token=t"), envWith(records))).text();
+
+  // Her record: 150 DOP, rate on the record, reimbursable in full.
+  const dop = rec({
+    expense_name: "RL Santana Refrigeración", review_status: "approved", category: "maintenance_repairs",
+    paid_on: TODAY, amount: { value: 150, currency: "DOP" }, currency: "DOP",
+    converted_amount: { value: 2.54 }, exchange_rate: 0.016961163,
+    can_reimburse: { value: 150 },
+  }, "dop1");
+
+  const page = await render([dop]);
+  assert.ok(!/USD 150\.00/.test(page),
+    "150 DOP is never printed as USD 150.00 -- the exact figure Yari was shown");
+  assert.ok(/USD 2\.5[34]/.test(page), "the converted figure is what sits beside the USD symbol");
+  assert.ok(/DOP 150\.00/.test(page), "and the original is still visible as DOP, which is what she asked for");
+
+  // No rate anywhere: the total is withheld rather than guessed, and the record
+  // is named so it can be fixed.
+  const noRate = rec({
+    expense_name: "Ferretería", review_status: "approved", category: "other",
+    paid_on: TODAY, amount: { value: 900, currency: "DOP" }, currency: "DOP", can_reimburse: { value: 900 },
+  }, "nr1");
+  const withhold = await render([noRate]);
+  assert.ok(/cannot be totalled/.test(withhold), "the page says it will not total it");
+  assert.ok(/Ferreter/.test(withhold), "and names the record standing in the way");
+  assert.ok(!/USD 0\.00 is recoverable/.test(withhold),
+    "and above all does not render the withheld total as zero, which reads as 'nothing is owed'");
+
+  // An all-USD account gets none of this -- no breakdown line, no warning.
+  const plain = await render([rec({ review_status: "approved", paid_on: TODAY, amount: usd(35), category: "other", can_reimburse: usd(35) }, "u1")]);
+  assert.ok(/USD 35\.00 is recoverable/.test(plain), "a single-currency account reads exactly as before");
+  assert.ok(!/Recorded as/.test(plain), "with no breakdown line it does not need");
+  assert.ok(!/cannot be totalled/.test(plain), "and no warning it has not earned");
+  console.log("18) The page converts DOP before showing it, shows the original too, and withholds a total it cannot compute");
+}
+
+// ---- 19. "All time" has to mean all time -----------------------------
+// Yari, 2026-10-05, before merging the currency fix: "the all-time is not
+// reflecting the 215 dop from july."
+//
+// The dropdown said All time and sent no range at all, so the Worker applied
+// its 30-day default and the panel quietly hid everything older than a month.
+// Her two July expenses -- 180 + 35 DOP -- were not excluded, flagged or
+// counted anywhere. They were simply out of frame, under a label promising
+// otherwise, which is the worst of the three.
+{
+  const { handleManagerPL } = await import("./src/reports.js");
+
+  // Dated in July. Today is well past the 30-day default, which is the point.
+  const july = [
+    rec({ expense_name: "Test Villa 1 - Carpet Wash", review_status: "approved", category: "maintenance_repairs",
+          paid_on: "2026-07-20", amount: { value: 180, currency: "DOP" }, currency: "DOP",
+          converted_amount: { value: 3.06 }, exchange_rate: 0.016961163,
+          can_reimburse: { value: 180 } }, "jul1"),
+    rec({ expense_name: "Test Villa 1 - Pest Control", review_status: "approved", category: "pest_control",
+          paid_on: "2026-07-15", amount: { value: 35, currency: "DOP" }, currency: "DOP",
+          converted_amount: { value: 0.6 }, exchange_rate: 0.016961163,
+          can_reimburse: { value: 35 } }, "jul2"),
+  ];
+  globalThis.fetch = async (url) => ({
+    ok: true, status: 200,
+    text: async () => JSON.stringify(String(url).includes("/records/search") ? { records: july } : {}),
+  });
+  const env = {
+    TENANTS: { get: async () => ({ brandName: "B", currency: "USD", managerReportToken: "t", ghlPit: "pit" }) },
+    LEDGER_DB: { prepare: () => ({ bind: () => ({ all: async () => ({ results: [{ currency: "USD", total_minor: 50000, n: 1 }] }) }) }) },
+  };
+  const get = async (qs) => {
+    const res = await handleManagerPL(new Request(`https://w.dev/reports/manager-pl?locationId=l&token=t&${qs}`), env);
+    return res.json();
+  };
+
+  // The default is unchanged: a caller that asks for nothing still gets 30 days
+  // and therefore does not see July. Changing that silently would move every
+  // other report in the system.
+  const dflt = await get("format=json");
+  assert.strictEqual(dflt.allTime, false);
+  assert.deepStrictEqual(dflt.reimbursableByCurrency, [], "the default window still ends before July");
+
+  const all = await get("format=json&period=all");
+  assert.strictEqual(all.allTime, true);
+  assert.deepStrictEqual(all.reimbursableByCurrency, [{ currency: "DOP", total: 215, entries: 2 }],
+    "180 + 35 DOP, the exact figure Yari was looking for");
+  assert.ok(Math.abs(all.reimbursableOutstanding - 3.66) < 0.02,
+    `and about US$3.66 once converted (got ${all.reimbursableOutstanding})`);
+
+  // The page says All time rather than printing the sentinel dates that make it
+  // work -- "0001-01-01 to 9999-12-31" is a correct range and a useless label.
+  const page = await (await handleManagerPL(
+    new Request("https://w.dev/reports/manager-pl?locationId=l&token=t&period=all"), env)).text();
+  assert.ok(/All time/.test(page), "the period line reads All time");
+  assert.ok(!/0001-01-01|9999/.test(page), "and never shows the sentinel dates");
+
+  const es = await (await handleManagerPL(
+    new Request("https://w.dev/reports/manager-pl?locationId=l&token=t&period=all"),
+    { ...env, TENANTS: { get: async () => ({ brandName: "B", currency: "USD", managerReportToken: "t", ghlPit: "pit", statementLocale: "es" }) } })).text();
+  assert.ok(/Todo el período/.test(es), "in Spanish too");
+  assert.ok(!/All time/.test(es));
+
+  // Open at the far end as well as the near one. An expense dated forward --
+  // an annual insurance premium, a prepaid booking -- is still a record of this
+  // account, and "all" is not a word that should quietly stop at this morning.
+  const nextYear = `${new Date().getUTCFullYear() + 1}-06-30`;
+  globalThis.fetch = async (url) => ({
+    ok: true, status: 200,
+    text: async () => JSON.stringify(String(url).includes("/records/search") ? {
+      records: [rec({ expense_name: "Insurance, paid ahead", review_status: "approved", category: "insurance",
+                      paid_on: nextYear, amount: usd(500), can_reimburse: usd(500) }, "fwd")],
+    } : {}),
+  });
+  const ahead = await get("format=json&period=all");
+  assert.strictEqual(ahead.reimbursableOutstanding, 500,
+    "a forward-dated record is inside all time, not beyond its far edge");
+  console.log("19) period=all covers every dated record, including July, and labels itself honestly");
+}
+
+console.log("\nPASS — manager P&L: a reimbursable cost is not an expense, every currency is converted at its own recorded rate or not at all, all time means all time, and nothing is quietly left out.");

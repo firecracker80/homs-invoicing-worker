@@ -48,6 +48,8 @@ const I18N = {
     "Part of the income above, not additional to it.": "Forma parte de los ingresos de arriba, no se suma a ellos.",
     "Cleaning fees collected": "Tarifas de limpieza cobradas",
     "Kept on cleaning (at most)": "Retenido por limpieza (como máximo)",
+    "Recoverable from owners cannot be totalled — the expense(s) below carry another currency with no exchange rate, and a guessed conversion would be a wrong number that looks right.":
+      "No se puede totalizar lo recuperable de los propietarios: el o los gastos indicados tienen otra moneda sin tasa de cambio, y una conversión estimada daría una cifra incorrecta con apariencia de correcta.",
     "Net (at most)": "Neto (como máximo)",
     "At most: cleans with no cleaner cost recorded are missing from this, so the real figure is lower.":
       "Como máximo: las limpiezas sin costo de limpiador registrado no están incluidas, así que la cifra real es menor.",
@@ -662,6 +664,10 @@ async function loadManagerPl() {
   renderManagerStatement();
 
   const params = new URLSearchParams({ locationId });
+  // No month selected is the "All time" entry in the dropdown, and it has to
+  // say so. Sending nothing got the Worker's 30-day default, so the panel
+  // claimed All time while hiding every record older than a month.
+  if (!managerPl.month) params.set("period", "all");
   if (managerPl.month) {
     const [y, m] = managerPl.month.split("-").map(Number);
     params.set("from", `${managerPl.month}-01`);
@@ -743,6 +749,10 @@ function renderManagerStatement() {
     warn.push(warnLine(m(payouts.unattributed.owed),
       "is not attributed to any owner, and cannot be paid to anybody until those rows carry a name."));
   }
+  if (pl.reimbursableUnconvertible?.length) {
+    warn.push(warnLine(pl.reimbursableUnconvertible.map((e) => e.name || e.id).join(", "),
+      "Recoverable from owners cannot be totalled — the expense(s) below carry another currency with no exchange rate, and a guessed conversion would be a wrong number that looks right."));
+  }
   if (pl.excluded?.length) {
     warn.push(warnLine(pl.excluded.length, "expense(s) are left out of the total."));
   }
@@ -773,6 +783,9 @@ function renderManagerStatement() {
         </tbody>
       </table>
       ${pl.netIsCeiling ? `<p class="note">At most: cleans with no cleaner cost recorded are missing from this, so the real figure is lower.</p>` : ""}
+      ${(pl.reimbursableByCurrency || []).some((c) => c.currency !== cur)
+        ? `<p class="note">Recoverable from owners was recorded as ${pl.reimbursableByCurrency.map((c) => esc(moneyIn(c.total, c.currency))).join(", ")}, converted at the rate stored on each expense.</p>`
+        : ""}
       <p class="note">Expenses count only the share the manager cannot recover, plus what was paid to cleaners. Money recoverable from owners is listed but not treated as a cost.</p>
 
       ${c.collected || c.paidToCleaners ? `
