@@ -17,6 +17,13 @@
     </div>
     <div class="topbar-actions">
       <span id="fetchedAt" class="fetched-at"></span>
+      <!-- In the topbar rather than a settings page: the dashboard is shown on
+           a display to a room, and whoever is reading it has to be able to
+           switch without hunting. -->
+      <span class="lang-toggle" id="langToggle" title="Language / Idioma">
+        <button class="btn ui-lang-btn active" data-lang="en" lang="en">EN</button>
+        <button class="btn ui-lang-btn" data-lang="es" lang="es">ES</button>
+      </span>
       <button id="refresh" class="btn">Refresh</button>
     </div>
   </header>

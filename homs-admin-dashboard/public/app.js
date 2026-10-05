@@ -175,44 +175,127 @@ const I18N = {
 
 let LOCALE = "en";
 
-// Same rules as the Worker's statement resolver, so one account setting cannot
-// give a Spanish statement and an English dashboard. ?lang= wins, then whatever
-// /api/data reported from the tenant config, then English.
-function resolveLocale(fromTenant) {
-  const raw = String(
-    new URLSearchParams(location.search).get("lang") || fromTenant || ""
-  ).trim().toLowerCase();
-  if (!raw) return "en";
-  const base = raw.split(/[-_]/)[0];
+// The viewer's own pick, remembered per browser. Someone who has said they want
+// English on a Spanish account should not have to say it again every visit, and
+// an account default should not talk over a person who has stated a preference.
+const LANG_STORAGE_KEY = "homs_lang";
+const storedLocale = () => {
+  try { return localStorage.getItem(LANG_STORAGE_KEY) || ""; } catch { return ""; }
+};
+
+// Anything unrecognised comes back as "" rather than "en", so an unknown value
+// in one source falls through to the next instead of pinning the page to
+// English. The caller supplies the final default.
+function normalizeLocale(raw) {
+  const s = String(raw || "").trim().toLowerCase();
+  if (!s) return "";
+  const base = s.split(/[-_]/)[0];
+  if (base === "en") return "en";
   if (I18N[base]) return base;
-  if (/^(espa|spanish)/.test(raw)) return "es";
-  return "en";
+  if (/^(espa|spanish)/.test(s)) return "es";
+  return "";
+}
+
+// Same rules as the Worker's statement resolver, so one account setting cannot
+// give a Spanish statement and an English dashboard.
+//
+// ?lang= first: a link is an explicit instruction for this view, and it is how
+// a statement gets sent to one owner in their language. Then the viewer's own
+// stored pick, then the account's setting, then English.
+function resolveLocale(fromTenant) {
+  const fromLink = normalizeLocale(new URLSearchParams(location.search).get("lang"));
+  return fromLink || normalizeLocale(storedLocale()) || normalizeLocale(fromTenant) || "en";
 }
 
 // Walks the rendered page and swaps exact matches. Only whole-string matches,
 // so a partial sentence is never half-replaced; anything not in the dictionary
 // is left exactly as it was.
+//
+// Reversible, which the first version was not: it swapped English for Spanish in
+// place and kept no way back, so switching an account to English left the tabs,
+// header and search box Spanish until a full page reload (Yari, 2026-10-05).
+// With a toggle on the page that is not an edge case, it is the second click.
+//
+// So the ENGLISH ORIGINAL of every node this touches is recorded the first time
+// it is touched, and each pass restores from that record before applying the
+// target language. Going back is exact rather than a reverse lookup -- a reverse
+// dictionary would happily turn a client's own Spanish data into English, and
+// would need rewriting the day a third language arrives.
+//
+// WeakMaps on purpose: a re-rendered panel throws its old nodes away and they
+// drop out of here on their own.
+const ORIGINAL_TEXT = new WeakMap();
+const ORIGINAL_ATTRS = new WeakMap();
+
 function localize(root) {
-  const dict = I18N[LOCALE];
-  if (!dict) return;
   const node = root || document.body;
+  const dict = I18N[LOCALE] || null;
 
   const walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT);
   const pending = [];
   while (walker.nextNode()) {
-    const hit = dict[walker.currentNode.nodeValue.trim()];
-    if (hit) pending.push([walker.currentNode, hit]);
+    const n = walker.currentNode;
+    // What this node said before anything translated it. For a node nothing has
+    // touched, that is simply what it says now.
+    const english = ORIGINAL_TEXT.has(n) ? ORIGINAL_TEXT.get(n) : n.nodeValue;
+    const hit = dict ? dict[english.trim()] : null;
+    pending.push([n, english, hit]);
   }
   // Collected first, then written -- mutating during a walk skips nodes.
-  for (const [n, hit] of pending) n.nodeValue = n.nodeValue.replace(n.nodeValue.trim(), hit);
+  for (const [n, english, hit] of pending) {
+    if (hit) {
+      if (!ORIGINAL_TEXT.has(n)) ORIGINAL_TEXT.set(n, english);
+      n.nodeValue = english.replace(english.trim(), hit);
+    } else if (ORIGINAL_TEXT.has(n)) {
+      n.nodeValue = english;
+      ORIGINAL_TEXT.delete(n);
+    }
+  }
 
   for (const el of node.querySelectorAll("[placeholder],[title]")) {
+    const saved = ORIGINAL_ATTRS.get(el) || {};
     for (const attr of ["placeholder", "title"]) {
-      const hit = dict[(el.getAttribute(attr) || "").trim()];
-      if (hit) el.setAttribute(attr, hit);
+      if (el.getAttribute(attr) === null) continue;
+      const english = attr in saved ? saved[attr] : el.getAttribute(attr);
+      const hit = dict ? dict[String(english).trim()] : null;
+      if (hit) {
+        if (!(attr in saved)) { saved[attr] = english; ORIGINAL_ATTRS.set(el, saved); }
+        el.setAttribute(attr, hit);
+      } else if (attr in saved) {
+        el.setAttribute(attr, saved[attr]);
+        delete saved[attr];
+      }
     }
   }
   document.documentElement.lang = LOCALE;
+}
+
+// Switching language from the page. Everything the dashboard shows is either
+// static markup, which localize() restores from its record, or re-rendered
+// HTML built through tr(), which has to be rebuilt -- a Spanish string that tr()
+// produced is not a dictionary key, so no DOM pass can turn it back.
+function setLocale(next) {
+  const want = normalizeLocale(next) || "en";
+  if (want === LOCALE) return;
+  LOCALE = want;
+  try { localStorage.setItem(LANG_STORAGE_KEY, want); } catch { /* private window */ }
+  // The owner statement keeps its own language on purpose: it is printed FOR an
+  // owner, who may not read what the manager reads. Left alone here.
+  //
+  // No refetch -- the manager figures are already in managerPl, and making
+  // every click wait on the invoicing Worker to change a label would be slow
+  // for no gain.
+  if (DATA) renderAll({ refetch: false });
+  localize();
+  paintLangToggle();
+}
+
+// Driven off LOCALE rather than the click, so the buttons cannot show a language
+// the page is not in.
+function paintLangToggle() {
+  for (const b of document.querySelectorAll(".ui-lang-btn")) {
+    b.classList.toggle("active", b.dataset.lang === LOCALE);
+  }
 }
 
 // Dynamic strings, built by concatenation, so the DOM walker cannot match them.
@@ -223,13 +306,19 @@ const tr = (s) => (I18N[LOCALE] && I18N[LOCALE][s]) || s;
 // stops localize()'s own writes from re-entering; the pass it queues finds
 // nothing left to change and settles.
 let localizing = false;
+let localizeObserver = null;
 function startLocalizeObserver() {
-  if (!I18N[LOCALE]) return;
-  new MutationObserver(() => {
+  // Started unconditionally, where this used to bail out on an English page.
+  // An English page can now be switched to Spanish at any moment, and once
+  // switched its re-renders need the same watching as any other. Attached once:
+  // Refresh runs loadData again, and a second observer would double every pass.
+  if (localizeObserver) return localize();
+  localizeObserver = new MutationObserver(() => {
     if (localizing) return;
     localizing = true;
     try { localize(); } finally { localizing = false; }
-  }).observe(document.body, { childList: true, subtree: true, characterData: true });
+  });
+  localizeObserver.observe(document.body, { childList: true, subtree: true, characterData: true });
   localize();
 }
 
@@ -498,6 +587,7 @@ async function loadData() {
     const label = $("#tenantLabel");
     if (label) label.textContent = json.tenantLabel || "Admin Dashboard";
     renderAll();
+    paintLangToggle();
     startLocalizeObserver();
   } catch (err) {
     $("#error").hidden = false;
@@ -678,7 +768,7 @@ function renderManagerStatement() {
     </div>`;
 }
 
-function renderAll() {
+function renderAll({ refetch = true } = {}) {
   // A vendor tenant (HOMS itself) is its own book, not a client account. Nothing
   // below applies to it -- no properties, no bookings, no guests.
   if (DATA.kind === "vendor") return renderVendor();
@@ -694,7 +784,7 @@ function renderAll() {
   renderManagerStatement();
   // Fetched rather than computed, so it arrives after the first paint. Not
   // awaited: the rest of the dashboard must not wait on the invoicing Worker.
-  loadManagerPl();
+  if (refetch) loadManagerPl();
 }
 
 // ---------- Vendor P&L (own book) ----------
@@ -2342,6 +2432,9 @@ document.addEventListener("DOMContentLoaded", () => {
       if (which === "revenue-by-property") downloadCsv("revenue-by-property.csv", JSON.parse(panel.dataset.revenueByProperty));
       if (which === "bookings-by-ota") downloadCsv("bookings-by-ota.csv", JSON.parse(panel.dataset.bookingsByOta));
     }
+
+    const uiLangBtn = e.target.closest(".ui-lang-btn");
+    if (uiLangBtn) setLocale(uiLangBtn.dataset.lang);
 
     const langBtn = e.target.closest(".lang-btn");
     if (langBtn) {
