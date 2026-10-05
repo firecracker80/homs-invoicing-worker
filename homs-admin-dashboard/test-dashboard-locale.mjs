@@ -507,4 +507,108 @@ const textsOf = (root) => textNodesOf(root).map((n) => n.nodeValue.trim());
   console.log("13) A language switch rebuilds every panel without refetching the manager figures");
 }
 
-console.log("\nPASS — the dashboard renders in the account's language, switches both ways, and translates no data.");
+// ---- 14. the panel will not print a margin it cannot know -----------
+// Yari, 2026-10-05: the cleaner's rate "will depend on what the client is
+// paying his employee or cleaning service. we can't set that." So an empty
+// cleaner cost is the ordinary case, not a defect.
+//
+// The panel used to render "Paid to cleaners (US$0.00) / Kept on cleaning
+// US$475.00" from a period where nothing was costed -- a figure nobody had the
+// information to state, printed as the manager's profit. The Worker now sends
+// marginKnown / marginIsCeiling / netIsCeiling; this asserts the panel obeys
+// them, because the flags change nothing on their own.
+{
+  const render = (cleaning, extra = {}) => {
+    const app = loadApp("?locationId=L1", page());
+    app.vmEval(`
+      DATA = { transactions: [], expenses: [] };
+      managerPl = { month: "2026-09", loading: false, error: null, data: ${JSON.stringify({
+        currency: "USD", income: 1000, expenses: 0, net: 1000, reimbursableOutstanding: 0,
+        byCategory: [], excluded: [], undated: [], mixedIncomeCurrency: false,
+        cleaning, ...extra,
+      })} };
+      renderManagerStatement();
+      __html = $("#panel-managerstmt").innerHTML;
+    `);
+    return app.vmEval("__html");
+  };
+
+  const base = { collected: 300, byTurnover: [], unpaidCleaners: 0, unpaidCleanerJobs: 0 };
+
+  // Nothing costed: there is no margin to give.
+  const unknown = render({
+    ...base, paidToCleaners: 0, margin: 300, jobsCounted: 0, costMissing: 2,
+    marginKnown: false, marginIsCeiling: false,
+    jobsWithoutCost: [{ id: "n1" }, { id: "n2" }],
+  }, { netIsCeiling: true });
+  const cleaningBlock = unknown.slice(unknown.indexOf("Cleaning fees collected"));
+  assert.ok(unknown.includes("US$300.00"), "the fee collected is known, so it is still shown");
+  assert.ok(!cleaningBlock.includes("US$0.00"),
+    "nothing claims zero went to cleaners -- that is the fabrication being removed");
+  assert.strictEqual((cleaningBlock.match(/US\$300\.00/g) || []).length, 1,
+    "and the fee is not restated as what the manager kept");
+  assert.match(unknown, /cannot be worked out/, "the panel says why the figure is blank");
+  assert.match(unknown, /Net \(at most\)/, "and the bottom line admits the same doubt");
+
+  // Partly costed: a figure, bounded.
+  const ceiling = render({
+    ...base, paidToCleaners: 100, margin: 200, jobsCounted: 1, costMissing: 1,
+    marginKnown: true, marginIsCeiling: true, jobsWithoutCost: [{ id: "n" }],
+  }, { netIsCeiling: true });
+  assert.match(ceiling, /Kept on cleaning \(at most\)/, "the figure is given, and bounded");
+  assert.ok(ceiling.includes("US$200.00"), "with the arithmetic unchanged");
+  assert.match(ceiling, /the real figure is lower/);
+
+  // Fully costed: nothing is in doubt, so nothing is qualified. This is the
+  // case that catches a fix applied unconditionally.
+  const exact = render({
+    ...base, paidToCleaners: 100, margin: 200, jobsCounted: 2, costMissing: 0,
+    marginKnown: true, marginIsCeiling: false, jobsWithoutCost: [],
+  });
+  assert.ok(!exact.includes("(at most)"), "a complete period carries no hedging at all");
+  assert.ok(!exact.includes("cannot be worked out"));
+  assert.ok(exact.includes("US$200.00") && exact.includes("(US$100.00)"),
+    "just the figures, stated plainly");
+
+  // An older Worker, or a cached response from before this shipped, sends no
+  // flags. Undefined must read as "fine" rather than blanking a real margin.
+  const legacy = render({ ...base, paidToCleaners: 100, margin: 200, jobsCounted: 2, jobsWithoutCost: [] });
+  assert.ok(legacy.includes("US$200.00"), "a response without the flags still shows its margin");
+  assert.ok(!legacy.includes("(at most)"));
+  console.log("14) The manager panel states an exact margin, bounds a partial one, and blanks an unknowable one");
+}
+
+// ---- 15. and it says all of that in Spanish -------------------------
+{
+  const app = loadApp("?locationId=L1", page());
+  app.vmEval(`
+    DATA = { transactions: [], expenses: [] };
+    managerPl = { month: "2026-09", loading: false, error: null, data: {
+      currency: "USD", income: 1000, expenses: 0, net: 1000, reimbursableOutstanding: 0,
+      byCategory: [], excluded: [], undated: [], mixedIncomeCurrency: false, netIsCeiling: true,
+      cleaning: { collected: 300, paidToCleaners: 0, margin: 300, jobsCounted: 0, costMissing: 2,
+                  marginKnown: false, marginIsCeiling: false, byTurnover: [],
+                  jobsWithoutCost: [{ id: "a" }, { id: "b" }], unpaidCleaners: 0, unpaidCleanerJobs: 0 },
+    } };
+    renderManagerStatement();
+  `);
+  app.forceLocale("es");
+  const html = app.document.querySelector("#panel-managerstmt").innerHTML;
+
+  // These are built in JS, so they are swapped by the DOM pass rather than by
+  // tr() -- which means they only translate if they are dictionary keys. Test 9
+  // enforces that for every label the panel emits; this checks the new ones
+  // specifically, since they are the ones a reader sees only when something is
+  // wrong and would be the easiest to leave English.
+  const dict = JSON.parse(app.vmEval("JSON.stringify(Object.keys(I18N.es))"));
+  for (const added of ["Kept on cleaning (at most)", "Net (at most)"]) {
+    assert.ok(dict.includes(added), `"${added}" has no Spanish, so it would stay English`);
+  }
+  assert.ok(dict.some((k) => k.startsWith("No cleaner cost is recorded")),
+    "and so would the explanation of why the figure is blank");
+  assert.ok(dict.some((k) => k.startsWith("At most: cleans with no cleaner cost")),
+    "and the note bounding the figure");
+  console.log("15) Every string the unknown-margin case introduces has a Spanish translation");
+}
+
+console.log("\nPASS — the dashboard renders in the account's language, switches both ways, translates no data, and states no figure it cannot know.");
