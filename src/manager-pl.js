@@ -86,11 +86,22 @@ export function managerExpenseOf(record, reportCurrency) {
   const raw = p.currency ? String(p.currency).toUpperCase() : currencyOf(p.amount, null);
   const wanted = String(reportCurrency || "USD").toUpperCase();
 
+  const isForeign = Boolean(raw && raw !== wanted);
+
+  // The rate this record was converted at, or null when it carries none.
+  // Derived from converted_amount the same way the net below derives it, so the
+  // two can never disagree about what one expense is worth; exchange_rate is
+  // the fallback for a record that stores the rate but not the converted gross.
+  const convertedGross = moneyOf(p.converted_amount);
+  let rate = null;
+  if (!isForeign) rate = 1;
+  else if (convertedGross !== null && gross) rate = convertedGross / gross;
+  else if (Number.isFinite(Number(p.exchange_rate)) && Number(p.exchange_rate) > 0) rate = Number(p.exchange_rate);
+
   let net = gross === null ? null : round2(gross - reimbursable);
 
-  if (net !== null && raw && raw !== wanted) {
-    const converted = moneyOf(p.converted_amount);
-    if (converted === null) {
+  if (net !== null && isForeign) {
+    if (convertedGross === null) {
       // Refusing here is the point. Adding 3,000 DOP to a USD total produces a
       // number nobody can tell is wrong.
       issues.push("unconverted_currency");
@@ -99,10 +110,21 @@ export function managerExpenseOf(record, reportCurrency) {
       // converted_amount is the converted GROSS, so the reimbursable share has
       // to travel at the same rate rather than being subtracted in the original
       // currency.
-      const rate = gross === 0 ? 0 : converted / gross;
-      net = round2(converted - reimbursable * rate);
+      net = round2(convertedGross - reimbursable * (gross === 0 ? 0 : convertedGross / gross));
     }
   }
+
+  // What the owner owes, expressed in the report's currency. Yari, 2026-10-05:
+  // "the recoverable amount that is the dop expenses should not reflect usd if
+  // they are not usd, that is misleading and problematic." She is right, and it
+  // was worse than mislabelling: 150 DOP was being added to a USD total and
+  // printed as US$150.00, roughly 59x the real figure, on every statement for
+  // any account that spends in DOP.
+  //
+  // Converted at the record's OWN stored rate, never a rate invented here. A
+  // record that carries no rate converts to null and is reported rather than
+  // guessed at -- same refusal the expense total already makes.
+  const reimbursableInReport = reimbursable === 0 ? 0 : (rate === null ? null : round2(reimbursable * rate));
 
   const status = String(p.review_status || "").toLowerCase();
   if (status !== "approved") issues.push("not_approved");
@@ -114,6 +136,8 @@ export function managerExpenseOf(record, reportCurrency) {
     categoryLabel: EXPENSE_CATEGORIES[p.category] || "Other",
     paidOn: p.paid_on ?? null,
     gross, reimbursable,
+    // The same money twice: as recorded, and as the report can add it up.
+    reimbursableInReport,
     net,
     currency: raw || wanted,
     reviewStatus: status || null,
@@ -145,7 +169,31 @@ export function summarisePL(income, expenseRows) {
   }
 
   const expenseTotal = round2(counted.reduce((s, e) => s + e.net, 0));
-  const reimbursable = round2(expenseRows.reduce((s, e) => s + (e.reimbursable || 0), 0));
+
+  // Deliberately over every row, counted or not: an expense still awaiting
+  // approval is money the manager is already out of pocket for.
+  //
+  // Totalled in the report's currency, and only when every contributing row
+  // could be converted at its own recorded rate. One row that could not makes
+  // the total unknowable rather than approximate, so it is withheld and the
+  // rows are named -- the alternative is a figure quietly missing an unknown
+  // amount, which is the failure this whole line just had.
+  const reimbursableRows = expenseRows.filter((e) => (e.reimbursable || 0) !== 0);
+  const unconvertible = reimbursableRows.filter((e) => e.reimbursableInReport === null);
+  const reimbursable = unconvertible.length
+    ? null
+    : round2(reimbursableRows.reduce((s, e) => s + (e.reimbursableInReport || 0), 0));
+
+  // What was actually recorded, in the currency it was recorded in, so a DOP
+  // expense can be seen as DOP instead of only as its converted shadow.
+  const reimbursableByCurrency = [];
+  for (const e of reimbursableRows) {
+    const cur = e.currency;
+    const prev = reimbursableByCurrency.find((r) => r.currency === cur);
+    if (prev) { prev.total = round2(prev.total + e.reimbursable); prev.entries += 1; }
+    else reimbursableByCurrency.push({ currency: cur, total: round2(e.reimbursable), entries: 1 });
+  }
+  reimbursableByCurrency.sort((a, b) => b.total - a.total);
 
   return {
     income: round2(income),
@@ -154,6 +202,12 @@ export function summarisePL(income, expenseRows) {
     // Money the manager laid out and expects back. Not an expense, but they are
     // out of pocket for it until the owner settles, so it is stated.
     reimbursableOutstanding: reimbursable,
+    reimbursableByCurrency,
+    // Named, not counted: "a figure is missing" is not actionable, "this
+    // expense has no exchange rate" is.
+    reimbursableUnconvertible: unconvertible.map((e) => ({
+      id: e.id, name: e.name, currency: e.currency, amount: e.reimbursable,
+    })),
     byCategory: [...byCategory.values()].sort((a, b) => b.total - a.total),
     countedCount: counted.length,
     excluded: excluded.map((e) => ({
