@@ -11,6 +11,7 @@
 // ledger. This proxies rather than recomputing, so there is one definition of
 // the manager's money instead of two that drift apart.
 import assert from "node:assert";
+import fs from "node:fs";
 
 const CLIENT = "ZghxU8I60bEm39JUbtCm";
 const tenants = new Map([[CLIENT, JSON.stringify({ label: "DEMO", ghlPitSecretName: "PIT_DEMO" })]]);
@@ -160,4 +161,46 @@ const call = async (qs, env = baseEnv, headers = { Authorization: "Bearer admin-
   console.log("9) An upstream 401 becomes a 502 that names the real problem, instead of re-prompting for a key");
 }
 
-console.log("\nPASS — one definition of the manager's money, fetched under the dashboard's own gate.");
+// ---- 10. the proxy forwards every param the page can send -----------
+// Yari, 2026-10-05, looking at a statement set to All time that still showed
+// only the last 30 days: the page sent period=all, the invoicing Worker
+// understood period=all, and THIS route in between silently dropped it,
+// because its allow-list had never heard of it.
+//
+// Nothing failed. A dropped param just falls back to a default, which is why
+// both sides had passing tests and the feature still did not work. The seam
+// between them had no test at all.
+{
+  serveWorker(200, PL);
+  await call(`locationId=${CLIENT}&period=all`);
+  const u = new URL(seen[0].url);
+  assert.strictEqual(u.searchParams.get("period"), "all",
+    "period reaches the Worker, or All time quietly means the last 30 days");
+}
+
+// ---- 11. and the allow-list cannot fall behind the page again -------
+// The real defect was not a missing string, it was that nothing related the
+// two files. This reads the page's own loadManagerPl and fails if it can send
+// a name this route would throw away -- so the next param added to the page
+// breaks here rather than on Yari's screen.
+{
+  const app = fs.readFileSync("./public/app.js", "utf8");
+  const body = app.slice(app.indexOf("async function loadManagerPl"));
+  const fn = body.slice(0, body.indexOf("\n}"));
+
+  const sent = new Set();
+  for (const m of fn.matchAll(/params\.set\(\s*["'`]([a-zA-Z]+)["'`]/g)) sent.add(m[1]);
+  for (const m of fn.matchAll(/new URLSearchParams\(\s*\{\s*([a-zA-Z]+)/g)) sent.add(m[1]);
+  assert.ok(sent.size >= 3, `expected to find the params the page sends, found ${[...sent]}`);
+
+  const route = fs.readFileSync("./src/index.js", "utf8");
+  const listed = route.slice(route.indexOf('if (url.pathname === "/api/manager-pl")'));
+  const allow = [...listed.slice(0, listed.indexOf("invoicingFetch")).matchAll(/"([a-zA-Z]+)"/g)].map((m) => m[1]);
+
+  const dropped = [...sent].filter((k) => k !== "locationId" && !allow.includes(k));
+  assert.deepStrictEqual(dropped, [],
+    `the page sends these and this route drops them: ${JSON.stringify(dropped)}`);
+  console.log("10) Every param the page sends survives the proxy, now and as the page grows");
+}
+
+console.log("\nPASS — one definition of the manager's money, fetched under the dashboard's own gate, for the period actually asked for.");
