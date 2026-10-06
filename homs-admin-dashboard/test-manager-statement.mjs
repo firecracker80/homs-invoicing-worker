@@ -28,7 +28,7 @@ const baseEnv = {
 };
 
 const PL = {
-  currency: "USD", income: 1380.17, expenses: 100, net: 1280.17, reimbursableOutstanding: 215,
+  currency: "USD", income: 1380.17, expenses: 100, net: 1280.17,
   byCategory: [{ category: "pest_control", label: "Pest Control", total: 35, count: 1 }],
   excluded: [], undated: [], mixedIncomeCurrency: false, incomeByCurrency: [],
   cleaning: { collected: 475, paidToCleaners: 100, margin: 375, jobsCounted: 2, byTurnover: [], jobsWithoutCost: [], unpaidCleaners: 0, unpaidCleanerJobs: 0 },

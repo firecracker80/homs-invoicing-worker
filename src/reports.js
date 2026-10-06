@@ -230,8 +230,7 @@ const UI = {
     plIncome: "Income from bookings",
     plExpenses: "Expenses",
     plNet: "Net",
-    plNote: (amt) => `Expenses count only the share the manager cannot recover (amount less Can Reimburse).
-      ${amt} is recoverable from owners and is not treated as a cost here.`,
+    plNote: `Expenses are what the manager pays for themselves. An owner's costs come off that owner's payout instead, and are shown separately below.`,
     plByCategory: "Expenses by category",
     plNoExpenses: "No approved expenses in this period.",
     plOwnerPayouts: "Owed to owners",
@@ -249,13 +248,9 @@ const UI = {
     warnUnattributed: (n) => `<strong>${n} expense(s) do not say who pays for them</strong>
       and are counted against nobody until they do. Set Paid By on each one to Owner or Manager.`,
     plOwnerBorneNote: (n, amt) =>
-      `${n} expense(s) totalling ${amt} are the owner's cost, not the manager's, so they are not counted above.`,
+      `${n} expense(s) totalling ${amt} come off the owners' payouts rather than counting here.`,
     plReimbursableRecorded: (list) =>
       `Recorded as ${list}, converted at the rate stored on each expense.`,
-    warnReimbursableUnconvertible: (names) =>
-      `<strong>Recoverable from owners cannot be totalled.</strong> These carry an amount in another
-      currency with no exchange rate, and converting them by guesswork would be a wrong number that
-      looks right: ${names}.`,
     plCleaningNote: (n) => `Across ${n} clean(s) paid for in this period.`,
     plCleaningUnknownNote: (n) =>
       `None of the ${n} clean(s) in this period has a cleaner cost recorded, so what was kept on cleaning
@@ -302,8 +297,7 @@ const UI = {
     plIncome: "Ingresos por reservas",
     plExpenses: "Gastos",
     plNet: "Neto",
-    plNote: (amt) => `Los gastos cuentan solo la parte que el administrador no puede recuperar (monto menos Reembolsable).
-      ${amt} es recuperable de los propietarios y no se trata como costo aquí.`,
+    plNote: `Los gastos son lo que el administrador paga de su propio bolsillo. Los costos del propietario se descuentan de su pago y se muestran aparte más abajo.`,
     plByCategory: "Gastos por categoría",
     plNoExpenses: "No hay gastos aprobados en este período.",
     plOwnerPayouts: "Adeudado a propietarios",
@@ -321,13 +315,9 @@ const UI = {
     warnUnattributed: (n) => `<strong>${n} gasto(s) no indican quién los paga</strong>
       y no se cuentan a nadie hasta que lo indiquen. Configure Paid By en cada uno como Owner o Manager.`,
     plOwnerBorneNote: (n, amt) =>
-      `${n} gasto(s) por un total de ${amt} son costo del propietario, no del administrador, así que no se cuentan arriba.`,
+      `${n} gasto(s) por un total de ${amt} se descuentan del pago a los propietarios en vez de contarse aquí.`,
     plReimbursableRecorded: (list) =>
       `Registrado como ${list}, convertido a la tasa guardada en cada gasto.`,
-    warnReimbursableUnconvertible: (names) =>
-      `<strong>No se puede totalizar lo recuperable de los propietarios.</strong> Estos tienen un monto en
-      otra moneda sin tasa de cambio, y convertirlos por estimación daría una cifra incorrecta con
-      apariencia de correcta: ${names}.`,
     plCleaningNote: (n) => `Sobre ${n} limpieza(s) pagada(s) en este período.`,
     plCleaningUnknownNote: (n) =>
       `Ninguna de las ${n} limpieza(s) de este período tiene un costo de limpiador registrado, así que no
@@ -667,10 +657,6 @@ function managerPlHtml({ brandName, fromLabel, toLabel, allTime = false, pl, loc
     warn.push(`<p class="warn">${t.warnUndated(pl.undated.length)}</p>`);
   }
 
-  if (pl.reimbursableUnconvertible?.length) {
-    warn.push(`<p class="warn">${t.warnReimbursableUnconvertible(
-      pl.reimbursableUnconvertible.map((e) => escapeHtml(e.name || e.id)).join(", "))}</p>`);
-  }
 
   const netClass = pl.net < 0 ? "neg" : "pos";
   const dash = pl.mixedIncomeCurrency ? "&mdash;" : null;
@@ -699,13 +685,13 @@ function managerPlHtml({ brandName, fromLabel, toLabel, allTime = false, pl, loc
       <tr class="tot"><td>${pl.netIsCeiling ? t.plNetCeiling : t.plNet}</td><td class="n ${netClass}">${dash || money(pl.net, cur)}</td></tr>
     </table>
     ${pl.netIsCeiling ? `<p class="note">${t.plCeilingNote}</p>` : ""}
-    <p class="note">${t.plNote(pl.reimbursableOutstanding === null ? "&mdash;" : money(pl.reimbursableOutstanding, cur))}</p>
+    <p class="note">${t.plNote}</p>
     ${pl.ownerBorneCount
       ? `<p class="note">${t.plOwnerBorneNote(pl.ownerBorneCount, money(pl.ownerBorneTotal, cur))}</p>`
       : ""}
-    ${(pl.reimbursableByCurrency || []).some((c) => c.currency !== cur)
+    ${(pl.ownerBorneByCurrency || []).some((c) => c.currency !== cur)
       ? `<p class="note">${t.plReimbursableRecorded(
-          pl.reimbursableByCurrency.map((c) => money(c.total, c.currency)).join(", "))}</p>`
+          pl.ownerBorneByCurrency.map((c) => money(c.total, c.currency)).join(", "))}</p>`
       : ""}
     ${pl.cleaning && (pl.cleaning.collected || pl.cleaning.paidToCleaners) ? `
     <h2>${t.plCleaning}</h2>

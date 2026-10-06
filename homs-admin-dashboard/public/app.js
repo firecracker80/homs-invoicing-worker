@@ -73,8 +73,11 @@ const I18N = {
       "gasto(s) no tienen monto, así que no hay nada que contar:",
     "expense(s) do not say who pays for them, so they are counted against nobody. Set Paid By to Owner or Manager on:":
       "gasto(s) no indican quién los paga, así que no se cuentan a nadie. Configure Paid By como Owner o Manager en:",
-    "expense(s) are the owner's cost, not the manager's, so they are not counted above.":
-      "gasto(s) son costo del propietario, no del administrador, así que no se cuentan arriba.",
+    "expense(s) come off the owners' payouts rather than counting here.":
+      "gasto(s) se descuentan del pago a los propietarios en vez de contarse aquí.",
+    "Deducted from owner payouts": "Descontado del pago a propietarios",
+    "Expenses are what the manager pays for themselves, plus what was paid to cleaners. An owner's costs come off that owner's payout instead and are shown separately.":
+      "Los gastos son lo que el administrador paga de su propio bolsillo, más lo pagado a los limpiadores. Los costos del propietario se descuentan de su pago y se muestran aparte.",
     "expense(s) have no Paid On date, so they fall into no period at all.":
       "gasto(s) no tienen fecha de pago, así que no caen en ningún período.",
     "Refresh": "Actualizar",
@@ -767,10 +770,6 @@ function renderManagerStatement() {
     warn.push(warnLine(m(payouts.unattributed.owed),
       "is not attributed to any owner, and cannot be paid to anybody until those rows carry a name."));
   }
-  if (pl.reimbursableUnconvertible?.length) {
-    warn.push(warnLine(pl.reimbursableUnconvertible.map((e) => e.name || e.id).join(", "),
-      "Recoverable from owners cannot be totalled — the expense(s) below carry another currency with no exchange rate, and a guessed conversion would be a wrong number that looks right."));
-  }
   // Grouped by WHY, and the records named.
   //
   // This used to be one number -- "3 expense(s) are left out of the total" --
@@ -821,16 +820,16 @@ function renderManagerStatement() {
           <tr><td>Income from bookings</td><td>${pl.mixedIncomeCurrency ? "—" : m(pl.income)}</td></tr>
           <tr><td>Expenses</td><td>(${m(pl.expenses)})</td></tr>
           <tr class="statement-net"><td>${pl.netIsCeiling ? "Net (at most)" : "Net"}</td><td>${m(pl.net)}</td></tr>
-          <tr><td>Recoverable from owners</td><td>${m(pl.reimbursableOutstanding)}</td></tr>
+          <tr><td>Deducted from owner payouts</td><td>${m(pl.ownerBorneTotal)}</td></tr>
         </tbody>
       </table>
       ${pl.netIsCeiling ? `<p class="note">At most: cleans with no cleaner cost recorded are missing from this, so the real figure is lower.</p>` : ""}
-      ${(pl.reimbursableByCurrency || []).some((c) => c.currency !== cur)
-        ? `<p class="note">Recoverable from owners was recorded as ${pl.reimbursableByCurrency.map((c) => esc(moneyIn(c.total, c.currency))).join(", ")}, converted at the rate stored on each expense.</p>`
+      ${(pl.ownerBorneByCurrency || []).some((c) => c.currency !== cur)
+        ? `<p class="note">Deducted from owner payouts was recorded as ${pl.ownerBorneByCurrency.map((c) => esc(moneyIn(c.total, c.currency))).join(", ")}, converted at the rate stored on each expense.</p>`
         : ""}
-      <p class="note">Expenses count only the share the manager cannot recover, plus what was paid to cleaners. Money recoverable from owners is listed but not treated as a cost.</p>
+      <p class="note">Expenses are what the manager pays for themselves, plus what was paid to cleaners. An owner's costs come off that owner's payout instead and are shown separately.</p>
       ${pl.ownerBorneCount
-        ? `<p class="note"><strong>${pl.ownerBorneCount}</strong> <span>expense(s) are the owner's cost, not the manager's, so they are not counted above.</span> <span class="warn-detail">${esc(m(pl.ownerBorneTotal))}</span></p>`
+        ? `<p class="note"><strong>${pl.ownerBorneCount}</strong> <span>expense(s) come off the owners' payouts rather than counting here.</span> <span class="warn-detail">${esc(m(pl.ownerBorneTotal))}</span></p>`
         : ""}
 
       ${c.collected || c.paidToCleaners ? `
