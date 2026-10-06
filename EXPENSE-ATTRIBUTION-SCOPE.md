@@ -47,11 +47,13 @@ The dashboard is unaffected: it reads field KEYS and renders its own labels, whi
 
 That is a product decision rather than a bug, and it is far bigger than this field. Relabelling means every field and every option on Expenses, Properties, Transactions, Cleaning Jobs and the rest, on every account, and it has to survive the snapshot. **Worth deciding before the snapshot is cut, for exactly the reason Paid By was** — doing it afterwards means doing it twice.
 
-Three ways it could go, none of them started:
+**Decided, Yari 2026-10-06:** *"keep the merge tags the same and only translate the label... when we go to create the snapshot, we will have to create one in es and one in en."*
 
-- leave English everywhere, and treat GHL's own screens as the operator's surface while clients live in the dashboard;
-- bilingual labels (`Paid By / Pagado Por`) on every field and option, which is ugly but needs deciding once and never again;
-- Spanish labels on Spanish accounts, which means the snapshot forks per language and every account diverges from the template.
+Two snapshots, English and Spanish. **Field keys stay byte-identical between them; only labels differ.** That is what makes it safe: every merge tag, every workflow, the Worker and the dashboard all address fields by key, so a Spanish account is cosmetically different and functionally the same account. My earlier worry that forking the snapshot would make accounts diverge from the template was wrong — it only holds if the keys fork too, and they will not.
+
+Not now. At snapshot-creation time.
+
+**The standing cost, which is the part to remember:** there are two snapshots to keep in step from here on. Every field added later has to be added to both, with the same key and a different label. A field that reaches only one of them makes one language's accounts quietly incomplete, and nothing in GHL will say so. Worth a checklist entry wherever the snapshot build is written down.
 
 ## Sequencing — this blocks the snapshot
 
@@ -68,16 +70,23 @@ Each phase is independently mergeable and leaves the system working.
 
 Still to confirm by eye, because the API only proves the field exists: that it renders in the Expenses form and on a record in the GHL UI.
 
-### 2. Set it on what already exists (GHL write)
-DEMO-HOMS has 3 expense records, all three owner-borne by Yari's reading:
-- RL Santana Refrigeración — 150 DOP
-- Test Villa 1 – Carpet Wash — 180 DOP
-- Test Villa 1 – Pest Control — 35 DOP
+### 2. Set it on what already exists (GHL write) — DONE on DEMO-HOMS 2026-10-06
+All three records set to `paid_by = owner`, confirmed in each response:
 
-Any real client account needs the same pass. Count them before promising a timeline.
+| record | id | amount | |
+|---|---|---|---|
+| RL Santana Refrigeración | `6aa945f0491c584adfd0c0f0` | 150 DOP | owner |
+| Test Villa 1 – Carpet Wash | `6aa042d133150a79d5b8b077` | 180 DOP | owner |
+| Test Villa 1 – Pest Control | `6aa042c7178735d831dd57b6` | 35 DOP | owner |
+
+All three also now read `review_status: approved` — Yari approved them between 2026-10-05 and this write. So the manager statement's "3 expense(s) still say Needs Review" warning is gone, and each one contributes US$0.00 to Expenses because `Can Reimburse` covers the full amount. Recoverable from owners stays US$6.20 / RD$365.00.
+
+**Still outstanding: every other account.** No live client account has been touched, and none has been counted. Phase 3 must not ship before that count exists — see the warning on phase 3.
 
 ### 3. The Worker reads it (no GHL write)
 `managerExpenseOf` gains `paidBy`, and `not_attributed` joins the issue list beside `not_approved` / `unconverted_currency` / `no_amount`. The manager P&L counts only `paid_by = manager`. The dashboard already renders exclusion reasons by name as of #106, so this needs one new phrase and its translation.
+
+**Do not ship this before counting expenses on live accounts.** Unset `Paid By` is reported rather than guessed, which is the right rule and also means every expense on every account that has not had phase 2 run against it drops out of the manager's total the moment this deploys. On DEMO-HOMS that is now zero records. On Luminara, Cruce and the rest it is unknown, and unknown is not a safe number to deploy against.
 
 **Effect on today's numbers:** the manager's Expenses line stops carrying owner costs. On DEMO-HOMS that figure is already US$0.00 because `Can Reimburse` covers the full amount, so nothing visibly moves — which makes this phase safe but also means it proves nothing on its own. Phase 4 is where it becomes visible.
 
