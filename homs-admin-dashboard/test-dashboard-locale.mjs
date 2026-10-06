@@ -788,4 +788,61 @@ const textsOf = (root) => textNodesOf(root).map((n) => n.nodeValue.trim());
   console.log("18) An excluded expense is reported with its reason and its name, in either language");
 }
 
-console.log("\nPASS — the dashboard renders in the account's language, switches both ways, settles after one pass, translates no data, asks for the period it names, says why it left anything out, and states no figure it cannot know.");
+// ---- 19. the panel distinguishes the owner's costs from a gap --------
+// Phase 3 of the expense attribution work. Two things that look similar on a
+// payload and must never look similar on the page: an expense that IS the
+// owner's (ordinary, stated, no warning) and one that says nothing about whose
+// it is (a real gap, warned about, named).
+{
+  const render = (extra, excluded = []) => {
+    const app = loadApp("?locationId=L1", page());
+    app.vmEval(`
+      DATA = { transactions: [], expenses: [] };
+      managerPl = { month: null, loading: false, error: null, data: ${JSON.stringify({
+        currency: "USD", income: 1000, expenses: 100, net: 900, reimbursableOutstanding: 0,
+        byCategory: [], undated: [], mixedIncomeCurrency: false, excluded,
+        cleaning: { collected: 0, paidToCleaners: 0, margin: 0, jobsCounted: 0, costMissing: 0,
+                    marginKnown: true, marginIsCeiling: false, byTurnover: [], jobsWithoutCost: [],
+                    unpaidCleaners: 0, unpaidCleanerJobs: 0 },
+        ...extra,
+      })} };
+      renderManagerStatement();
+      __html = $("#panel-managerstmt").innerHTML;
+    `);
+    return { app, html: app.vmEval("__html") };
+  };
+
+  // Owner-borne: stated under the expenses table, with no warning anywhere.
+  const owner = render({ ownerBorneCount: 2, ownerBorneTotal: 250 }).html;
+  assert.match(owner, /are the owner's cost, not the manager's/,
+    "the panel says where the rest of the spending went");
+  assert.ok(owner.includes("US$250.00"), "with the amount, so it can be checked");
+  assert.ok(!/class="warn"/.test(owner),
+    "and raises no warning, because an owner-borne expense is correct, not a defect");
+
+  // None: the note is absent entirely rather than reading "0 expense(s)".
+  const none = render({ ownerBorneCount: 0, ownerBorneTotal: 0 }).html;
+  assert.ok(!/are the owner's cost/.test(none), "an account with no owner costs is not told about them");
+
+  // Unattributed: a warning, naming the records and the field to set.
+  const gap = render({ ownerBorneCount: 0, ownerBorneTotal: 0 },
+    [{ id: "x", name: "Fridge repair", issues: ["not_attributed"] }]).html;
+  assert.match(gap, /do not say who pays for them/, "an unattributed expense is a warning");
+  assert.match(gap, /Paid By/, "naming the field to set");
+  assert.match(gap, /Fridge repair/, "and the record to set it on");
+  assert.match(gap, /class="warn"/);
+
+  // Both phrases must be translatable. They are built in JS, so localize() can
+  // only reach them as whole text nodes -- case 9's rule, checked here for the
+  // two strings this phase adds.
+  const keys = new Set(JSON.parse(render({}).app.vmEval("JSON.stringify(Object.keys(I18N.es))")));
+  for (const phrase of [
+    "expense(s) are the owner's cost, not the manager's, so they are not counted above.",
+    "expense(s) do not say who pays for them, so they are counted against nobody. Set Paid By to Owner or Manager on:",
+  ]) {
+    assert.ok(keys.has(phrase), `no Spanish for: ${phrase.slice(0, 48)}…`);
+  }
+  console.log("19) The panel states the owner's costs plainly and warns only when nobody said whose a cost is");
+}
+
+console.log("\nPASS — the dashboard renders in the account's language, switches both ways, settles after one pass, translates no data, asks for the period it names, says why it left anything out, says whose cost is whose, and states no figure it cannot know.");

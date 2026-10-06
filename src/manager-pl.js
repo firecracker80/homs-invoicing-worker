@@ -126,8 +126,29 @@ export function managerExpenseOf(record, reportCurrency) {
   // guessed at -- same refusal the expense total already makes.
   const reimbursableInReport = reimbursable === 0 ? 0 : (rate === null ? null : round2(reimbursable * rate));
 
+  // The whole cost in the report's currency, converted the same way. What the
+  // OWNER bears is the gross, not the net -- net is gross less what comes back
+  // to the manager, which is a fact about the manager and not about the owner.
+  const grossInReport = gross === null || rate === null ? null : round2(gross * rate);
+
   const status = String(p.review_status || "").toLowerCase();
   if (status !== "approved") issues.push("not_approved");
+
+  // Whose cost this is. Yari, 2026-10-05: "these should be expenses for the
+  // owner not the manager, manager expenses will likely be the cleaning staff,
+  // HOMS fee, things like that."
+  //
+  // Can Reimburse was doing this job implicitly -- set it to the full amount
+  // and the expense nets to zero for the manager -- which is the right
+  // arithmetic arrived at by accident, and silent when the field is blank. An
+  // owner's cost with Can Reimburse unset counted against the manager and
+  // nothing said so.
+  //
+  // Unset is NOT guessed at, including from Can Reimburse. Guessing is how the
+  // field ended up meaning two things at once.
+  const declared = String(p.paid_by || "").toLowerCase();
+  const paidBy = declared === "owner" || declared === "manager" ? declared : null;
+  if (!paidBy) issues.push("not_attributed");
 
   return {
     id: record?.id ?? null,
@@ -138,6 +159,8 @@ export function managerExpenseOf(record, reportCurrency) {
     gross, reimbursable,
     // The same money twice: as recorded, and as the report can add it up.
     reimbursableInReport,
+    grossInReport,
+    paidBy,
     net,
     currency: raw || wanted,
     reviewStatus: status || null,
@@ -157,7 +180,19 @@ export function inWindow(paidOn, from, to) {
 }
 
 export function summarisePL(income, expenseRows) {
-  const counted = expenseRows.filter((e) => e.counted);
+  // Three outcomes, not two.
+  //
+  // An owner-borne expense is NOT an exclusion and must never be warned about.
+  // It is simply not the manager's cost -- the ordinary case, and the thing
+  // this whole field exists to say. Warning about it would repeat the mistake
+  // the exclusion count made before it was broken down by reason: shouting
+  // about something correct until nobody reads the shouting.
+  //
+  // What IS reported is a record nobody has attributed, which is a real gap
+  // somebody has to close, and one with a data problem, as before.
+  const usable = expenseRows.filter((e) => e.counted);
+  const counted = usable.filter((e) => e.paidBy === "manager");
+  const ownerBorne = usable.filter((e) => e.paidBy === "owner");
   const excluded = expenseRows.filter((e) => !e.counted);
 
   const byCategory = new Map();
@@ -202,6 +237,11 @@ export function summarisePL(income, expenseRows) {
     // Money the manager laid out and expects back. Not an expense, but they are
     // out of pocket for it until the owner settles, so it is stated.
     reimbursableOutstanding: reimbursable,
+    // Stated rather than silently dropped. A manager looking at an expense
+    // total that just got smaller is owed an explanation of where the rest
+    // went, and "they are the owner's" is that explanation.
+    ownerBorneCount: ownerBorne.length,
+    ownerBorneTotal: round2(ownerBorne.reduce((s, e) => s + (e.grossInReport || 0), 0)),
     reimbursableByCurrency,
     // Named, not counted: "a figure is missing" is not actionable, "this
     // expense has no exchange rate" is.

@@ -71,6 +71,10 @@ const I18N = {
       "gasto(s) están en otra moneda sin monto convertido, y convertirlos por estimación daría una cifra incorrecta con apariencia de correcta:",
     "expense(s) have no amount, so there is nothing to count:":
       "gasto(s) no tienen monto, así que no hay nada que contar:",
+    "expense(s) do not say who pays for them, so they are counted against nobody. Set Paid By to Owner or Manager on:":
+      "gasto(s) no indican quién los paga, así que no se cuentan a nadie. Configure Paid By como Owner o Manager en:",
+    "expense(s) are the owner's cost, not the manager's, so they are not counted above.":
+      "gasto(s) son costo del propietario, no del administrador, así que no se cuentan arriba.",
     "expense(s) have no Paid On date, so they fall into no period at all.":
       "gasto(s) no tienen fecha de pago, así que no caen en ningún período.",
     "Refresh": "Actualizar",
@@ -781,6 +785,7 @@ function renderManagerStatement() {
     ["not_approved", 'expense(s) still say "Needs Review" and are not in the total yet:'],
     ["unconverted_currency", "expense(s) are in another currency with no converted amount, and converting them by guesswork would be a wrong number that looks right:"],
     ["no_amount", "expense(s) have no amount, so there is nothing to count:"],
+    ["not_attributed", "expense(s) do not say who pays for them, so they are counted against nobody. Set Paid By to Owner or Manager on:"],
   ];
   for (const [issue, phrase] of EXCLUSION_REASONS) {
     const hit = (pl.excluded || []).filter((e) => (e.issues || []).includes(issue));
@@ -824,6 +829,9 @@ function renderManagerStatement() {
         ? `<p class="note">Recoverable from owners was recorded as ${pl.reimbursableByCurrency.map((c) => esc(moneyIn(c.total, c.currency))).join(", ")}, converted at the rate stored on each expense.</p>`
         : ""}
       <p class="note">Expenses count only the share the manager cannot recover, plus what was paid to cleaners. Money recoverable from owners is listed but not treated as a cost.</p>
+      ${pl.ownerBorneCount
+        ? `<p class="note"><strong>${pl.ownerBorneCount}</strong> <span>expense(s) are the owner's cost, not the manager's, so they are not counted above.</span> <span class="warn-detail">${esc(m(pl.ownerBorneTotal))}</span></p>`
+        : ""}
 
       ${c.collected || c.paidToCleaners ? `
       <h3>Cleaning</h3>
