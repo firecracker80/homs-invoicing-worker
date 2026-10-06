@@ -102,11 +102,23 @@ Open, and the reason this phase is not already written:
 ### 5. Backfill
 Existing approved owner expenses posted to the ledger once, with the same idempotency key, so phase 4's trigger and the backfill cannot both post the same row.
 
-### 6. HOMS fee (separate, not blocked by the above)
-Currently modelled nowhere. Needs its own decision: is it a per-account subscription, a per-booking cut, or a line the manager records as an expense like any other? Until that is answered it is not a build, it is a question.
+### 6. HOMS fee — DONE 2026-10-06, and it needed no build
+Yari: it "is the account owner adding what they pay for using HOMS in their expenses because it is part of their operational overhead." So it is an ordinary expense with `Paid By = Manager`, which phase 3 already counts correctly. All it needed was a category that does not mislead — `Software & Subscriptions`, added to the Expenses object, since `Management Fee` reads like what the manager *charges the owner*.
+
+## The correction that reshaped all of this
+
+Written after the fact, because the scope above was built on a premise that turned out to be wrong, and the wrong premise is more instructive than the right conclusion.
+
+This document assumed `Can Reimburse` / `Already Reimbursed` / `Reimbursing Now` described the business. They do not. Yari, 2026-10-06: *"they collect payments from bookings, subtract maintenance, repairs, replacements, and commission before they send the owner their part of the split."*
+
+There is no receivable anywhere in that. The manager holds the money; an owner's cost comes off the payout. Those three fields encode a different business — a manager who fronts a cost and bills the owner back — and they predate this work. Taking them as given led to two pieces of careful, well-tested work on a mechanism nobody runs: converting reimbursables between currencies, and then reading `Already Reimbursed` so the balance could fall. The second was reverted the day after it shipped.
+
+The tell was there earlier and was missed twice: an owner's cost with `Can Reimburse` left blank counted squarely against the manager, and nothing said so. That is not a field doing a subtle job, it is a field doing the wrong job.
+
+**The lesson worth keeping:** a field that exists is not evidence that the process it implies exists. Ask what happens in real life before building on what the schema implies. One question about how an owner actually pays would have replaced both pieces of work.
 
 ## What this does not change
 
-- `Can Reimburse` keeps its current meaning and keeps driving "Recoverable from owners". It answers *how much comes back*, which stays a different question from *whose cost it was*. An owner-borne expense the manager fronted is both.
 - The cleaner cost on cleaning jobs is already the manager's cost and is already handled. It does not move into the Expenses object.
-- `Already Reimbursed` is still ignored, so "Recoverable from owners" still cannot decrease when an owner settles. Separate, still open, still needs Yari's settlement process.
+- The currency discipline survives intact, now applied to deductions rather than reimbursables: converted at the record's own stored rate, shown in the original currency beside it, and refused outright when a foreign record carries no rate.
+- `Can Reimburse`, `Already Reimbursed` and `Reimbursing Now` stay on the GHL object and are read by nothing. Harmless once nothing depends on them, and deleting a custom field is irreversible.
