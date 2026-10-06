@@ -65,6 +65,12 @@ const I18N = {
     "is owed to cleaners for completed cleans with no payment date.":
       "se deben a los limpiadores por limpiezas completadas sin fecha de pago.",
     "expense(s) are left out of the total.": "gasto(s) quedan fuera del total.",
+    'expense(s) still say "Needs Review" and are not in the total yet:':
+      'gasto(s) siguen marcados como "Needs Review" y todavía no están en el total:',
+    "expense(s) are in another currency with no converted amount, and converting them by guesswork would be a wrong number that looks right:":
+      "gasto(s) están en otra moneda sin monto convertido, y convertirlos por estimación daría una cifra incorrecta con apariencia de correcta:",
+    "expense(s) have no amount, so there is nothing to count:":
+      "gasto(s) no tienen monto, así que no hay nada que contar:",
     "expense(s) have no Paid On date, so they fall into no period at all.":
       "gasto(s) no tienen fecha de pago, así que no caen en ningún período.",
     "Refresh": "Actualizar",
@@ -697,7 +703,15 @@ function managerMonths() {
 }
 
 // Number outside the sentence, so the sentence can be translated.
-const warnLine = (figure, phrase) => `<p class="warn"><strong>${esc(String(figure))}</strong> <span>${phrase}</span></p>`;
+// `detail` is kept in its own element rather than concatenated into `phrase`.
+// localize() only swaps WHOLE text nodes, so "…not in the total yet: Carpet
+// Wash, Pest Control" would match no dictionary key and stay English forever --
+// the exact trap case 9 of the locale suite exists to catch. It is also right
+// on its own terms: the phrase is a label and the detail is the client's data,
+// which must never be translated.
+const warnLine = (figure, phrase, detail) =>
+  `<p class="warn"><strong>${esc(String(figure))}</strong> <span>${phrase}</span>${
+    detail ? ` <span class="warn-detail">${esc(detail)}</span>` : ""}</p>`;
 
 function renderManagerStatement() {
   const panel = $("#panel-managerstmt");
@@ -753,8 +767,31 @@ function renderManagerStatement() {
     warn.push(warnLine(pl.reimbursableUnconvertible.map((e) => e.name || e.id).join(", "),
       "Recoverable from owners cannot be totalled — the expense(s) below carry another currency with no exchange rate, and a guessed conversion would be a wrong number that looks right."));
   }
-  if (pl.excluded?.length) {
-    warn.push(warnLine(pl.excluded.length, "expense(s) are left out of the total."));
+  // Grouped by WHY, and the records named.
+  //
+  // This used to be one number -- "3 expense(s) are left out of the total" --
+  // and Yari, 2026-10-05, had to ask what it meant: "is it safe to assume that
+  // any expense in dop will be left out of the total? that doesn't make sense
+  // if we are converting to usd." A fair reading of a count that explains
+  // nothing, and the wrong one: they were unapproved, not foreign. The Worker's
+  // own HTML page had said so all along; this panel, which is the thing anybody
+  // actually opens, threw the reason away. The payload carried it the whole
+  // time.
+  const EXCLUSION_REASONS = [
+    ["not_approved", 'expense(s) still say "Needs Review" and are not in the total yet:'],
+    ["unconverted_currency", "expense(s) are in another currency with no converted amount, and converting them by guesswork would be a wrong number that looks right:"],
+    ["no_amount", "expense(s) have no amount, so there is nothing to count:"],
+  ];
+  for (const [issue, phrase] of EXCLUSION_REASONS) {
+    const hit = (pl.excluded || []).filter((e) => (e.issues || []).includes(issue));
+    if (hit.length) warn.push(warnLine(hit.length, phrase, hit.map((e) => e.name || e.id).join(", ")));
+  }
+  // A reason this build does not know about must still be reported, or a new
+  // exclusion added to the Worker would silently stop appearing here.
+  const named = new Set(EXCLUSION_REASONS.map(([i]) => i));
+  const other = (pl.excluded || []).filter((e) => !(e.issues || []).some((i) => named.has(i)));
+  if (other.length) {
+    warn.push(warnLine(other.length, "expense(s) are left out of the total."));
   }
   if (pl.undated?.length) {
     warn.push(warnLine(pl.undated.length, "expense(s) have no Paid On date, so they fall into no period at all."));
