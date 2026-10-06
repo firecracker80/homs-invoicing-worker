@@ -87,27 +87,6 @@ export function managerExpenseOf(record, reportCurrency) {
   // case. It is NOT the same as an unreadable one.
   const reimbursable = moneyOf(p.can_reimburse) ?? 0;
 
-  // What the owner has already paid back. Yari, 2026-10-06: "i record the
-  // payment manually when the owner pays me" -- so this field is maintained by
-  // hand and nothing else writes it.
-  //
-  // Until now nothing READ it either. "Recoverable from owners" summed
-  // can_reimburse alone, so it was the total ever reimbursable rather than what
-  // is still owed, and it could never go down no matter how many times an owner
-  // settled. A manager who had been paid in full still saw the whole amount
-  // listed as recoverable.
-  //
-  // reimbursing_now is deliberately left alone: nothing writes it, nothing
-  // reads it, and inventing a meaning for it here is how can_reimburse ended up
-  // doing two jobs at once.
-  const alreadyReimbursed = moneyOf(p.already_reimbursed) ?? 0;
-
-  // Floored at zero. More repaid than was ever billable is a data error, not a
-  // negative debt, and letting it go negative would quietly shrink the account
-  // total by the size of somebody's typo.
-  const outstanding = round2(Math.max(0, reimbursable - alreadyReimbursed));
-  const overReimbursed = alreadyReimbursed > reimbursable;
-
   // The expense's own currency wins over the amount field's, because the
   // dedicated field is what the import writes and what a person edits.
   const raw = p.currency ? String(p.currency).toUpperCase() : currencyOf(p.amount, null);
@@ -151,8 +130,7 @@ export function managerExpenseOf(record, reportCurrency) {
   // Converted at the record's OWN stored rate, never a rate invented here. A
   // record that carries no rate converts to null and is reported rather than
   // guessed at -- same refusal the expense total already makes.
-  // Converted from what is STILL OWED, not from what was originally billable.
-  const reimbursableInReport = outstanding === 0 ? 0 : (rate === null ? null : round2(outstanding * rate));
+  const reimbursableInReport = reimbursable === 0 ? 0 : (rate === null ? null : round2(reimbursable * rate));
 
   // The whole cost in the report's currency, converted the same way. What the
   // OWNER bears is the gross, not the net -- net is gross less what comes back
@@ -185,9 +163,6 @@ export function managerExpenseOf(record, reportCurrency) {
     categoryLabel: EXPENSE_CATEGORIES[p.category] || "Other",
     paidOn: p.paid_on ?? null,
     gross, reimbursable,
-    alreadyReimbursed,
-    outstanding,
-    overReimbursed,
     // The same money twice: as recorded, and as the report can add it up.
     reimbursableInReport,
     grossInReport,
@@ -244,7 +219,7 @@ export function summarisePL(income, expenseRows) {
   // the total unknowable rather than approximate, so it is withheld and the
   // rows are named -- the alternative is a figure quietly missing an unknown
   // amount, which is the failure this whole line just had.
-  const reimbursableRows = expenseRows.filter((e) => (e.outstanding || 0) !== 0);
+  const reimbursableRows = expenseRows.filter((e) => (e.reimbursable || 0) !== 0);
   const unconvertible = reimbursableRows.filter((e) => e.reimbursableInReport === null);
   const reimbursable = unconvertible.length
     ? null
@@ -256,8 +231,8 @@ export function summarisePL(income, expenseRows) {
   for (const e of reimbursableRows) {
     const cur = e.currency;
     const prev = reimbursableByCurrency.find((r) => r.currency === cur);
-    if (prev) { prev.total = round2(prev.total + e.outstanding); prev.entries += 1; }
-    else reimbursableByCurrency.push({ currency: cur, total: round2(e.outstanding), entries: 1 });
+    if (prev) { prev.total = round2(prev.total + e.reimbursable); prev.entries += 1; }
+    else reimbursableByCurrency.push({ currency: cur, total: round2(e.reimbursable), entries: 1 });
   }
   reimbursableByCurrency.sort((a, b) => b.total - a.total);
 
@@ -274,11 +249,6 @@ export function summarisePL(income, expenseRows) {
     ownerBorneCount: ownerBorne.length,
     ownerBorneTotal: round2(ownerBorne.reduce((s, e) => s + (e.grossInReport || 0), 0)),
     reimbursableByCurrency,
-    // More repaid than was ever billable. Floored above so it cannot drag the
-    // total down, and named here so it can be corrected rather than hidden.
-    overReimbursed: expenseRows.filter((e) => e.overReimbursed).map((e) => ({
-      id: e.id, name: e.name, billable: e.reimbursable, repaid: e.alreadyReimbursed,
-    })),
     // Named, not counted: "a figure is missing" is not actionable, "this
     // expense has no exchange rate" is.
     reimbursableUnconvertible: unconvertible.map((e) => ({
