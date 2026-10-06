@@ -16,7 +16,11 @@ const {
 
 const rec = (props, id = "e1") => ({ id, properties: props });
 const usd = (v) => ({ value: v, currency: "USD" });
-const approved = { review_status: "approved", paid_on: "2026-09-10", category: "utilities" };
+// paid_by is part of the shared fixture because, since attribution shipped, an
+// expense that does not say whose it is counts against nobody. These cases are
+// all about the MANAGER's own costs, so that is what they declare. The owner
+// side, and the unattributed case, get their own cases at the end.
+const approved = { review_status: "approved", paid_on: "2026-09-10", category: "utilities", paid_by: "manager" };
 
 // ---- 1. MONETORY fields arrive in more than one shape ---------------------
 {
@@ -547,4 +551,130 @@ const approved = { review_status: "approved", paid_on: "2026-09-10", category: "
   console.log("19) period=all covers every dated record, including July, and labels itself honestly");
 }
 
-console.log("\nPASS — manager P&L: a reimbursable cost is not an expense, every currency is converted at its own recorded rate or not at all, all time means all time, and nothing is quietly left out.");
+// ---- 20. an expense says whose cost it is ---------------------------
+// Yari, 2026-10-05: "these should be expenses for the owner not the manager,
+// manager expenses will likely be the cleaning staff, HOMS fee, things like
+// that."
+//
+// Can Reimburse had been doing this job implicitly: set it to the full amount
+// and the expense nets to zero for the manager. Right arithmetic reached by
+// accident, and silent when the field is blank -- an owner's cost with Can
+// Reimburse unset counted squarely against the manager and nothing said so.
+{
+  const mk = (extra, id) => managerExpenseOf(rec({ ...approved, amount: usd(100), ...extra }, id), "USD");
+
+  const mgr = mk({ paid_by: "manager" }, "m");
+  const own = mk({ paid_by: "owner" }, "o");
+  assert.strictEqual(mgr.paidBy, "manager");
+  assert.strictEqual(own.paidBy, "owner");
+
+  const pl = summarisePL(1000, [mgr, own]);
+  assert.strictEqual(pl.expenses, 100, "only the manager's own cost reaches the manager's total");
+  assert.strictEqual(pl.ownerBorneCount, 1);
+  assert.strictEqual(pl.ownerBorneTotal, 100, "and the owner's is stated, not silently dropped");
+  assert.deepStrictEqual(pl.byCategory.map((c) => c.count), [1],
+    "the owner's expense is not in the manager's categories either");
+
+  // The case Can Reimburse could never express: an owner cost the manager has
+  // not billed back yet. Under the old rule this counted fully against the
+  // manager, because nothing distinguished it from the manager's own spending.
+  const unbilled = mk({ paid_by: "owner", can_reimburse: usd(0) }, "u");
+  const pl2 = summarisePL(1000, [unbilled]);
+  assert.strictEqual(pl2.expenses, 0,
+    "an owner cost not yet billed back is still the owner's, not the manager's");
+  assert.strictEqual(pl2.ownerBorneTotal, 100);
+
+  // What the OWNER bears is the gross. Net is gross less what comes back to the
+  // manager, which is a fact about the manager -- using it here would understate
+  // the owner's costs by exactly the amount already billed back, and the two are
+  // identical whenever Can Reimburse is unset, so only a part-billed expense
+  // can tell them apart.
+  const partBilled = mk({ paid_by: "owner", amount: usd(250), can_reimburse: usd(100) }, "p");
+  assert.strictEqual(partBilled.net, 150, "net is the manager's view of it");
+  const pl3 = summarisePL(1000, [partBilled]);
+  assert.strictEqual(pl3.ownerBorneTotal, 250,
+    "but the owner bears the whole 250, not the 150 still outstanding");
+  console.log("20) Only the manager's own costs reach the manager's total, however Can Reimburse is set");
+}
+
+// ---- 21. an owner's expense is not a warning ------------------------
+// The distinction that keeps the page readable. An owner-borne expense is the
+// ORDINARY case -- it is what the field exists to say -- so it must never be
+// reported as something left out. Warning about correct data is how the old
+// exclusion count became noise nobody read.
+{
+  const own = managerExpenseOf(rec({ ...approved, amount: usd(100), paid_by: "owner" }, "o"), "USD");
+  const pl = summarisePL(1000, [own]);
+  assert.deepStrictEqual(pl.excluded, [], "an owner's expense is not an exclusion");
+  assert.strictEqual(pl.ownerBorneCount, 1, "it is reported as what it is instead");
+
+  // An unattributed one IS reported: that is a real gap somebody has to close.
+  const silent = managerExpenseOf(rec({ ...approved, amount: usd(100), paid_by: undefined }, "s"), "USD");
+  assert.ok(silent.issues.includes("not_attributed"));
+  assert.strictEqual(silent.paidBy, null, "and it is not guessed at");
+  const pl2 = summarisePL(1000, [silent]);
+  assert.strictEqual(pl2.excluded.length, 1);
+  assert.strictEqual(pl2.expenses, 0, "counted against nobody until somebody says");
+
+  // Not inferred from Can Reimburse, however tempting. Guessing is how that
+  // field came to mean two things at once.
+  const full = managerExpenseOf(
+    rec({ ...approved, amount: usd(100), can_reimburse: usd(100), paid_by: undefined }, "f"), "USD");
+  assert.strictEqual(full.paidBy, null,
+    "a fully reimbursable expense still has to SAY it is the owner's");
+  assert.ok(full.issues.includes("not_attributed"));
+
+  // A junk value is not an attribution either.
+  for (const junk of ["", "both", "Owner ", "OWNER", 0]) {
+    const r = managerExpenseOf(rec({ ...approved, amount: usd(10), paid_by: junk }, "j"), "USD");
+    if (junk === "OWNER") {
+      assert.strictEqual(r.paidBy, "owner", "case is forgiven, because GHL option keys are not");
+    } else {
+      assert.strictEqual(r.paidBy, null, `"${junk}" is not an attribution`);
+    }
+  }
+  console.log("21) An owner's expense is reported as the owner's; only an unattributed one is a warning");
+}
+
+// ---- 22. the page says all of that ----------------------------------
+// Cases 20 and 21 prove the arithmetic and would pass with the template
+// untouched, which is the lesson from every other render case in this file.
+{
+  const { handleManagerPL } = await import("./src/reports.js");
+  const render = async (records, tenant = {}) => {
+    globalThis.fetch = async (url) => ({
+      ok: true, status: 200,
+      text: async () => JSON.stringify(String(url).includes("/records/search") ? { records } : {}),
+    });
+    const env = {
+      TENANTS: { get: async () => ({ brandName: "B", currency: "USD", managerReportToken: "t", ghlPit: "pit", ...tenant }) },
+      LEDGER_DB: { prepare: () => ({ bind: () => ({ all: async () => ({ results: [{ currency: "USD", total_minor: 100000, n: 1 }] }) }) }) },
+    };
+    return (await handleManagerPL(
+      new Request("https://w.dev/reports/manager-pl?locationId=l&token=t&period=all"), env)).text();
+  };
+
+  const page = await render([
+    rec({ ...approved, amount: usd(100), paid_by: "manager", expense_name: "Cleaner payout" }, "m"),
+    rec({ ...approved, amount: usd(250), paid_by: "owner", expense_name: "Fridge repair" }, "o"),
+  ]);
+  assert.ok(page.includes("USD 100.00"), "the manager's own cost is the expense total");
+  assert.ok(!/USD 350\.00/.test(page), "the owner's is not added to it");
+  assert.match(page, /are the owner's cost/, "and the page says where the rest went");
+  assert.ok(page.includes("USD 250.00"), "with the amount, so it can be checked");
+  assert.ok(!/do not say who pays/.test(page), "no warning, because nothing here is wrong");
+
+  const missing = await render([rec({ ...approved, amount: usd(100), paid_by: undefined }, "s")]);
+  assert.match(missing, /do not say who pays for them/, "an unattributed expense is warned about");
+  assert.match(missing, /Paid By/, "and the page names the field to set");
+
+  const es = await render([
+    rec({ ...approved, amount: usd(100), paid_by: "manager" }, "m"),
+    rec({ ...approved, amount: usd(250), paid_by: "owner" }, "o"),
+  ], { statementLocale: "es" });
+  assert.match(es, /costo del propietario/, "the owner-borne note translates");
+  assert.ok(!/are the owner's cost/.test(es), "with no English left behind");
+  console.log("22) The page shows the manager's costs, says what the owner's were, and warns only when nobody said");
+}
+
+console.log("\nPASS — manager P&L: a reimbursable cost is not an expense, every expense says whose it is, every currency is converted at its own recorded rate or not at all, all time means all time, and nothing is quietly left out.");

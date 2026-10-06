@@ -244,6 +244,10 @@ const UI = {
     plCleaningMargin: "Kept on cleaning",
     plCleaningMarginCeiling: "Kept on cleaning (at most)",
     plNetCeiling: "Net (at most)",
+    warnUnattributed: (n) => `<strong>${n} expense(s) do not say who pays for them</strong>
+      and are counted against nobody until they do. Set Paid By on each one to Owner or Manager.`,
+    plOwnerBorneNote: (n, amt) =>
+      `${n} expense(s) totalling ${amt} are the owner's cost, not the manager's, so they are not counted above.`,
     plReimbursableRecorded: (list) =>
       `Recorded as ${list}, converted at the rate stored on each expense.`,
     warnReimbursableUnconvertible: (names) =>
@@ -312,6 +316,10 @@ const UI = {
     plCleaningMargin: "Retenido por limpieza",
     plCleaningMarginCeiling: "Retenido por limpieza (como máximo)",
     plNetCeiling: "Neto (como máximo)",
+    warnUnattributed: (n) => `<strong>${n} gasto(s) no indican quién los paga</strong>
+      y no se cuentan a nadie hasta que lo indiquen. Configure Paid By en cada uno como Owner o Manager.`,
+    plOwnerBorneNote: (n, amt) =>
+      `${n} gasto(s) por un total de ${amt} son costo del propietario, no del administrador, así que no se cuentan arriba.`,
     plReimbursableRecorded: (list) =>
       `Registrado como ${list}, convertido a la tasa guardada en cada gasto.`,
     warnReimbursableUnconvertible: (names) =>
@@ -632,6 +640,7 @@ function managerPlHtml({ brandName, fromLabel, toLabel, allTime = false, pl, loc
   const unconverted = pl.excluded.filter((e) => e.issues.includes("unconverted_currency"));
   const unapproved = pl.excluded.filter((e) => e.issues.includes("not_approved"));
   const noAmount = pl.excluded.filter((e) => e.issues.includes("no_amount"));
+  const unattributed = pl.excluded.filter((e) => e.issues.includes("not_attributed"));
   if (unconverted.length) {
     warn.push(`<p class="warn">${t.warnUnconverted(unconverted.length)}</p>`);
   }
@@ -640,6 +649,9 @@ function managerPlHtml({ brandName, fromLabel, toLabel, allTime = false, pl, loc
   }
   if (noAmount.length) {
     warn.push(`<p class="warn">${t.warnNoAmount(noAmount.length)}</p>`);
+  }
+  if (unattributed.length) {
+    warn.push(`<p class="warn">${t.warnUnattributed(unattributed.length)}</p>`);
   }
   // The cleaning figure is only as honest as the costs behind it, so a clean
   // with no cost recorded is reported as loudly as a mixed currency.
@@ -686,6 +698,9 @@ function managerPlHtml({ brandName, fromLabel, toLabel, allTime = false, pl, loc
     </table>
     ${pl.netIsCeiling ? `<p class="note">${t.plCeilingNote}</p>` : ""}
     <p class="note">${t.plNote(pl.reimbursableOutstanding === null ? "&mdash;" : money(pl.reimbursableOutstanding, cur))}</p>
+    ${pl.ownerBorneCount
+      ? `<p class="note">${t.plOwnerBorneNote(pl.ownerBorneCount, money(pl.ownerBorneTotal, cur))}</p>`
+      : ""}
     ${(pl.reimbursableByCurrency || []).some((c) => c.currency !== cur)
       ? `<p class="note">${t.plReimbursableRecorded(
           pl.reimbursableByCurrency.map((c) => money(c.total, c.currency)).join(", "))}</p>`
