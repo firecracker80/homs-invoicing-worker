@@ -5,6 +5,7 @@ import { splitBookedReservation } from "./multi-listing.js";
 import { createOrder } from "./paypal.js";
 import { createCheckoutSession } from "./stripe.js";
 import { handlePayPalReturn, handlePayPalWebhook, handleStripeReturn, handleStripeWebhook, handleGhlInvoicePaid } from "./payment.js";
+import { handleExpenseApproved } from "./expenses.js";
 import { handleCancel, handleDepositRefund } from "./cancellation.js";
 import { handleReschedule } from "./reschedule.js";
 import { resolveDraftInvoiceId, enrichAndSendInvoice, invoiceHasWorkerLines } from "./ghl-invoice.js";
@@ -450,6 +451,8 @@ export default {
         return handleBookingCreated(request, env);
       if (request.method === "POST" && url.pathname === "/ghl-invoice-paid")
         return handleGhlInvoicePaid(request, env);
+      if (request.method === "POST" && url.pathname === "/ghl-expense-approved")
+        return handleExpenseApproved(request, env);
       if (url.pathname === "/paypal/return")
         return handlePayPalReturn(request, env);
       if (request.method === "POST" && url.pathname === "/paypal/webhook")
