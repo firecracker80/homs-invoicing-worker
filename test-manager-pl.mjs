@@ -677,4 +677,45 @@ const approved = { review_status: "approved", paid_on: "2026-09-10", category: "
   console.log("22) The page shows the manager's costs, says what the owner's were, and warns only when nobody said");
 }
 
+// ---- 23. the HOMS fee is just an expense, and has a label ------------
+// Yari, 2026-10-06: the HOMS fee "is the account owner adding what they pay for
+// using HOMS in their expenses because it is part of their operational
+// overhead." So it needs no modelling -- phase 3 already counts it, because it
+// is the manager's own cost. It only needed somewhere honest to sit.
+//
+// Management Fee was the nearest existing option and reads like what the
+// manager CHARGES the owner, which is the opposite thing.
+{
+  const fee = managerExpenseOf(rec({
+    ...approved, paid_by: "manager", category: "software_subscriptions",
+    expense_name: "HOMS subscription", amount: usd(97),
+  }, "homs"), "USD");
+
+  assert.strictEqual(fee.categoryLabel, "Software & Subscriptions",
+    "a category GHL offers but this map does not know renders as 'Other'");
+  assert.strictEqual(fee.counted, true);
+
+  const pl = summarisePL(1000, [fee]);
+  assert.strictEqual(pl.expenses, 97, "it is the manager's own operational cost");
+  assert.deepStrictEqual(pl.byCategory, [
+    { category: "software_subscriptions", label: "Software & Subscriptions", total: 97, count: 1 },
+  ]);
+  assert.strictEqual(pl.ownerBorneCount, 0, "and is not the owner's");
+
+  // Every key the GHL field offers has a label here. A category added to the
+  // object and not to this map renders as "Other" on the statement, silently.
+  const ghlKeys = [
+    "maintenance_repairs", "cleaning_supplies", "utilities", "pest_control", "landscaping",
+    "insurance", "property_tax", "management_fee", "software_subscriptions", "miscellaneous", "other",
+  ];
+  for (const key of ghlKeys) {
+    const r = managerExpenseOf(rec({ ...approved, paid_by: "manager", category: key, amount: usd(1) }, key), "USD");
+    // "other" is genuinely labelled Other; every other key reaching that label
+    // means it fell through the map rather than being found in it.
+    if (key === "other") assert.strictEqual(r.categoryLabel, "Other");
+    else assert.notStrictEqual(r.categoryLabel, "Other", `"${key}" has no label of its own`);
+  }
+  console.log(`23) The HOMS fee is an ordinary manager expense, and all ${ghlKeys.length} GHL categories have labels`);
+}
+
 console.log("\nPASS — manager P&L: a reimbursable cost is not an expense, every expense says whose it is, every currency is converted at its own recorded rate or not at all, all time means all time, and nothing is quietly left out.");

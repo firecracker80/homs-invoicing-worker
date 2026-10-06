@@ -63,6 +63,12 @@ export const EXPENSE_CATEGORIES = {
   insurance: "Insurance",
   property_tax: "Property Tax",
   management_fee: "Management Fee",
+  // The HOMS subscription and anything like it. Yari, 2026-10-06: the account
+  // holder records what they pay for HOMS "in their expenses because it is part
+  // of their operational overhead" -- so it needs no modelling of its own, just
+  // somewhere honest to sit. Management Fee was the nearest existing option and
+  // reads like what the manager CHARGES the owner, which is the opposite.
+  software_subscriptions: "Software & Subscriptions",
   miscellaneous: "Miscellaneous Expenses",
   other: "Other",
 };
