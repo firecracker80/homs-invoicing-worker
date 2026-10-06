@@ -703,7 +703,14 @@ export default {
       const locationId = url.searchParams.get("locationId");
       if (!locationId) return Response.json({ error: "locationId is required" }, { status: 400 });
       const query = { locationId, format: "json" };
-      for (const k of ["from", "to", "recipientName", "currency", "lang"]) {
+      // An allow-list, and every name the page can send has to be in it. It
+      // dropped `period` silently once (2026-10-05): the page asked for all
+      // time, the Worker understood all time, and this route in between threw
+      // the word away, so the panel kept showing 30 days under an All time
+      // label. Nothing failed -- a dropped param just reverts to a default.
+      // test-manager-statement.mjs now reads the page's own code and fails if
+      // it sends a name missing from this list.
+      for (const k of ["from", "to", "period", "recipientName", "currency", "lang"]) {
         const v = url.searchParams.get(k);
         if (v) query[k] = v;
       }
