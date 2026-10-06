@@ -83,9 +83,22 @@ export function managerExpenseOf(record, reportCurrency) {
   const gross = moneyOf(p.amount);
   if (gross === null) issues.push("no_amount");
 
-  // A blank can_reimburse means nothing is recoverable, which is the common
-  // case. It is NOT the same as an unreadable one.
-  const reimbursable = moneyOf(p.can_reimburse) ?? 0;
+  // can_reimburse, already_reimbursed and reimbursing_now are deliberately NOT
+  // read. They predate this code and encode a different business: a manager who
+  // fronts a cost and bills the owner back, with a receivable sitting between
+  // them. Yari, 2026-10-06, describing how it actually works -- hers and every
+  // stateside manager's -- "they collect payments from bookings, subtract
+  // maintenance, repairs, replacements, and commission before they send the
+  // owner their part of the split."
+  //
+  // There is no receivable in that. The manager is holding the money; an
+  // owner's cost comes off the payout and that is the end of it. So whose cost
+  // it is decides everything, and how much of it might be billed back decides
+  // nothing: "that case has not presented itself in the 2 yrs i have worked
+  // with her."
+  //
+  // The fields are left on the object rather than deleted -- harmless once
+  // nothing reads them, and deleting a custom field is irreversible.
 
   // The expense's own currency wins over the amount field's, because the
   // dedicated field is what the import writes and what a person edits.
@@ -104,38 +117,22 @@ export function managerExpenseOf(record, reportCurrency) {
   else if (convertedGross !== null && gross) rate = convertedGross / gross;
   else if (Number.isFinite(Number(p.exchange_rate)) && Number(p.exchange_rate) > 0) rate = Number(p.exchange_rate);
 
-  let net = gross === null ? null : round2(gross - reimbursable);
-
-  if (net !== null && isForeign) {
-    if (convertedGross === null) {
-      // Refusing here is the point. Adding 3,000 DOP to a USD total produces a
-      // number nobody can tell is wrong.
-      issues.push("unconverted_currency");
-      net = null;
-    } else {
-      // converted_amount is the converted GROSS, so the reimbursable share has
-      // to travel at the same rate rather than being subtracted in the original
-      // currency.
-      net = round2(convertedGross - reimbursable * (gross === 0 ? 0 : convertedGross / gross));
-    }
-  }
-
-  // What the owner owes, expressed in the report's currency. Yari, 2026-10-05:
-  // "the recoverable amount that is the dop expenses should not reflect usd if
-  // they are not usd, that is misleading and problematic." She is right, and it
-  // was worse than mislabelling: 150 DOP was being added to a USD total and
-  // printed as US$150.00, roughly 59x the real figure, on every statement for
-  // any account that spends in DOP.
+  // The whole cost in the report's currency, converted at the record's OWN
+  // stored rate and never a rate invented here. Yari, 2026-10-05: "the
+  // recoverable amount that is the dop expenses should not reflect usd if they
+  // are not usd, that is misleading and problematic."
   //
-  // Converted at the record's OWN stored rate, never a rate invented here. A
-  // record that carries no rate converts to null and is reported rather than
-  // guessed at -- same refusal the expense total already makes.
-  const reimbursableInReport = reimbursable === 0 ? 0 : (rate === null ? null : round2(reimbursable * rate));
-
-  // The whole cost in the report's currency, converted the same way. What the
-  // OWNER bears is the gross, not the net -- net is gross less what comes back
-  // to the manager, which is a fact about the manager and not about the owner.
+  // A foreign record with no rate converts to null and is refused rather than
+  // guessed at. Adding 3,000 DOP to a USD total produces a number nobody can
+  // tell is wrong.
   const grossInReport = gross === null || rate === null ? null : round2(gross * rate);
+  if (gross !== null && isForeign && convertedGross === null) issues.push("unconverted_currency");
+
+  // One expense, one cost, borne by exactly one party. There is no share: the
+  // old `gross - can_reimburse` was a split that nothing in the business ever
+  // produced, and it silently charged the manager for an owner's cost whenever
+  // Can Reimburse was left blank.
+  const net = grossInReport;
 
   const status = String(p.review_status || "").toLowerCase();
   if (status !== "approved") issues.push("not_approved");
@@ -162,10 +159,8 @@ export function managerExpenseOf(record, reportCurrency) {
     category: p.category ?? "other",
     categoryLabel: EXPENSE_CATEGORIES[p.category] || "Other",
     paidOn: p.paid_on ?? null,
-    gross, reimbursable,
     // The same money twice: as recorded, and as the report can add it up.
-    reimbursableInReport,
-    grossInReport,
+    gross, grossInReport,
     paidBy,
     net,
     currency: raw || wanted,
@@ -211,49 +206,31 @@ export function summarisePL(income, expenseRows) {
 
   const expenseTotal = round2(counted.reduce((s, e) => s + e.net, 0));
 
-  // Deliberately over every row, counted or not: an expense still awaiting
-  // approval is money the manager is already out of pocket for.
-  //
-  // Totalled in the report's currency, and only when every contributing row
-  // could be converted at its own recorded rate. One row that could not makes
-  // the total unknowable rather than approximate, so it is withheld and the
-  // rows are named -- the alternative is a figure quietly missing an unknown
-  // amount, which is the failure this whole line just had.
-  const reimbursableRows = expenseRows.filter((e) => (e.reimbursable || 0) !== 0);
-  const unconvertible = reimbursableRows.filter((e) => e.reimbursableInReport === null);
-  const reimbursable = unconvertible.length
-    ? null
-    : round2(reimbursableRows.reduce((s, e) => s + (e.reimbursableInReport || 0), 0));
+  // What comes off the owners' payouts. Not a receivable: the manager is
+  // holding the money and nets this off before remitting, so there is nobody to
+  // collect from and nothing to chase.
+  const ownerBorneTotal = round2(ownerBorne.reduce((s, e) => s + (e.grossInReport || 0), 0));
 
-  // What was actually recorded, in the currency it was recorded in, so a DOP
-  // expense can be seen as DOP instead of only as its converted shadow.
-  const reimbursableByCurrency = [];
-  for (const e of reimbursableRows) {
-    const cur = e.currency;
-    const prev = reimbursableByCurrency.find((r) => r.currency === cur);
-    if (prev) { prev.total = round2(prev.total + e.reimbursable); prev.entries += 1; }
-    else reimbursableByCurrency.push({ currency: cur, total: round2(e.reimbursable), entries: 1 });
+  // In the currency it was recorded in, so a DOP expense can be seen as DOP
+  // instead of only as its converted shadow.
+  const ownerBorneByCurrency = [];
+  for (const e of ownerBorne) {
+    const prev = ownerBorneByCurrency.find((r) => r.currency === e.currency);
+    if (prev) { prev.total = round2(prev.total + e.gross); prev.entries += 1; }
+    else ownerBorneByCurrency.push({ currency: e.currency, total: round2(e.gross), entries: 1 });
   }
-  reimbursableByCurrency.sort((a, b) => b.total - a.total);
+  ownerBorneByCurrency.sort((a, b) => b.total - a.total);
 
   return {
     income: round2(income),
     expenses: expenseTotal,
     net: round2(income - expenseTotal),
-    // Money the manager laid out and expects back. Not an expense, but they are
-    // out of pocket for it until the owner settles, so it is stated.
-    reimbursableOutstanding: reimbursable,
     // Stated rather than silently dropped. A manager looking at an expense
-    // total that just got smaller is owed an explanation of where the rest
-    // went, and "they are the owner's" is that explanation.
+    // total smaller than their spending is owed an explanation of where the
+    // rest went, and "it comes off the owner's payout" is that explanation.
     ownerBorneCount: ownerBorne.length,
-    ownerBorneTotal: round2(ownerBorne.reduce((s, e) => s + (e.grossInReport || 0), 0)),
-    reimbursableByCurrency,
-    // Named, not counted: "a figure is missing" is not actionable, "this
-    // expense has no exchange rate" is.
-    reimbursableUnconvertible: unconvertible.map((e) => ({
-      id: e.id, name: e.name, currency: e.currency, amount: e.reimbursable,
-    })),
+    ownerBorneTotal,
+    ownerBorneByCurrency,
     byCategory: [...byCategory.values()].sort((a, b) => b.total - a.total),
     countedCount: counted.length,
     excluded: excluded.map((e) => ({

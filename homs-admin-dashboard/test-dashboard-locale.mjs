@@ -316,7 +316,7 @@ const textsOf = (root) => textNodesOf(root).map((n) => n.nodeValue.trim());
     managerPl = {
       month: "2026-09", loading: false, error: null,
       data: {
-        currency: "USD", income: 1380.17, expenses: 100, net: 1280.17, reimbursableOutstanding: 215,
+        currency: "USD", income: 1380.17, expenses: 100, net: 1280.17,
         mixedIncomeCurrency: true,
         byCategory: [{ category: "pest_control", label: "Pest Control", total: 35, count: 1 }],
         // Each exclusion reason, so the sweep below covers the phrase each one
@@ -544,7 +544,7 @@ const textsOf = (root) => textNodesOf(root).map((n) => n.nodeValue.trim());
     app.vmEval(`
       DATA = { transactions: [], expenses: [] };
       managerPl = { month: "2026-09", loading: false, error: null, data: ${JSON.stringify({
-        currency: "USD", income: 1000, expenses: 0, net: 1000, reimbursableOutstanding: 0,
+        currency: "USD", income: 1000, expenses: 0, net: 1000,
         byCategory: [], excluded: [], undated: [], mixedIncomeCurrency: false,
         cleaning, ...extra,
       })} };
@@ -605,7 +605,7 @@ const textsOf = (root) => textNodesOf(root).map((n) => n.nodeValue.trim());
   app.vmEval(`
     DATA = { transactions: [], expenses: [] };
     managerPl = { month: "2026-09", loading: false, error: null, data: {
-      currency: "USD", income: 1000, expenses: 0, net: 1000, reimbursableOutstanding: 0,
+      currency: "USD", income: 1000, expenses: 0, net: 1000,
       byCategory: [], excluded: [], undated: [], mixedIncomeCurrency: false, netIsCeiling: true,
       cleaning: { collected: 300, paidToCleaners: 0, margin: 300, jobsCounted: 0, costMissing: 2,
                   marginKnown: false, marginIsCeiling: false, byTurnover: [],
@@ -729,7 +729,7 @@ const textsOf = (root) => textNodesOf(root).map((n) => n.nodeValue.trim());
     app.vmEval(`
       DATA = { transactions: [], expenses: [] };
       managerPl = { month: null, loading: false, error: null, data: ${JSON.stringify({
-        currency: "USD", income: 1000, expenses: 0, net: 1000, reimbursableOutstanding: 0,
+        currency: "USD", income: 1000, expenses: 0, net: 1000,
         byCategory: [], undated: [], mixedIncomeCurrency: false, excluded,
         cleaning: { collected: 0, paidToCleaners: 0, margin: 0, jobsCounted: 0, costMissing: 0,
                     marginKnown: true, marginIsCeiling: false, byTurnover: [], jobsWithoutCost: [],
@@ -799,7 +799,7 @@ const textsOf = (root) => textNodesOf(root).map((n) => n.nodeValue.trim());
     app.vmEval(`
       DATA = { transactions: [], expenses: [] };
       managerPl = { month: null, loading: false, error: null, data: ${JSON.stringify({
-        currency: "USD", income: 1000, expenses: 100, net: 900, reimbursableOutstanding: 0,
+        currency: "USD", income: 1000, expenses: 100, net: 900,
         byCategory: [], undated: [], mixedIncomeCurrency: false, excluded,
         cleaning: { collected: 0, paidToCleaners: 0, margin: 0, jobsCounted: 0, costMissing: 0,
                     marginKnown: true, marginIsCeiling: false, byTurnover: [], jobsWithoutCost: [],
@@ -814,15 +814,19 @@ const textsOf = (root) => textNodesOf(root).map((n) => n.nodeValue.trim());
 
   // Owner-borne: stated under the expenses table, with no warning anywhere.
   const owner = render({ ownerBorneCount: 2, ownerBorneTotal: 250 }).html;
-  assert.match(owner, /are the owner's cost, not the manager's/,
+  assert.match(owner, /come off the owners' payouts/,
     "the panel says where the rest of the spending went");
+  assert.match(owner, /Deducted from owner payouts/,
+    "and the row is named as a deduction, not as a debt the owner owes");
+  assert.ok(!/Recoverable from owners/.test(owner),
+    "the receivable framing is gone -- the manager holds the money and nets it off");
   assert.ok(owner.includes("US$250.00"), "with the amount, so it can be checked");
   assert.ok(!/class="warn"/.test(owner),
     "and raises no warning, because an owner-borne expense is correct, not a defect");
 
   // None: the note is absent entirely rather than reading "0 expense(s)".
   const none = render({ ownerBorneCount: 0, ownerBorneTotal: 0 }).html;
-  assert.ok(!/are the owner's cost/.test(none), "an account with no owner costs is not told about them");
+  assert.ok(!/come off the owners/.test(none), "an account with no owner costs is not told about them");
 
   // Unattributed: a warning, naming the records and the field to set.
   const gap = render({ ownerBorneCount: 0, ownerBorneTotal: 0 },
@@ -837,7 +841,8 @@ const textsOf = (root) => textNodesOf(root).map((n) => n.nodeValue.trim());
   // two strings this phase adds.
   const keys = new Set(JSON.parse(render({}).app.vmEval("JSON.stringify(Object.keys(I18N.es))")));
   for (const phrase of [
-    "expense(s) are the owner's cost, not the manager's, so they are not counted above.",
+    "expense(s) come off the owners' payouts rather than counting here.",
+    "Deducted from owner payouts",
     "expense(s) do not say who pays for them, so they are counted against nobody. Set Paid By to Owner or Manager on:",
   ]) {
     assert.ok(keys.has(phrase), `no Spanish for: ${phrase.slice(0, 48)}…`);
