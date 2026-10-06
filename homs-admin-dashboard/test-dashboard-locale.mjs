@@ -319,7 +319,15 @@ const textsOf = (root) => textNodesOf(root).map((n) => n.nodeValue.trim());
         currency: "USD", income: 1380.17, expenses: 100, net: 1280.17, reimbursableOutstanding: 215,
         mixedIncomeCurrency: true,
         byCategory: [{ category: "pest_control", label: "Pest Control", total: 35, count: 1 }],
-        excluded: [{ id: "e1" }], undated: [{ id: "e2" }],
+        // Each exclusion reason, so the sweep below covers the phrase each one
+        // emits. With a bare { id } none of those branches render and the sweep
+        // silently checks nothing -- which is how they shipped untranslated.
+        excluded: [
+          { id: "e1", name: "Nevera Taller", issues: ["not_approved"] },
+          { id: "e2", name: "Ferretería Central", issues: ["unconverted_currency"] },
+          { id: "e3", name: "Sin Monto", issues: ["no_amount"] },
+        ],
+        undated: [{ id: "e2" }],
         ownerPayouts: {
           owners: [
             { name: "Carlos Mendoza", owed: 4972.08, entries: 36, mixedCurrency: false, currency: "USD" },
@@ -362,7 +370,11 @@ const textsOf = (root) => textNodesOf(root).map((n) => n.nodeValue.trim());
     .filter((s) => /[A-Za-z]{3}/.test(s))
     .filter((s) => !/^(US\$|\(US\$|RD\$|€)/.test(s))
     .filter((s) => !["Pest Control", "Deep Clean", "September 2026", "DEMO",
-                      "Carlos Mendoza", "Elena Marchetti"].includes(s));
+                      "Carlos Mendoza", "Elena Marchetti",
+                      // Expense names are the client's own data. They appear in
+                      // the warnings and must NEVER be translated.
+                      "Nevera Taller", "Ferretería Central", "Sin Monto",
+                      "Nevera Taller, Ferretería Central, Sin Monto"].includes(s));
 
   const untranslatable = [...new Set(prose)].filter((s) => !keys.has(s));
   assert.deepStrictEqual(untranslatable, [],
@@ -701,4 +713,79 @@ const textsOf = (root) => textNodesOf(root).map((n) => n.nodeValue.trim());
   console.log("17) All time asks the Worker for all time; a chosen month asks for that month");
 }
 
-console.log("\nPASS — the dashboard renders in the account's language, switches both ways, settles after one pass, translates no data, asks for the period it names, and states no figure it cannot know.");
+// ---- 18. an excluded expense says WHY, and names itself --------------
+// Yari, 2026-10-05, reading "3 expense(s) are left out of the total": "is it
+// safe to assume that any expense in dop will be left out of the total? that
+// doesn't make sense if we are converting to usd."
+//
+// A fair reading of a count that explains nothing, and the wrong one -- they
+// were unapproved, not foreign. The Worker's own HTML page had broken it down
+// by reason all along; this panel, the thing anybody actually opens, collapsed
+// every reason into one number and threw the rest away. The payload carried the
+// reason and the name the whole time.
+{
+  const render = (excluded) => {
+    const app = loadApp("?locationId=L1", page());
+    app.vmEval(`
+      DATA = { transactions: [], expenses: [] };
+      managerPl = { month: null, loading: false, error: null, data: ${JSON.stringify({
+        currency: "USD", income: 1000, expenses: 0, net: 1000, reimbursableOutstanding: 0,
+        byCategory: [], undated: [], mixedIncomeCurrency: false, excluded,
+        cleaning: { collected: 0, paidToCleaners: 0, margin: 0, jobsCounted: 0, costMissing: 0,
+                    marginKnown: true, marginIsCeiling: false, byTurnover: [], jobsWithoutCost: [],
+                    unpaidCleaners: 0, unpaidCleanerJobs: 0 },
+      })} };
+      renderManagerStatement();
+      __html = $("#panel-managerstmt").innerHTML;
+    `);
+    return { app, html: app.vmEval("__html") };
+  };
+
+  // Her actual case: three unapproved expenses, all in DOP.
+  const { html } = render([
+    { id: "a", name: "RL Santana Refrigeración", issues: ["not_approved"] },
+    { id: "b", name: "Test Villa 1 - Carpet Wash", issues: ["not_approved"] },
+    { id: "c", name: "Test Villa 1 - Pest Control", issues: ["not_approved"] },
+  ]);
+  assert.match(html, /Needs Review/, "the panel says what is actually wrong with them");
+  assert.match(html, /RL Santana Refrigeraci/, "and which records, so they can be found and fixed");
+  assert.match(html, /Carpet Wash/);
+  assert.ok(!/another currency/.test(html),
+    "and does not mention currency, which is what she was left to guess at");
+
+  // The reasons are reported separately, not merged into one count.
+  const mixed = render([
+    { id: "a", name: "Unapproved One", issues: ["not_approved"] },
+    { id: "b", name: "No Rate One", issues: ["unconverted_currency"] },
+  ]).html;
+  assert.match(mixed, /Needs Review/);
+  assert.match(mixed, /another currency/);
+  assert.match(mixed, /Unapproved One/);
+  assert.match(mixed, /No Rate One/);
+
+  // A reason this build has never heard of must still surface. Otherwise a new
+  // exclusion added to the Worker disappears from the page that reads it.
+  const future = render([{ id: "z", name: "Something New", issues: ["invented_later"] }]).html;
+  assert.match(future, /left out of the total/,
+    "an unrecognised reason still reports the expense rather than hiding it");
+  assert.match(future, /Something New|1/);
+
+  // Spanish. The stub DOM keeps innerHTML as a string rather than parsing it
+  // into nodes, so localize() cannot walk this panel here -- which is why case 9
+  // checks dictionary membership rather than translated output. Same approach:
+  // prove each reason CAN translate, and that a record name is not a label.
+  const { app: dictApp } = render([{ id: "a", name: "RL Santana Refrigeración", issues: ["not_approved"] }]);
+  const keys = new Set(JSON.parse(dictApp.vmEval("JSON.stringify(Object.keys(I18N.es))")));
+  for (const phrase of [
+    'expense(s) still say "Needs Review" and are not in the total yet:',
+    "expense(s) are in another currency with no converted amount, and converting them by guesswork would be a wrong number that looks right:",
+    "expense(s) have no amount, so there is nothing to count:",
+  ]) {
+    assert.ok(keys.has(phrase), `no Spanish for: ${phrase.slice(0, 48)}…`);
+  }
+  assert.ok(!keys.has("RL Santana Refrigeración"),
+    "an expense's own name is the client's data and must never be a dictionary key");
+  console.log("18) An excluded expense is reported with its reason and its name, in either language");
+}
+
+console.log("\nPASS — the dashboard renders in the account's language, switches both ways, settles after one pass, translates no data, asks for the period it names, says why it left anything out, and states no figure it cannot know.");
