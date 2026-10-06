@@ -134,6 +134,7 @@ const ENTRY_LABELS = {
     cleaning_fee: "Cleaning fee",
     processing_fee: "Payment processing fee",
     deposit_held: "Security deposit held",
+    expense_owner: "Expense charged to you",
 
     cancellation_charge_owner: "Cancellation charge — owner share",
     cancellation_charge_manager: "Cancellation charge — manager share",
@@ -164,6 +165,7 @@ const ENTRY_LABELS = {
     cleaning_fee: "Tarifa de limpieza",
     processing_fee: "Tarifa de procesamiento de pago",
     deposit_held: "Depósito de garantía retenido",
+    expense_owner: "Gasto cobrado a usted",
 
     cancellation_charge_owner: "Cargo por cancelación — parte del propietario",
     cancellation_charge_manager: "Cargo por cancelación — parte del administrador",
@@ -190,8 +192,8 @@ const ENTRY_LABELS = {
 // a number recorded for reference and deliberately excluded from the totals.
 // Neither word means that to anybody outside this codebase.
 const CATEGORY_LABELS = {
-  en: { income: "Income", pass_through: "Passed through", liability: "Held", shadow: "Informational" },
-  es: { income: "Ingreso", pass_through: "Transferido", liability: "Retenido", shadow: "Informativo" },
+  en: { income: "Income", pass_through: "Passed through", liability: "Held", shadow: "Informational", expense: "Expense" },
+  es: { income: "Ingreso", pass_through: "Transferido", liability: "Retenido", shadow: "Informativo", expense: "Gasto" },
 };
 
 // The statement's own chrome -- headings, column headers, and the notes that
