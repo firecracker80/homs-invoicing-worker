@@ -133,7 +133,7 @@ function buildManifest(locationId) {
     display: "standalone",
     orientation: "portrait-primary",
     background_color: "#f6f7f9",
-    theme_color: "#2f6fed",
+    theme_color: "#028476",
     icons: [
       // "any", not "maskable". The artwork is a disc with its own margin, not a
       // full-bleed design -- declaring it maskable tells Android it may crop
