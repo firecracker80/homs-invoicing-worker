@@ -117,6 +117,34 @@ async function linkIfPossible(pit, locationId, associations, objectKeyA, recordI
   return { linked: true };
 }
 
+// A GHL locationId is an opaque alphanumeric id. Anything else is not one, and
+// refusing it keeps whatever it is out of start_url -- the one field here that
+// a browser will later navigate to.
+const SAFE_LOCATION_ID = /^[A-Za-z0-9_-]{1,64}$/;
+
+function buildManifest(locationId) {
+  const scoped = locationId && SAFE_LOCATION_ID.test(locationId);
+  return {
+    name: "HOMS Admin Dashboard",
+    short_name: "HOMS",
+    description: "Properties, bookings, cleaning and statements for your account.",
+    start_url: scoped ? `/?locationId=${locationId}` : "/",
+    scope: "/",
+    display: "standalone",
+    orientation: "portrait-primary",
+    background_color: "#f6f7f9",
+    theme_color: "#2f6fed",
+    icons: [
+      // "any", not "maskable". The artwork is a disc with its own margin, not a
+      // full-bleed design -- declaring it maskable tells Android it may crop
+      // into the outer edge, which on a disc eats the disc. Android puts an
+      // "any" icon on its own plate instead, which is what this wants.
+      { src: "/icons/icon-192.png", sizes: "192x192", type: "image/png", purpose: "any" },
+      { src: "/icons/icon-512.png", sizes: "512x512", type: "image/png", purpose: "any" },
+    ],
+  };
+}
+
 async function handleCreateExpense(request, env) {
   const body = await request.json();
   const { locationId, propertyId, ownerContactId, name, paidOn, categoryKey, lineItemDescription, amount, paidBy } = body;
@@ -635,6 +663,26 @@ export default {
     // Public: liveness only. Reveals nothing about any tenant.
     if (url.pathname === "/api/health") {
       return Response.json({ ok: true });
+    }
+
+    // The manifest is generated rather than served from public/, because
+    // start_url has to name the account.
+    //
+    // A static start_url opens the installed app with no locationId, and the
+    // fallback that would save it -- the id kept in localStorage from the first
+    // visit -- is exactly what an installed app on iOS may not share with the
+    // browser it was installed from. The reader would tap their own icon and be
+    // told no location was specified.
+    //
+    // Public on purpose: a manifest is fetched by the browser before anyone has
+    // logged in, and it reveals nothing that the link they were sent does not.
+    if (url.pathname === "/manifest.webmanifest") {
+      return Response.json(buildManifest(url.searchParams.get("locationId")), {
+        headers: {
+          "Content-Type": "application/manifest+json; charset=utf-8",
+          "Cache-Control": "public, max-age=300",
+        },
+      });
     }
 
     if (url.pathname === "/api/login" && request.method === "POST") {

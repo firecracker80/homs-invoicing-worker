@@ -2,8 +2,22 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- viewport-fit=cover lets the page reach under a notch; the stylesheet then
+       pads the bar back out with env(safe-area-inset-*). Without both, a
+       notched phone either wastes a strip or hides the brand behind the camera. -->
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>HOMS Admin Dashboard</title>
+  <meta name="theme-color" content="#2f6fed" />
+
+  <!-- iOS ignores the manifest for these. -->
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <meta name="apple-mobile-web-app-title" content="HOMS" />
+  <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+
+  <!-- The account is appended at load: an installed app must open on the
+       account it was installed from. See manifest.webmanifest in the Worker. -->
+  <link rel="manifest" id="manifestLink" href="/manifest.webmanifest" />
   <link rel="stylesheet" href="/styles.css" />
 </head>
 <body>

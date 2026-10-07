@@ -522,6 +522,14 @@ function renderFilterableTab({ tabKey, panelId, list, filterDefs, dateField, hea
   $(panelId).innerHTML = extraToolbarHtml + renderFilterBar(tabKey, filterDefs, dateField, list) + table(headers, rowsHtml, filtered.length);
 }
 
+// Point the manifest at this account, so an installed icon reopens it rather
+// than a page saying no location was specified.
+function pointManifestAtAccount() {
+  const link = document.getElementById("manifestLink");
+  const id = getLocationId();
+  if (link && id) link.href = `/manifest.webmanifest?locationId=${encodeURIComponent(id)}`;
+}
+
 function getLocationId() {
   const fromUrl = new URLSearchParams(location.search).get("locationId");
   if (fromUrl) {
@@ -640,6 +648,7 @@ async function loadData() {
     if (label) label.textContent = json.tenantLabel || "Admin Dashboard";
     renderAll();
     paintLangToggle();
+    pointManifestAtAccount();
     startLocalizeObserver();
   } catch (err) {
     $("#error").hidden = false;
