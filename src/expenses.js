@@ -22,7 +22,7 @@
 // could never have done because nothing fires for a record that stopped
 // qualifying.
 import { moneyOf, fetchExpenseRecords } from "./manager-pl.js";
-import { fetchAllObjectRecords } from "./ghl.js";
+import { fetchAllObjectRecords, fetchContactName } from "./ghl.js";
 
 const json = (body, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
@@ -51,11 +51,45 @@ const toMinor = (n) => Math.round(Number(n) * 100);
 // owner, which is the same chain composeBooking already walks for a rent split.
 // Resolved the same way deliberately: an expense and a booking on the same
 // property must never disagree about whose it is.
-export function ownerNameFor(record, propertyNames, tenant) {
+// The contact ids this expense could resolve an owner from, best first.
+//
+// Yari, 2026-10-07: "since the custom values only capture 1 owner name, did the
+// merger fix how to capture various owner names? my suggestion would be to tag
+// them." It did not, and tags turn out not to be needed: GHL already carries
+// this as two LABELLED associations, which beats a tag because it is a typed
+// relation to a real contact rather than a string somebody has to keep spelling
+// the same way.
+//
+//   expense_owner    contact <-> expenses, labelled "Owner"
+//   property_owner   contact <-> properties, labelled "Owner"
+//
+// The expense's own link comes first because it is the more specific statement
+// and because handleCreateExpense already sets it. The property's is the
+// fallback for an expense created anywhere else -- the GHL form, an import, a
+// workflow -- which is most of them.
+export function ownerContactIdsFor(record, propertyOwners) {
+  const ids = [];
+  const own = (record?.relations || []).find((r) => r.objectKey === "contact");
+  if (own?.recordId) ids.push(own.recordId);
+  const propLink = (record?.relations || []).find((r) => r.objectKey === "custom_objects.properties");
+  const viaProperty = propLink && propertyOwners.get(propLink.recordId);
+  if (viaProperty && !ids.includes(viaProperty)) ids.push(viaProperty);
+  return ids;
+}
+
+export function ownerNameFor(record, propertyNames, tenant, contactNames = new Map(), propertyOwners = new Map()) {
+  // A real contact on the record beats anything configured, because it is what
+  // somebody actually linked rather than what was typed into a custom value
+  // once at provisioning.
+  for (const id of ownerContactIdsFor(record, propertyOwners)) {
+    const name = contactNames.get(id);
+    if (name) return name;
+  }
+
   const link = (record?.relations || []).find((r) => r.objectKey === "custom_objects.properties");
   const propertyName = link && propertyNames.get(link.recordId);
-  // Per-property first, then the account-wide name. An account with one owner
-  // has no map, finds nothing, and keeps the name it already had.
+  // Then the hand-kept per-property map, then the account-wide name. An account
+  // with one owner has no map, finds nothing, and keeps the name it already had.
   return (propertyName && tenant?.propertyOwnerNames?.[propertyName]) || tenant?.ownerName || null;
 }
 
@@ -115,13 +149,16 @@ const UPSERT = `INSERT INTO ledger_entries
 // Make the ledger match what the Expenses object currently says, for one
 // location. Not "apply this change" -- there is no way to know what changed --
 // but "end up correct either way", which is the only thing a nudge can promise.
-export async function reconcileOwnerExpenses(env, locationId, records, { propertyNames = new Map(), tenant = null } = {}) {
+export async function reconcileOwnerExpenses(env, locationId, records, {
+  propertyNames = new Map(), propertyOwners = new Map(), contactNames = new Map(), tenant = null,
+} = {}) {
   const want = new Map();
   const skipped = {};
   for (const rec of records) {
     const id = rec?.id;
     if (!id) continue;
-    const { row, skip } = ownerLedgerRowFor(rec, id, ownerNameFor(rec, propertyNames, tenant));
+    const { row, skip } = ownerLedgerRowFor(
+      rec, id, ownerNameFor(rec, propertyNames, tenant, contactNames, propertyOwners));
     if (skip) { skipped[skip] = (skipped[skip] || 0) + 1; continue; }
     want.set(id, row);
   }
@@ -191,7 +228,11 @@ export async function handleExpenseApproved(request, env) {
   // fetching when something actually needs attributing; an account whose
   // expenses are all the manager's pays nothing for this.
   let propertyNames = new Map();
-  if (records.some((r) => String(r?.properties?.paid_by || "").toLowerCase() === "owner")) {
+  let propertyOwners = new Map();
+  let contactNames = new Map();
+
+  const ownerBorne = records.filter((r) => String(r?.properties?.paid_by || "").toLowerCase() === "owner");
+  if (ownerBorne.length) {
     try {
       const props = await fetchAllObjectRecords(pit, locationId, "custom_objects.properties");
       // The filter is defensive, not load-bearing: a nameless property mapped to
@@ -200,14 +241,25 @@ export async function handleExpenseApproved(request, env) {
       // pretends to -- it is here so the map never claims a name it does not
       // have, which would mislead anyone reading it later.
       propertyNames = new Map(props.map((r) => [r.id, r?.properties?.property_name]).filter(([, n]) => n));
+      propertyOwners = new Map(props
+        .map((r) => [r.id, (r?.relations || []).find((x) => x.objectKey === "contact")?.recordId])
+        .filter(([, c]) => c));
     } catch {
       // A name nobody can resolve is better than no statement at all: the rows
       // still post, carrying the account-wide owner, which is correct on every
       // account that has one.
     }
+
+    // Only the contacts actually referenced, which on a real account is a
+    // handful however many contacts it holds. Fetched in parallel because each
+    // is an independent lookup and a statement should not wait on them in turn.
+    const ids = [...new Set(ownerBorne.flatMap((r) => ownerContactIdsFor(r, propertyOwners)))];
+    const names = await Promise.all(ids.map((id) => fetchContactName(pit, id)));
+    contactNames = new Map(ids.map((id, i) => [id, names[i]]).filter(([, n]) => n));
   }
 
-  const result = await reconcileOwnerExpenses(env, locationId, records, { propertyNames, tenant });
+  const result = await reconcileOwnerExpenses(env, locationId, records,
+    { propertyNames, propertyOwners, contactNames, tenant });
   // 200 even when nothing was posted, deliberately. This is a workflow step: a
   // non-2xx marks the run failed in GHL and invites a retry that would do the
   // same work to the same effect.
