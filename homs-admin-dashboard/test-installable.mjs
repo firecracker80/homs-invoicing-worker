@@ -13,6 +13,7 @@
 // generated per account instead.
 import assert from "node:assert";
 import fs from "node:fs";
+import { decodePng } from "./tools-make-icons.mjs";
 
 const DEMO = "ZghxU8I60bEm39JUbtCm";
 const worker = (await import("./src/index.js")).default;
@@ -95,7 +96,36 @@ const getManifest = async (qs = "") => {
     assert.strictEqual(buf.slice(0, 8).toString("hex"), "89504e470d0a1a0a", `${icon.src} is a real PNG`);
     const [w, h] = [buf.readUInt32BE(16), buf.readUInt32BE(20)];
     assert.strictEqual(`${w}x${h}`, icon.sizes, `${icon.src} is the size it claims`);
-    assert.match(icon.purpose, /maskable/, "Android crops the edge, so the mark has to be inset for it");
+    assert.strictEqual(icon.purpose, "any",
+      "not maskable: the artwork is a disc with its own margin, and maskable invites Android to crop into it");
+
+    // Opaque, and opaque in the right colour. The source is a cut-out -- the
+    // background AND the keyhole are transparent, 56% of the artwork -- and iOS
+    // composites transparency onto BLACK, which would put a teal disc on a
+    // black square with a black keyhole.
+    //
+    // Alpha alone is not enough to catch that: flattening onto black is also
+    // fully opaque, and also wrong.
+    const img = decodePng(buf);
+    const at = (fx, fy) => {
+      const i = (Math.round(h * fy) * w + Math.round(w * fx)) * 4;
+      return { r: img.rgba[i], g: img.rgba[i + 1], b: img.rgba[i + 2], a: img.rgba[i + 3] };
+    };
+    const light = (p) => p.r > 235 && p.g > 235 && p.b > 235;
+
+    const corner = at(0.02, 0.02);
+    assert.strictEqual(corner.a, 255, `${icon.src} has an opaque corner, or iOS fills it with black`);
+    assert.ok(light(corner), `${icon.src} corner is light, not black: got rgb(${corner.r},${corner.g},${corner.b})`);
+
+    const keyhole = at(0.5, 0.38);
+    assert.strictEqual(keyhole.a, 255);
+    assert.ok(light(keyhole), `${icon.src} keyhole reads white, not black: got rgb(${keyhole.r},${keyhole.g},${keyhole.b})`);
+
+    // And the disc is still the brand teal rather than anything the resampler
+    // averaged into existence. Sampled left of the keyhole, well inside the disc.
+    const disc = at(0.3, 0.5);
+    assert.ok(disc.g > 100 && disc.g > disc.r && disc.b > disc.r,
+      `${icon.src} disc is teal: got rgb(${disc.r},${disc.g},${disc.b})`);
   }
 
   // iOS ignores the manifest and reads a link tag instead.

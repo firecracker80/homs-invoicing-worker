@@ -135,10 +135,12 @@ function buildManifest(locationId) {
     background_color: "#f6f7f9",
     theme_color: "#2f6fed",
     icons: [
-      // "any maskable" on both: Android crops the outer edge into whatever shape
-      // the launcher uses, and the mark is inset to survive that.
-      { src: "/icons/icon-192.png", sizes: "192x192", type: "image/png", purpose: "any maskable" },
-      { src: "/icons/icon-512.png", sizes: "512x512", type: "image/png", purpose: "any maskable" },
+      // "any", not "maskable". The artwork is a disc with its own margin, not a
+      // full-bleed design -- declaring it maskable tells Android it may crop
+      // into the outer edge, which on a disc eats the disc. Android puts an
+      // "any" icon on its own plate instead, which is what this wants.
+      { src: "/icons/icon-192.png", sizes: "192x192", type: "image/png", purpose: "any" },
+      { src: "/icons/icon-512.png", sizes: "512x512", type: "image/png", purpose: "any" },
     ],
   };
 }
