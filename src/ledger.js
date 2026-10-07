@@ -33,6 +33,7 @@
 
 import {
   fetchAllObjectRecords, createObjectRecord, fetchAssociations, linkIfPossible, findRecordByName,
+  propertyContactsFor, fetchContactName,
 } from "./ghl.js";
 
 const toMinor = n => Math.round(Number(n) * 100);
@@ -74,6 +75,39 @@ function resolveSecret(tenant, env, nameKey, inlineKey) {
   return tenant[inlineKey];
 }
 
+// Who this booking's property belongs to, read from GHL rather than from
+// configuration.
+//
+// propertyOwnerNames and propertyManagerNames are maps in the tenant record that
+// nothing populates, so an account with several owners or several managers meant
+// hand-editing KV. GHL already carries both as labelled associations to real
+// contacts -- property_owner, and property_manager since 2026-10-07 -- which is
+// better than a configured string because somebody maintains it as part of
+// running the business rather than as a deployment chore.
+//
+// Returns only what it is sure of. Every failure here falls back to the
+// configured names, which is what every account uses today.
+export async function resolvePayoutNamesFromGhl(pit, locationId, propertyCode) {
+  if (!pit || !locationId || !propertyCode) return {};
+  try {
+    const [properties, associations] = await Promise.all([
+      fetchAllObjectRecords(pit, locationId, "custom_objects.properties"),
+      fetchAssociations(pit, locationId),
+    ]);
+    const property = findRecordByName(properties, "property_name", propertyCode);
+    if (!property) return {};
+
+    const { ownerContactId, managerContactId } = propertyContactsFor(property, associations);
+    const [ownerName, managerName] = await Promise.all([
+      ownerContactId ? fetchContactName(pit, ownerContactId) : null,
+      managerContactId ? fetchContactName(pit, managerContactId) : null,
+    ]);
+    return { ownerName: ownerName || undefined, managerName: managerName || undefined };
+  } catch {
+    return {};
+  }
+}
+
 export async function writeLedgerEntries(env, tenant, snapshot, captures) {
   const basis = snapshot.payout.basis;
   const rows = [];
@@ -82,8 +116,30 @@ export async function writeLedgerEntries(env, tenant, snapshot, captures) {
   // -- a tenant with several owners/managers needs this to tell their
   // statements apart; a tenant with just one of each can leave it unset and
   // every row for that role just carries a null recipient_name.
-  const ownerName = snapshot.payout.ownerName ?? null;
-  const managerName = snapshot.payout.managerName ?? null;
+  //
+  // A contact linked on the property wins over a configured name: somebody
+  // linked it while running the business, where a custom value was typed once at
+  // provisioning and never revisited.
+  //
+  // Looked up every time, not only when the configured names are missing. The
+  // first version skipped it whenever both were already set, which saved two
+  // calls and defeated the entire point -- a configured name can only be
+  // overridden by something that bothers to look. The lookup returns {} without
+  // a request when there is no PIT or no property, and every failure inside it
+  // falls back, so the cost is two reads on a path that already makes many and
+  // the risk to a settlement is none.
+  const fromGhl = await resolvePayoutNamesFromGhl(
+    resolveSecret(tenant, env, "ghlPitSecretName", "ghlPit"), snapshot.locationId, snapshot.propertyCode);
+
+  const ownerName = fromGhl.ownerName ?? snapshot.payout.ownerName ?? null;
+  const managerName = fromGhl.managerName ?? snapshot.payout.managerName ?? null;
+
+  // Written back onto the snapshot, not just held locally. nameFor() fills any
+  // row that did not set a name of its own from snapshot.payout -- so a resolved
+  // name that stayed a local would reach the rows named explicitly below and
+  // none of the others, putting two different names on one statement.
+  snapshot.payout.ownerName = ownerName;
+  snapshot.payout.managerName = managerName;
 
   // 1. Owner's rent split -- income
   rows.push({
