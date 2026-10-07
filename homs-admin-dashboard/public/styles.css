@@ -228,9 +228,26 @@ tbody tr:hover { background: var(--accent-weak); }
 
   .card-grid { grid-template-columns: repeat(2, 1fr); }
 
-  /* Tables scroll horizontally within their own box instead of blowing out the page. */
+  /* 601-700px: still a table, but scrolling within its own box rather than
+     blowing out the page. Below 600 it stops being a table at all -- see below. */
   table { display: block; overflow-x: auto; white-space: nowrap; -webkit-overflow-scrolling: touch; }
   th, td { white-space: nowrap; }
+
+  /* The tab strip scrolls. Make that visible: without an edge fade it reads as
+     a row that simply ends after four tabs. */
+  .tabs {
+    overflow-x: auto; flex-wrap: nowrap; scrollbar-width: none;
+    -webkit-overflow-scrolling: touch; scroll-snap-type: x proximity;
+    -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent 100%);
+    mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent 100%);
+  }
+  .tabs::-webkit-scrollbar { display: none; }
+  .tab { scroll-snap-align: center; flex: 0 0 auto; }
+
+  /* Thumbs, not cursors. 44px is the smallest reliably hittable target; the
+     language buttons measured 26. */
+  .tab, .btn, select, input, .ui-lang-btn { min-height: 44px; }
+  .topbar .ui-lang-btn { min-height: 36px; padding: 6px 12px; }
 
   .overlay { padding: 16px; align-items: center; }
   .detail-card { padding: 18px; max-height: 88vh; }
@@ -238,6 +255,44 @@ tbody tr:hover { background: var(--accent-weak); }
 
   .statement-sheet { padding: 16px; max-width: none; }
   .statement-controls { gap: 8px; }
+}
+
+/* Under 600px a row becomes a card.
+   At 375px a Properties row showed 36% of itself behind a sideways scroll that
+   nothing advertised -- the other 64% was, in practice, not there. A card is
+   taller and entirely readable, which on a phone is the better trade. */
+@media (max-width: 600px) {
+  table { display: block; overflow: visible; white-space: normal; }
+  thead { display: none; }
+  tbody, tr, td { display: block; }
+  th, td { white-space: normal; }
+
+  tbody tr {
+    border: 1px solid var(--border); border-radius: 10px;
+    padding: 6px 12px; margin: 0 0 10px;
+  }
+  tbody td {
+    display: flex; align-items: baseline; justify-content: space-between; gap: 14px;
+    border: none; padding: 6px 0; text-align: right;
+  }
+  tbody td::before {
+    content: attr(data-label);
+    color: var(--muted); font-size: 12px; font-weight: 600;
+    text-align: left; flex: 0 1 auto; min-width: 0;
+  }
+  /* A cell with no label is a control column -- let it have the whole width. */
+  tbody td:not([data-label]) { justify-content: flex-end; }
+  tbody tr.empty-row { border: none; padding: 0; }
+  tbody tr.empty-row td { justify-content: center; text-align: center; }
+  tbody tr.empty-row td::before { content: none; }
+
+  /* The statement is a document, not a list: it keeps its two columns. */
+  .statement-sheet table, .stmt-doc table { display: table; }
+  .statement-sheet thead, .stmt-doc thead { display: table-header-group; }
+  .statement-sheet tbody, .stmt-doc tbody { display: table-row-group; }
+  .statement-sheet tr, .stmt-doc tr { display: table-row; border: none; padding: 0; margin: 0; }
+  .statement-sheet td, .stmt-doc td { display: table-cell; padding: 6px 4px; }
+  .statement-sheet td::before, .stmt-doc td::before { content: none; }
 }
 
 @media (max-width: 420px) {
