@@ -116,11 +116,51 @@ export async function fetchAssociations(pit, locationId) {
   return res.associations || [];
 }
 
-export function findAssociationId(associations, objectKeyA, objectKeyB) {
-  return associations.find(
+// An association between two object types, by their keys.
+//
+// `key` narrows it, and has to once a pair has more than one association. As of
+// 2026-10-07 contact <-> properties has two -- property_owner and
+// property_manager -- so asking by object keys alone is asking which of two
+// different relationships you meant.
+//
+// Ambiguity returns null rather than the first match. A wrong link is silent and
+// has to be found by noticing a statement addressed to the wrong person; a
+// missing link shows up immediately as a record that did not link.
+export function findAssociationId(associations, objectKeyA, objectKeyB, key = null) {
+  const matches = associations.filter(
     (a) => (a.firstObjectKey === objectKeyA && a.secondObjectKey === objectKeyB) ||
            (a.firstObjectKey === objectKeyB && a.secondObjectKey === objectKeyA)
-  ) || null;
+  );
+  if (key) return matches.find((a) => a.key === key) || null;
+  if (matches.length > 1) {
+    console.error(
+      `Ambiguous association for ${objectKeyA} <-> ${objectKeyB}: ${matches.map((a) => a.key).join(", ")}. ` +
+      `Pass a key to say which one.`
+    );
+    return null;
+  }
+  return matches[0] || null;
+}
+
+// The owner and manager contacts a property is linked to.
+//
+// Both are contacts, so they are told apart by WHICH association each relation
+// belongs to, not by the object type. The ids are per sub-account, which is why
+// they are looked up by key rather than hardcoded.
+export function propertyContactsFor(property, associations) {
+  const idOf = (key) => associations.find((a) => a.key === key)?.id || null;
+  // The objectKey check is defensive rather than load-bearing: an association id
+  // belongs to one pair of object types, so a relation carrying the owner
+  // association can only be pointing at a contact. No test distinguishes it and
+  // none pretends to -- it is here so the intent survives somebody later reusing
+  // an association id for something else.
+  const pick = (assocId) =>
+    (assocId && (property?.relations || []).find(
+      (r) => r.associationId === assocId && r.objectKey === "contact")?.recordId) || null;
+  return {
+    ownerContactId: pick(idOf("property_owner")),
+    managerContactId: pick(idOf("property_manager")),
+  };
 }
 
 // locationId is required in the body (GHL added this requirement 2026-09-11 --
