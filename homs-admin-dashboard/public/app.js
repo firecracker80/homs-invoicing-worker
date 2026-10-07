@@ -562,7 +562,9 @@ function promptForKey() {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           credentials: "include",
-          body: JSON.stringify({ key }),
+          // The account being opened. The operator's key ignores it; a client's
+          // key is only meaningful against their own account.
+          body: JSON.stringify({ key, locationId: getLocationId() }),
         });
         if (r.ok) {
           host.hidden = true;
