@@ -2291,12 +2291,32 @@ function renderStatement() {
   );
 }
 
+// On a phone the header row is off-screen, so each cell carries its own label
+// and the stylesheet turns the row into a card. Measured at 375px before this:
+// a Properties row showed 36% of itself and the rest was behind a sideways
+// scroll nobody discovers.
+//
+// Done here rather than in the twelve row builders, which would have meant
+// twelve chances to forget and a thirteenth the next time somebody adds a
+// column. The labels come from the headers that are already passed in, so they
+// cannot drift out of step with them either.
+const labelCells = (rowsHtml, headers) =>
+  String(rowsHtml).replace(/<tr\b[^>]*>[\s\S]*?<\/tr>/g, (row) => {
+    // An empty-state row spans every column and has no column of its own.
+    if (/colspan=/i.test(row)) return row;
+    let i = 0;
+    return row.replace(/<td\b/g, () => {
+      const header = String(headers[i++] ?? "").replace(/<[^>]*>/g, "").trim();
+      return header ? `<td data-label="${esc(header)}"` : "<td";
+    });
+  });
+
 function table(headers, rowsHtml, count) {
   return `
     ${count !== null && count !== undefined ? `<div class="toolbar"><div class="count">${count} record${count === 1 ? "" : "s"}</div></div>` : ""}
     <table>
       <thead><tr>${headers.map((h) => `<th>${h}</th>`).join("")}</tr></thead>
-      <tbody>${rowsHtml}</tbody>
+      <tbody>${labelCells(rowsHtml, headers)}</tbody>
     </table>`;
 }
 
@@ -2493,6 +2513,25 @@ function showTab(tab) {
   if (DATA && DATA.kind === "vendor") return renderVendor();
   activeTab = tab;
   document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t.dataset.tab === tab));
+
+  // Ten tabs are 1206px wide and a phone shows 375 of them, so the strip
+  // scrolls -- which is no use if the tab you just picked is the one off-screen.
+  //
+  // Arithmetic on the strip rather than scrollIntoView. scrollIntoView also
+  // scrolls ANCESTORS, so it can move the page under the reader to satisfy a
+  // request about a row of tabs; and measured here, its smooth behaviour had
+  // not settled 400ms later while a direct scroll landed immediately. This
+  // moves one element, by a known amount, or does nothing.
+  const strip = document.querySelector(".tabs");
+  const active = strip?.querySelector(".tab.active");
+  if (strip && active && strip.scrollWidth > strip.clientWidth) {
+    // Instant, not smooth. Measured on a 375px viewport: a smooth scroll on this
+    // strip is cancelled outright by its own scroll-snapping and settles back at
+    // 0, while the same call with behavior "auto" lands exactly on target. An
+    // animation that sometimes does nothing is worse than no animation.
+    const centred = active.offsetLeft - (strip.clientWidth - active.offsetWidth) / 2;
+    strip.scrollTo({ left: Math.max(0, centred), behavior: "auto" });
+  }
   document.querySelectorAll(".panel").forEach((p) => (p.hidden = true));
   $("#searchResults").hidden = true;
   const target = $("#panel-" + tab);
