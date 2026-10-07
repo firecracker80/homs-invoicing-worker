@@ -7,13 +7,21 @@
 // expense entry type at all.
 //
 // GHL is the trigger surface, as it already is for a paid invoice: a workflow on
-// the Expenses object POSTs here when Review Status becomes Approved. That keeps
-// the thing that knows an expense changed in charge of saying so, instead of
-// this Worker polling for changes it cannot subscribe to.
-import { moneyOf } from "./manager-pl.js";
-
-const GHL_BASE = "https://services.leadconnectorhq.com";
-const GHL_VERSION = "2021-07-28";
+// the Expenses object POSTs here when Review Status becomes Approved.
+//
+// But the webhook carries no record id. Yari, 2026-10-07: "record.id is not
+// exposed on the object workflow" -- GHL offers no merge tag for the triggering
+// record's own id, so the call cannot say WHICH expense changed.
+//
+// So it does not try. The POST is a nudge meaning "something about this
+// location's expenses changed", and this reconciles the whole location: every
+// qualifying expense is posted, and every ledger row whose expense no longer
+// qualifies is removed. That turns out to be better than the design it replaces
+// rather than a concession to it -- a missed webhook heals on the next one, and
+// un-approving an expense actually stops the deduction, which a per-record call
+// could never have done because nothing fires for a record that stopped
+// qualifying.
+import { moneyOf, fetchExpenseRecords } from "./manager-pl.js";
 
 const json = (body, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
@@ -25,26 +33,11 @@ const unresolved = (v) =>
 
 const toMinor = (n) => Math.round(Number(n) * 100);
 
-export async function fetchExpenseRecord(pit, locationId, recordId) {
-  const res = await fetch(
-    `${GHL_BASE}/objects/custom_objects.expenses/records/${encodeURIComponent(recordId)}`,
-    { headers: { Authorization: `Bearer ${pit}`, Version: GHL_VERSION, Accept: "application/json" } }
-  );
-  const text = await res.text();
-  let data; try { data = JSON.parse(text); } catch { data = null; }
-  if (!res.ok) {
-    const err = new Error(`GHL expense fetch -> ${res.status} ${text.slice(0, 200)}`);
-    err.status = res.status;
-    throw err;
-  }
-  return data?.record ?? data ?? null;
-}
-
 // What, if anything, belongs on the owner's statement for this record.
 //
 // Every refusal is named rather than returned as a bare null, because this runs
-// from a webhook nobody watches: "skipped" with a reason is the only trace of
-// why an expense never reached a statement.
+// from a webhook nobody watches: a reason is the only trace of why an expense
+// never reached a statement.
 export function ownerLedgerRowFor(record, recordId) {
   const p = record?.properties || {};
 
@@ -87,45 +80,68 @@ export function ownerLedgerRowFor(record, recordId) {
   };
 }
 
-// Keyed on the expense record id, and an UPDATE rather than an ignore.
-//
-// Yari, 2026-10-06: "use the expense record id". An expense can be edited,
-// unapproved and re-approved, so the row has to end up matching what the record
-// currently says -- INSERT OR IGNORE would leave an owner charged the old
-// amount forever after a correction, which is a quieter wrong than a double
-// charge and just as costly.
-//
-// The honest trade-off: this mutates a ledger row in place, and the ledger is
-// otherwise append-only. The alternative is a reversing entry, which keeps the
-// history but puts two rows on the owner's statement for one expense and needs
-// the reader to net them. Chosen deliberately; a correction to an expense is
-// not an event the owner needs to see, only its result.
-export async function upsertOwnerExpense(env, locationId, row) {
-  const sql = `INSERT INTO ledger_entries
-      (location_id, booking_id, invoice_number, invoice_id, recipient, recipient_name,
-       category, entry_type, amount_minor, currency, description, source, reference, created_at)
-    VALUES (?1, ?2, NULL, NULL, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'expense_approved', ?10, ?11)
-    ON CONFLICT(booking_id, entry_type, reference) DO UPDATE SET
-      amount_minor = excluded.amount_minor,
-      currency     = excluded.currency,
-      description  = excluded.description,
-      recipient_name = excluded.recipient_name,
-      created_at   = excluded.created_at`;
+const UPSERT = `INSERT INTO ledger_entries
+    (location_id, booking_id, invoice_number, invoice_id, recipient, recipient_name,
+     category, entry_type, amount_minor, currency, description, source, reference, created_at)
+  VALUES (?1, ?2, NULL, NULL, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'expense_approved', ?10, ?11)
+  ON CONFLICT(booking_id, entry_type, reference) DO UPDATE SET
+    amount_minor = excluded.amount_minor,
+    currency     = excluded.currency,
+    description  = excluded.description,
+    recipient_name = excluded.recipient_name,
+    created_at   = excluded.created_at`;
 
-  // created_at carries the expense's own Paid On, not the moment the webhook
-  // fired. A receipt entered in October for a repair paid in July belongs in
-  // July, or every statement period is decided by when somebody got round to
-  // typing it in.
-  await env.LEDGER_DB.prepare(sql).bind(
-    locationId, row.bookingId, row.recipient, row.recipientName,
-    row.category, row.entryType, row.amountMinor, row.currency,
-    row.description, row.reference, `${row.paidOn}T00:00:00.000Z`
-  ).run();
+// Make the ledger match what the Expenses object currently says, for one
+// location. Not "apply this change" -- there is no way to know what changed --
+// but "end up correct either way", which is the only thing a nudge can promise.
+export async function reconcileOwnerExpenses(env, locationId, records) {
+  const want = new Map();
+  const skipped = {};
+  for (const rec of records) {
+    const id = rec?.id;
+    if (!id) continue;
+    const { row, skip } = ownerLedgerRowFor(rec, id);
+    if (skip) { skipped[skip] = (skipped[skip] || 0) + 1; continue; }
+    want.set(id, row);
+  }
+
+  for (const row of want.values()) {
+    // created_at carries the expense's own Paid On, not the moment the webhook
+    // fired. A receipt entered in October for a repair paid in July belongs in
+    // July, or every statement period is decided by when somebody got round to
+    // typing it in.
+    await env.LEDGER_DB.prepare(UPSERT).bind(
+      locationId, row.bookingId, row.recipient, row.recipientName,
+      row.category, row.entryType, row.amountMinor, row.currency,
+      row.description, row.reference, `${row.paidOn}T00:00:00.000Z`
+    ).run();
+  }
+
+  // Anything this location has posted that no longer qualifies: an expense
+  // un-approved, re-attributed to the manager, deleted, or emptied of its
+  // amount. Leaving those would keep deducting from an owner for something that
+  // has been retracted -- and nothing fires a webhook for a record that stopped
+  // qualifying, so this is the only moment it can be noticed.
+  const existing = await env.LEDGER_DB.prepare(
+    `SELECT reference FROM ledger_entries WHERE location_id = ?1 AND entry_type = 'expense_owner'`
+  ).bind(locationId).all();
+
+  const stale = (existing?.results || [])
+    .map((r) => r.reference)
+    .filter((ref) => ref && !want.has(ref));
+
+  for (const ref of stale) {
+    await env.LEDGER_DB.prepare(
+      `DELETE FROM ledger_entries WHERE location_id = ?1 AND entry_type = 'expense_owner' AND reference = ?2`
+    ).bind(locationId, ref).run();
+  }
+
+  return { posted: want.size, removed: stale.length, skipped };
 }
 
 export async function handleExpenseApproved(request, env) {
-  let body;
-  try { body = await request.json(); } catch { return json({ error: "Expected JSON body" }, 400); }
+  let body = {};
+  try { body = await request.json(); } catch { /* a nudge needs no body */ }
 
   const locationId = (request.headers?.get?.("X-Location-Id") || body.locationId || "").trim();
   const secret = (request.headers?.get?.("X-Webhook-Secret") || body.secret || "").trim();
@@ -136,31 +152,23 @@ export async function handleExpenseApproved(request, env) {
   if (tenant.webhookSecret && secret !== tenant.webhookSecret) return json({ error: "Unauthorized" }, 401);
   if (!env.LEDGER_DB) return json({ error: "Ledger not configured (LEDGER_DB binding missing)" }, 500);
 
-  const recordId = unresolved(body.recordId) ? null : String(body.recordId).trim();
-  if (!recordId) return json({ ok: true, skipped: "no_record_id" });
-
   const pit = tenant.ghlPit || (tenant.ghlPitSecretName && env[tenant.ghlPitSecretName]);
   if (!pit) return json({ error: "No GHL PIT configured for this tenant" }, 500);
 
-  // Re-read from GHL rather than trusting the webhook body. A workflow sends
-  // whatever merge tags it was configured with, and this writes money -- the
-  // record is the only thing that knows what it currently says.
-  let record;
+  // Read from GHL rather than from the request. The body is a nudge and carries
+  // nothing this trusts: a workflow sends whatever merge tags it was configured
+  // with, and this writes money.
+  let records;
   try {
-    record = await fetchExpenseRecord(pit, locationId, recordId);
+    records = await fetchExpenseRecords(pit, locationId);
   } catch (err) {
-    if (err.status === 404) return json({ ok: true, skipped: "record_not_found", recordId });
+    if (err.status === 404) return json({ ok: true, skipped: "no_expenses_object", locationId });
     return json({ error: err.message }, 502);
   }
 
-  const { row, skip } = ownerLedgerRowFor(record, recordId);
-  // 200 on every skip, deliberately. This is a workflow step: a non-2xx marks
-  // the run failed in GHL and invites a retry that would skip identically.
-  if (skip) return json({ ok: true, skipped: skip, recordId });
-
-  await upsertOwnerExpense(env, locationId, row);
-  return json({
-    ok: true, posted: true, recordId,
-    entryType: row.entryType, amountMinor: row.amountMinor, currency: row.currency, paidOn: row.paidOn,
-  });
+  const result = await reconcileOwnerExpenses(env, locationId, records);
+  // 200 even when nothing was posted, deliberately. This is a workflow step: a
+  // non-2xx marks the run failed in GHL and invites a retry that would do the
+  // same work to the same effect.
+  return json({ ok: true, locationId, read: records.length, ...result });
 }
