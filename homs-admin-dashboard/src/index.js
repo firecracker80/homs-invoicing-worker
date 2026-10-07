@@ -119,7 +119,7 @@ async function linkIfPossible(pit, locationId, associations, objectKeyA, recordI
 
 async function handleCreateExpense(request, env) {
   const body = await request.json();
-  const { locationId, propertyId, ownerContactId, name, paidOn, categoryKey, lineItemDescription, amount } = body;
+  const { locationId, propertyId, ownerContactId, name, paidOn, categoryKey, lineItemDescription, amount, paidBy } = body;
 
   const { tenant, pit, error } = await resolveTenantPit(env, locationId);
   if (error) return error;
@@ -128,11 +128,23 @@ async function handleCreateExpense(request, env) {
     return Response.json({ error: "name, categoryKey, and amount are required" }, { status: 400 });
   }
 
+  // Required, with no default. An expense that does not say whose cost it is
+  // counts against nobody and arrives on the statement flagged -- and this is
+  // the one path where a person is already looking at a form, so it is the
+  // cheapest possible moment to ask. Defaulting it would mean a rushed entry
+  // silently charging an owner.
+  const whose = String(paidBy || "").toLowerCase();
+  if (whose !== "owner" && whose !== "manager") {
+    return Response.json(
+      { error: "paidBy is required and must be \"owner\" or \"manager\"" }, { status: 400 });
+  }
+
   const properties = {
     expense_name: name,
     category: categoryKey,
     amount: { value: Number(amount), currency: "default" },
     review_status: "needs_review",
+    paid_by: whose,
   };
   if (paidOn) properties.paid_on = paidOn;
   if (lineItemDescription) properties.line_item_description = lineItemDescription;

@@ -896,6 +896,16 @@ async function runSync(env, ctx) {
           amount: { value: invoiceTotal, currency: "default" },
           paid_on: paidDate,
           review_status: "needs_review",
+          // A vendor fixing something at a property is the owner's cost, so it
+          // comes off that owner's payout once approved. Yari, 2026-10-07,
+          // choosing this default; the RL Santana fridge repair is one of these
+          // and she classified it the same way by hand.
+          //
+          // Defaulting is safe HERE and nowhere else: nobody is at a keyboard
+          // when this fires, and the alternative is every service expense
+          // arriving unattributed and flagged. It still lands as needs_review,
+          // so a human sees it before it deducts from anybody.
+          paid_by: "owner",
           line_item_description: `Service request ${record.id}`,
         };
         const curKey = currencyKey(vendorCurrency);

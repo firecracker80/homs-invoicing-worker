@@ -48,6 +48,9 @@ const I18N = {
     "Part of the income above, not additional to it.": "Forma parte de los ingresos de arriba, no se suma a ellos.",
     "Cleaning fees collected": "Tarifas de limpieza cobradas",
     "Kept on cleaning (at most)": "Retenido por limpieza (como máximo)",
+    "Paid By": "Pagado Por",
+    "Owner": "Propietario",
+    "Manager": "Administrador",
     "Recoverable from owners cannot be totalled — the expense(s) below carry another currency with no exchange rate, and a guessed conversion would be a wrong number that looks right.":
       "No se puede totalizar lo recuperable de los propietarios: el o los gastos indicados tienen otra moneda sin tasa de cambio, y una conversión estimada daría una cifra incorrecta con apariencia de correcta.",
     "Net (at most)": "Neto (como máximo)",
@@ -1960,6 +1963,7 @@ async function submitAddExpense(e) {
     name: EXPENSE_CATEGORY_OPTIONS.find(([key]) => key === $("#aeCategory").value)?.[1] || "Expense",
     paidOn: $("#aePaidOn").value || null,
     categoryKey: $("#aeCategory").value,
+    paidBy: $("#aePaidBy").value,
     lineItemDescription: $("#aeDescription").value.trim(),
     amount: $("#aeAmount").value,
   };
