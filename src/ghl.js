@@ -11,6 +11,20 @@
 const BASE = "https://services.leadconnectorhq.com";
 const VERSION = "2021-07-28";
 
+// One contact by id, for a name. Returns null rather than throwing on a contact
+// that has been deleted or that this token cannot see: a missing name must
+// never cost a statement its rows.
+export async function fetchContactName(pit, contactId) {
+  try {
+    const res = await ghlRequest(pit, "GET", `/contacts/${encodeURIComponent(contactId)}`);
+    const c = res?.contact || res || {};
+    const full = [c.firstName, c.lastName].filter(Boolean).join(" ").trim();
+    return c.name || full || c.companyName || c.email || null;
+  } catch {
+    return null;
+  }
+}
+
 async function ghlRequest(pit, method, path, body) {
   const res = await fetch(BASE + path, {
     method,

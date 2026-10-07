@@ -35,7 +35,7 @@ function fakeLedger(seed = []) {
           return {
             async run() {
               if (/^INSERT INTO ledger_entries/.test(sql)) {
-                const [, bookingId, , , , , amountMinor, currency, description, reference, createdAt] = args;
+                const [, bookingId, , recipientName, , , amountMinor, currency, description, reference, createdAt] = args;
                 // Model the real table rather than a Map. The unique index on
                 // (booking_id, entry_type, reference) means a second write for
                 // the same expense only CHANGES anything if the statement says
@@ -44,7 +44,7 @@ function fakeLedger(seed = []) {
                 // "leaves an owner charged the old amount after a correction"
                 // is precisely the bug worth catching.
                 if (rows.has(reference) && !/DO UPDATE SET/.test(sql)) return;
-                rows.set(reference, { reference, bookingId, amountMinor, currency, description, createdAt });
+                rows.set(reference, { reference, bookingId, recipientName, amountMinor, currency, description, createdAt });
               } else if (/^DELETE FROM ledger_entries/.test(sql)) {
                 rows.delete(args[1]);
               } else throw new Error(`unexpected write: ${sql}`);
@@ -266,4 +266,216 @@ function fakeLedger(seed = []) {
   console.log("10) An unknown locationId is refused before anything is fetched");
 }
 
-console.log("\nPASS — a nudge leaves the ledger matching the account: every owner expense posted once, in its own currency, dated when it was paid, and none that stopped qualifying.");
+// ---- 11. an expense knows WHICH owner it belongs to ------------------
+// Yari, 2026-10-07: "fix the owner name on expense rows."
+//
+// There is no owner field on an expense, and the first version read a
+// `p.owner_name` that does not exist, so every row carried null. On a
+// single-owner account nothing showed -- which is exactly why it survived
+// review. On an account with several owners it would have put one owner's
+// repair on another owner's statement.
+//
+// The expense knows its PROPERTY and the tenant record knows each property's
+// owner: the same chain a rent split already walks, resolved the same way so an
+// expense and a booking on one property can never disagree about whose it is.
+{
+  const { ownerNameFor } = await import("./src/expenses.js");
+
+  // A contact relation FIRST, because expenses carry one and taking relations[0]
+  // would read a contact id as a property id and resolve every owner to the
+  // account default without ever looking wrong.
+  const linked = (propertyRecordId) => ({
+    id: "e1", properties: owned,
+    relations: [
+      { objectKey: "contact", recordId: "contact-123" },
+      { objectKey: "custom_objects.properties", recordId: propertyRecordId },
+    ],
+  });
+  const names = new Map([["p1", "Casa Bonita"], ["p2", "Villa Verde"]]);
+  const tenant = {
+    ownerName: "Account Owner",
+    propertyOwnerNames: { "Casa Bonita": "Carlos Mendoza", "Villa Verde": "Elena Marchetti" },
+  };
+
+  assert.strictEqual(ownerNameFor(linked("p1"), names, tenant), "Carlos Mendoza");
+  assert.strictEqual(ownerNameFor(linked("p2"), names, tenant), "Elena Marchetti",
+    "a second property resolves to a different owner, which is the whole point");
+
+  // An account with one owner has no map, finds nothing, and keeps the name it
+  // already had -- the common case, and it must not break to serve the rare one.
+  assert.strictEqual(ownerNameFor(linked("p1"), names, { ownerName: "Solo Owner" }), "Solo Owner");
+
+  // An expense linked to no property, or to one whose name cannot be resolved,
+  // falls back rather than inventing an owner.
+  assert.strictEqual(ownerNameFor({ id: "e", properties: owned }, names, tenant), "Account Owner");
+  assert.strictEqual(ownerNameFor(linked("unknown"), names, tenant), "Account Owner");
+  assert.strictEqual(ownerNameFor(linked("p1"), names, {}), null, "and nothing at all is null, not a guess");
+
+  // It reaches the ledger row, not just the helper.
+  const db = fakeLedger();
+  await reconcileOwnerExpenses({ LEDGER_DB: db }, "L1", [linked("p1")], { propertyNames: names, tenant });
+  assert.strictEqual(db.rows.get("e1").recipientName, "Carlos Mendoza",
+    "the name is bound into the row, not merely computed");
+  console.log("11) An expense resolves to its property's owner, and falls back to the account's");
+}
+
+// ---- 12. the endpoint resolves owners for real -----------------------
+// Case 11 passes the property names in by hand, so it proves the resolution and
+// nothing about whether the endpoint ever fetches them. Deleting that fetch
+// leaves every row on the account-wide owner -- correct on a single-owner
+// account, wrong on exactly the accounts this was built for.
+{
+  const EXPENSES = [{
+    id: "x1", properties: { ...owned, paid_by: "owner" },
+    relations: [{ objectKey: "custom_objects.properties", recordId: "prop-a" }],
+  }];
+  const PROPERTIES = [
+    { id: "prop-a", properties: { property_name: "Casa Bonita" } },
+    { id: "prop-nameless", properties: {} },
+  ];
+
+  let fetchedProperties = false;
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    const body = u.includes("custom_objects.properties")
+      ? (fetchedProperties = true, { records: PROPERTIES })
+      : { records: EXPENSES };
+    return { ok: true, status: 200, text: async () => JSON.stringify(body) };
+  };
+
+  const db = fakeLedger();
+  const res = await handleExpenseApproved(
+    new Request("https://w.dev/ghl-expense-approved", {
+      method: "POST", body: JSON.stringify({ locationId: "L1" }),
+    }),
+    {
+      TENANTS: {
+        get: async () => ({
+          ghlPit: "pit", ownerName: "Account Owner",
+          propertyOwnerNames: { "Casa Bonita": "Carlos Mendoza" },
+        }),
+      },
+      LEDGER_DB: db,
+    });
+
+  assert.strictEqual(res.status, 200);
+  assert.ok(fetchedProperties, "the endpoint actually goes and gets the property names");
+  assert.strictEqual(db.rows.get("x1").recipientName, "Carlos Mendoza",
+    "and the row carries the property's own owner, not the account default");
+
+  // A property with no name must not become its own id. An id is not a name,
+  // and propertyOwnerNames is keyed by name -- a map from id to id would never
+  // match anything while looking like it had been populated.
+  const { ownerNameFor } = await import("./src/expenses.js");
+  const names = new Map(PROPERTIES.map((r) => [r.id, r?.properties?.property_name]).filter(([, n]) => n));
+  assert.strictEqual(names.has("prop-nameless"), false, "a nameless property is left out, not faked");
+  assert.strictEqual(
+    ownerNameFor({ relations: [{ objectKey: "custom_objects.properties", recordId: "prop-nameless" }] },
+      names, { ownerName: "Account Owner" }),
+    "Account Owner", "and falls back rather than resolving to nonsense");
+  console.log("12) The endpoint fetches property names itself, and a nameless property falls back");
+}
+
+// ---- 13. several owners, without anybody maintaining a list ----------
+// Yari, 2026-10-07: "since the custom values only capture 1 owner name, did the
+// merger fix how to capture various owner names? my suggestion would be to tag
+// them."
+//
+// It did not -- propertyOwnerNames is a map nothing populates, so a multi-owner
+// account meant hand-editing tenant JSON. Tags turn out not to be needed: GHL
+// already carries this as two LABELLED associations, expense_owner and
+// property_owner, both to a real contact. That beats a tag because it is a typed
+// relation rather than a string somebody has to keep spelling the same way.
+{
+  const { ownerNameFor, ownerContactIdsFor } = await import("./src/expenses.js");
+
+  const contactNames = new Map([["c-carlos", "Carlos Mendoza"], ["c-elena", "Elena Marchetti"]]);
+  const propertyOwners = new Map([["p1", "c-carlos"], ["p2", "c-elena"]]);
+  const propertyNames = new Map([["p1", "Casa Bonita"], ["p2", "Villa Verde"]]);
+  const tenant = { ownerName: "Account Owner", propertyOwnerNames: { "Casa Bonita": "Stale Config Name" } };
+
+  const viaProperty = (pid) => ({
+    properties: owned, relations: [{ objectKey: "custom_objects.properties", recordId: pid }],
+  });
+
+  // Two properties, two owners, nothing configured anywhere.
+  assert.strictEqual(ownerNameFor(viaProperty("p1"), propertyNames, {}, contactNames, propertyOwners), "Carlos Mendoza");
+  assert.strictEqual(ownerNameFor(viaProperty("p2"), propertyNames, {}, contactNames, propertyOwners), "Elena Marchetti",
+    "a second owner on the same account, with no map to maintain");
+
+  // The expense's OWN contact link wins: it is the more specific statement, and
+  // handleCreateExpense already sets it.
+  const direct = {
+    properties: owned,
+    relations: [
+      { objectKey: "contact", recordId: "c-elena" },
+      { objectKey: "custom_objects.properties", recordId: "p1" },
+    ],
+  };
+  assert.deepStrictEqual(ownerContactIdsFor(direct, propertyOwners), ["c-elena", "c-carlos"],
+    "its own contact first, the property's second");
+  assert.strictEqual(ownerNameFor(direct, propertyNames, tenant, contactNames, propertyOwners), "Elena Marchetti");
+
+  // A real linked contact beats a configured name, because somebody linked it
+  // and the custom value was typed once at provisioning and never revisited.
+  assert.strictEqual(ownerNameFor(viaProperty("p1"), propertyNames, tenant, contactNames, propertyOwners),
+    "Carlos Mendoza", "not the stale config name");
+
+  // And the old chain still works where there is no contact to find, so an
+  // account that never links one is unaffected.
+  assert.strictEqual(ownerNameFor(viaProperty("p1"), propertyNames, tenant, new Map(), new Map()),
+    "Stale Config Name");
+  assert.strictEqual(ownerNameFor(viaProperty("p9"), propertyNames, tenant, contactNames, propertyOwners),
+    "Account Owner");
+  console.log("13) Several owners resolve from their own linked contacts, with the configured names as fallback");
+}
+
+// ---- 14. and the endpoint goes and gets those names -----------------
+{
+  const EXPENSES = [
+    { id: "x1", properties: { ...owned, paid_by: "owner" },
+      relations: [{ objectKey: "custom_objects.properties", recordId: "p1" }] },
+    { id: "x2", properties: { ...owned, paid_by: "owner" },
+      relations: [{ objectKey: "custom_objects.properties", recordId: "p2" }] },
+  ];
+  const PROPERTIES = [
+    { id: "p1", properties: { property_name: "Casa Bonita" }, relations: [{ objectKey: "contact", recordId: "c-carlos" }] },
+    { id: "p2", properties: { property_name: "Villa Verde" }, relations: [{ objectKey: "contact", recordId: "c-elena" }] },
+  ];
+  const CONTACTS = { "c-carlos": { firstName: "Carlos", lastName: "Mendoza" }, "c-elena": { name: "Elena Marchetti" } };
+
+  const asked = [];
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    const contact = u.match(/\/contacts\/([^/?]+)/);
+    if (contact) { asked.push(contact[1]); return { ok: true, status: 200, text: async () => JSON.stringify({ contact: CONTACTS[contact[1]] }) }; }
+    const body = u.includes("custom_objects.properties") ? { records: PROPERTIES } : { records: EXPENSES };
+    return { ok: true, status: 200, text: async () => JSON.stringify(body) };
+  };
+
+  const db = fakeLedger();
+  await handleExpenseApproved(
+    new Request("https://w.dev/ghl-expense-approved", { method: "POST", body: JSON.stringify({ locationId: "L1" }) }),
+    { TENANTS: { get: async () => ({ ghlPit: "pit", ownerName: "Account Owner" }) }, LEDGER_DB: db });
+
+  assert.strictEqual(db.rows.get("x1").recipientName, "Carlos Mendoza", "built from firstName + lastName");
+  assert.strictEqual(db.rows.get("x2").recipientName, "Elena Marchetti", "or from name, whichever the contact has");
+  assert.deepStrictEqual(asked.sort(), ["c-carlos", "c-elena"], "each referenced contact fetched exactly once");
+
+  // A contact that cannot be read must not cost the row its place on a
+  // statement -- it falls back to the account owner and still posts.
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    if (/\/contacts\//.test(u)) return { ok: false, status: 404, text: async () => "{}" };
+    return { ok: true, status: 200, text: async () => JSON.stringify(u.includes("custom_objects.properties") ? { records: PROPERTIES } : { records: EXPENSES }) };
+  };
+  const db2 = fakeLedger();
+  await handleExpenseApproved(
+    new Request("https://w.dev/ghl-expense-approved", { method: "POST", body: JSON.stringify({ locationId: "L1" }) }),
+    { TENANTS: { get: async () => ({ ghlPit: "pit", ownerName: "Account Owner" }) }, LEDGER_DB: db2 });
+  assert.strictEqual(db2.rows.size, 2, "the rows still post");
+  assert.strictEqual(db2.rows.get("x1").recipientName, "Account Owner", "on the account owner");
+  console.log("14) The endpoint resolves each owner's real name, and an unreadable contact still posts");
+}
+
+console.log("\nPASS — a nudge leaves the ledger matching the account: every owner expense posted once, attributed to the right owner, in its own currency, dated when it was paid, and none that stopped qualifying.");
