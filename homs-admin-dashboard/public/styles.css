@@ -226,6 +226,12 @@ tbody tr:hover { background: var(--accent-weak); }
   .tabs { padding: 6px 12px 0; }
   main { padding: 12px; }
 
+  /* Installed and full-screen, the page owns the notch and the home indicator.
+     max() so a phone without either loses nothing. */
+  .topbar { padding-top: max(10px, env(safe-area-inset-top)); }
+  .topbar, .tabs, main { padding-left: max(12px, env(safe-area-inset-left)); padding-right: max(12px, env(safe-area-inset-right)); }
+  main { padding-bottom: max(12px, env(safe-area-inset-bottom)); }
+
   .card-grid { grid-template-columns: repeat(2, 1fr); }
 
   /* 601-700px: still a table, but scrolling within its own box rather than
