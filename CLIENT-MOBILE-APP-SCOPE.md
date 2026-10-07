@@ -26,29 +26,42 @@ So per-tenant authentication is not a feature of this project — it is the prec
 
 Yari, 2026-10-07: *"objects are still not accessible on mobile app."* Everything HOMS models — properties, transactions, cleaning jobs, expenses, inventory — is a custom object, so GHL's own app shows a client none of it. A form submission works on a phone browser; browsing what was submitted does not. That gap is the whole reason this exists.
 
-## Questions that change the design
+## Decided, Yari 2026-10-07
 
-### 1. Who logs in?
+**The account holder only.** No staff logins, no owner logins. One credential per account, everything behind it scoped to that account. Roles inside a tenant are not in scope, which removes most of the work this could have been — and widening it later does not require redoing it, because a session that names a tenant is the thing a role would hang off.
 
-The answer changes the auth model, not just the menu.
+**The whole admin dashboard, plus the day-to-day.** Not a reduced subset: the account holder is the person the dashboard was already built for, so the question is only whether it fits on a phone, not what to remove.
 
-- **The account holder only** — one credential per account. Simplest: per-tenant login, everything behind it scoped to that tenant.
-- **Their staff too** (cleaners, a maintenance person) — now there are roles within a tenant, and a cleaner must see today's jobs without seeing revenue. That is a second axis and roughly doubles the work.
-- **Owners too** — a third audience who should see their own properties and statements and nothing else, including nothing about other owners on the same account. Report tokens already do a narrow version of this.
+**Expense capture is already done, natively, and needs nothing here.** Yari: *"the expense capture form is ready, i did see it in the object once an expense name is added."* GHL's own object form takes the receipt photo or PDF. Building a second capture path in this app would be a worse copy of something that already works, so the app links to that form rather than reimplementing it.
 
-### 2. What counts as "operations"?
+That leaves three phases, and the first is the only hard one.
 
-Operations plausibly means the day-to-day: today's arrivals and departures, cleaning checklists, service requests, capturing an expense with a receipt. Statements and reports are the other half, and "including their admin dashboard" suggests they are wanted too — but a cleaner seeing a P&L is a different decision from the account holder seeing one, which folds back into question 1.
+### 1. Per-tenant login — the blocker
 
-## Shape, once those are answered
+A credential per tenant, held in that tenant's own record, and a session that names which tenant it is for.
 
-Phases, each independently useful:
+- `POST /api/login` takes `{ locationId, key }` rather than `{ key }`, and verifies the key against that tenant's record. The operator's `ADMIN_KEY` keeps working and keeps reaching every tenant, because Yari's view must not narrow.
+- The cookie stops carrying the key. It carries a signed token naming the tenant and an expiry, so possession of a cookie proves a login happened for *that* account and nothing more.
+- Every `/api/*` route then checks the session's tenant against the `locationId` being asked for, and refuses a mismatch. This belongs in the one default-deny gate rather than in each route — a route that forgets is exactly how the current hole would come back.
 
-1. **Per-tenant login.** A credential per tenant, verified against that tenant's record, with every `/api/*` route checking that the session's tenant matches the `locationId` being asked for. This is the blocker and is worth doing even if the app never ships, because it also closes the cross-tenant hole for the dashboard as it stands.
-2. **Roles, only if question 1 needs them.** Skip entirely if it is account-holder-only.
-3. **A phone layout.** The dashboard is already responsive down to ~900px; phone width is narrower than anything it has been checked at. Tables are the hard part — ten columns do not fit, and a card per row usually beats a horizontally scrolling table.
-4. **Installable (PWA).** A manifest and an icon make it an app on the home screen without an app store. Cheap, and it is most of what "feels like an app" means.
-5. **Offline-tolerant capture, if cleaners are users.** A cleaner in a basement with no signal still needs to submit a checklist. This is genuinely harder than the rest and should not be assumed in.
+Two things worth settling as it is built:
+
+- **A client key is a password a person types.** It needs to be rotatable per tenant without touching anyone else, and revocable the day a client leaves.
+- **A mismatch is a 403, not a 404.** Telling a caller that another tenant exists is not a leak worth engineering around, and a 404 would send a legitimately confused client chasing a bug that is not there.
+
+### 2. A phone layout
+
+The dashboard is responsive to roughly 900px; phone width is narrower than anything it has been checked at. The tables are the real work — ten columns do not fit, and a card per row generally beats a horizontally scrolling table. Everything else mostly already reflows.
+
+### 3. Installable
+
+A manifest and an icon make it an app on the home screen with no app store, no review and no release cycle per fix. Cheap, and it is most of what "feels like an app" actually means.
+
+### Not in scope, and why
+
+- **Roles.** Account holder only, by the decision above.
+- **An expense capture form.** GHL's object form already does it, including the receipt.
+- **Offline capture.** That mattered for cleaners in basements with no signal. No cleaners log in, so it goes.
 
 ## What this is not
 
