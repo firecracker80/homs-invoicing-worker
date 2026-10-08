@@ -599,7 +599,9 @@ async function handleOnboardingIntake(request, env) {
   const existing = await loadIntake(env.DASHBOARD_TENANTS, contactId);
 
   try {
-    const messages = await listContactEmails(pit, contactId);
+    // locationId is the account the CONVERSATION lives in (HOMS), which is what
+    // body.locationId means on this route -- not the client sub-account.
+    const messages = await listContactEmails(pit, contactId, { locationId: body.locationId });
     const reply = findWorkbookReply(messages);
 
     if (!reply.found) {

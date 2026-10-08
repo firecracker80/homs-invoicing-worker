@@ -37,10 +37,21 @@ const isWorkbookUrl = (u) => /\.xlsx?(?:$|[?#])/i.test(String(u ?? ""));
 
 // ---------------------------------------------------------------- reading --
 
-export async function listContactEmails(pit, contactId, { limit = 20 } = {}) {
+export async function listContactEmails(pit, contactId, { limit = 20, locationId = null } = {}) {
+  // Required, and checked here rather than left to GHL. The endpoint is
+  // "Export messages BY LOCATION ID": without it the call is a guaranteed
+  // 400 CONVERSATIONS_LOCATION_ID_REQUIRED, whose message ("Location ID is
+  // required") surfaces to the caller looking like their own request was
+  // malformed. Verified live 2026-10-08: same request 400 without it, 200 with.
+  //
+  // A PIT is already scoped to one location, so this reads as redundant and
+  // is not -- GHL asks for it anyway.
+  if (!locationId) throw new Error("listContactEmails needs a locationId (the account the conversation lives in)");
+
   const params = new URLSearchParams({
     channel: "Email",
     contactId,
+    locationId,
     limit: String(Math.max(limit, MIN_EXPORT_LIMIT)),
   });
   const res = await fetch(`${BASE}/conversations/messages/export?${params}`, {
