@@ -116,6 +116,13 @@ export function normalizeTransaction(record) {
     platformFee: moneyProp(record, "platform_fee"),
     netPayout: moneyProp(record, "net_payout"),
     paymentStatus: prop(record, "payment_status"),
+    // The booking's own lifecycle, as distinct from whether money arrived.
+    //
+    // The field does not exist on the Transactions object yet, so this reads
+    // undefined everywhere today and the dashboard falls back to deriving a
+    // status from the dates. Cancelled and rescheduled are the two states the
+    // dates cannot express, and they are the reason the field is needed.
+    bookingStatus: prop(record, "booking_status"),
     propertyId: relatedId(record, "custom_objects.properties"),
     otaChannelId: relatedId(record, "custom_objects.ota_channels"),
     createdAt: record.createdAt,

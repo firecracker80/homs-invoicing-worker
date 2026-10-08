@@ -148,8 +148,13 @@ const reschedule = async (body) => {
   await reschedule({ newCheckIn: "2026-10-17", newCheckOut: "2026-10-22" });
   const props = txUpdates[0].body.properties;
   assert.strictEqual("platform_fee" in props, false, "not this record's business to restate");
+  // booking_status joined the list on 2026-10-07: a reschedule left no trace
+  // that it had happened, so nothing downstream could tell a moved booking from
+  // one booked for those dates in the first place. Added here deliberately --
+  // this list is the guard against an update quietly growing, so it is meant to
+  // fail when it does.
   assert.deepStrictEqual(Object.keys(props).sort(),
-    ["booking_total", "checkin_date", "checkout_date", "net_payout"],
+    ["booking_status", "booking_total", "checkin_date", "checkout_date", "net_payout"],
     "and nothing else is written either -- an update that touches more than it means to is how records get clobbered");
   console.log("5) The update writes four fields and no more");
 }

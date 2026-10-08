@@ -730,6 +730,14 @@ export async function handleReschedule(request, env) {
         checkout_date: newCheckOut,
         booking_total: { value: bookingTotal, currency: "default" },
         net_payout: { value: bookingTotal, currency: "default" },
+        // A reschedule overwrote the dates in place and left no trace, so
+        // nothing downstream could tell a booking that had been moved from one
+        // booked for those dates in the first place.
+        //
+        // Not a terminal state: the booking is still live, and the dashboard
+        // keeps deriving new/active/departing from the NEW dates. This only
+        // records that it moved.
+        booking_status: "rescheduled",
       });
     }
   } catch (err) {
