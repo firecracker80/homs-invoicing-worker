@@ -116,6 +116,16 @@ const expense = (properties) => normalizeExpense({ id: "e1", properties });
   const CDN = "https://assets.cdn.filesafe.space/LOC/media/abc.png";
 
   assert.deepStrictEqual(urls([{ url: CDN, name: "recibo.png" }]), [{ url: CDN, name: "recibo.png", source: "ghl_field" }]);
+
+  // The shape GHL ACTUALLY returns, confirmed 2026-10-08 the first time a
+  // receipt was attached through the object widget. The name is in meta, and
+  // reading only x.name fell through to the urls last segment -- a uuid.
+  assert.deepStrictEqual(
+    urls([{ url: CDN, meta: { name: "WhatsApp Image 2026-10-08 at 10.14.28 AM.jpeg", extension: ".jpg", size: 147436 } }]),
+    [{ url: CDN, name: "WhatsApp Image 2026-10-08 at 10.14.28 AM.jpeg", source: "ghl_field" }],
+    "meta.name is the filename a person recognises");
+  // meta present but nameless still yields a usable label rather than throwing.
+  assert.strictEqual(urls([{ url: CDN, meta: { size: 1 } }])[0].name, "abc.png");
   assert.deepStrictEqual(urls(CDN).map((r) => r.url), [CDN], "a bare string");
   assert.deepStrictEqual(urls([CDN, CDN]).map((r) => r.url), [CDN, CDN], "an array of strings");
   assert.deepStrictEqual(urls({ url: CDN }).map((r) => r.url), [CDN], "a single object");
