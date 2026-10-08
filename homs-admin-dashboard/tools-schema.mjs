@@ -3,7 +3,7 @@
 //   node tools-schema.mjs capture <locationId> [out.json]     # needs a PIT
 //   node tools-schema.mjs fetch <locationId> [out.json]       # via the Worker
 //   node tools-schema.mjs diff   <expected.json> <actual.json>
-//   node tools-schema.mjs repair <locationId> [--apply]       # via the Worker
+//   node tools-schema.mjs repair <locationId> [--apply] [--recreate]
 //
 // `repair` is the whole loop in one command: fetch the account, diff it against
 // the committed contract, show what would change, optionally write it, then
@@ -128,13 +128,27 @@ if (cmd === "repair") {
     process.exit(0);
   }
 
+  const willRecreate = rest.includes("--recreate");
+  if (willRecreate) {
+    console.log("\n--recreate: a field that cannot be updated IN PLACE will be DELETED and rebuilt.");
+    console.log("Tried gently first; refused outright on any object that holds records.");
+  }
+
   const out = await workerFetch("/api/schema/repair", {
     method: "POST",
-    body: JSON.stringify({ locationId, repairs, apply: true }),
+    body: JSON.stringify({ locationId, repairs, apply: true, recreate: willRecreate }),
   });
-  console.log(`\napplied ${out.applied.length}, skipped ${out.skipped.length}, failed ${out.failed.length}`);
+  console.log(`\napplied ${out.applied.length}, recreated ${(out.recreated || []).length}, ` +
+    `skipped ${out.skipped.length}, failed ${out.failed.length}`);
+  for (const r of out.recreated || []) console.log(`  recreated ${r.fieldKey}`);
   for (const s of out.skipped) console.log(`  skipped ${s.fieldKey}: ${s.reason}`);
-  for (const f of out.failed) console.log(`  FAILED  ${f.fieldKey}: ${f.error}`);
+  for (const f of out.failed) console.log(`  FAILED  ${f.fieldKey}: ${f.error}${f.hint ? ` — ${f.hint}` : ""}`);
+  // Deleted but not rebuilt: the only outcome that loses something. The
+  // definition is printed so it can be put back by hand immediately.
+  for (const l of out.lost || []) {
+    console.error(`  LOST    ${l.fieldKey}: deleted but NOT rebuilt — ${l.error}`);
+    console.error(`          definition: ${JSON.stringify(l.definition)}`);
+  }
 
   // Proved, not assumed: GHL accepting a write is not evidence it stored it,
   // which is exactly how the receipt_photo probe went wrong in October.
@@ -188,7 +202,7 @@ if (cmd === "repair") {
     "  node tools-schema.mjs fetch   <locationId> [out.json]   # via the Worker, needs PROVISION_KEY",
     "  node tools-schema.mjs capture <locationId> [out.json] [--pit-file t.json]",
     "  node tools-schema.mjs diff    <expected.json> <actual.json>",
-    "  node tools-schema.mjs repair  <locationId> [--apply]   # fetch, diff, fix, re-verify",
+    "  node tools-schema.mjs repair  <locationId> [--apply] [--recreate]   # fetch, diff, fix, re-verify",
   ].join("\n"));
   process.exit(2);
 }
