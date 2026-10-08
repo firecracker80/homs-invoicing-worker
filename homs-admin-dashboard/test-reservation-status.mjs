@@ -103,23 +103,46 @@ const status = (t, today = TODAY) => run(`stayStatus(${JSON.stringify(t)}, ${JSO
   console.log("4) An unknown status is shown as unknown, not guessed from one date");
 }
 
-// ---- 5. cancelled and rescheduled, when the field exists -------------
-// These are the two states the dates cannot express, and the whole reason a
-// booking_status field is needed. The reader is here; nothing writes it yet.
+// ---- 5. cancelled is terminal and outranks the dates -----------------
 {
-  for (const s of ["cancelled", "rescheduled", "new", "active", "departing", "past"]) {
-    assert.strictEqual(status({ bookingStatus: s, checkinDate: "2026-10-20", checkoutDate: "2026-10-25" }), s,
-      `a written "${s}" outranks the dates`);
-  }
-  // Case and whitespace from a CRM dropdown.
+  // Whatever the dates say. A cancelled booking still has a check-in next week.
+  assert.strictEqual(status({ bookingStatus: "cancelled", checkinDate: "2026-10-20", checkoutDate: "2026-10-25" }), "cancelled");
+  assert.strictEqual(status({ bookingStatus: "cancelled", checkinDate: "2026-10-02", checkoutDate: "2026-10-11" }), "cancelled",
+    "even mid-stay, which is what a cancellation during a stay looks like");
+  // The CRM dropdown stores the key but a human may set the label.
   assert.strictEqual(status({ bookingStatus: "Cancelled", checkinDate: "2026-10-20", checkoutDate: "2026-10-25" }), "cancelled");
 
-  // But a value outside the vocabulary is not promoted to a status. Otherwise a
-  // typo in GHL becomes a badge nobody can explain, and a filter option that
-  // matches one row.
-  assert.strictEqual(status({ bookingStatus: "cancelledd", checkinDate: "2026-10-20", checkoutDate: "2026-10-25" }), "new");
-  assert.strictEqual(status({ bookingStatus: "", checkinDate: "2026-10-02", checkoutDate: "2026-10-07" }), "departing");
-  console.log("5) A written status wins, and an unrecognised one does not become a badge");
+  // Nothing else overrides. A typo in GHL must not become a badge nobody can
+  // explain, and "confirmed" carries no information the dates do not.
+  for (const other of ["cancelledd", "confirmed", "void", ""]) {
+    assert.strictEqual(status({ bookingStatus: other, checkinDate: "2026-10-02", checkoutDate: "2026-10-07" }), "departing",
+      `"${other}" must not displace what the dates say`);
+  }
+  console.log("5) Cancelled outranks the dates; nothing else does");
+}
+
+// ---- 5b. rescheduled is NOT a status --------------------------------
+// It was, in the first cut of this. A moved booking is still live: it has new
+// dates and will become active and then depart like anything else. As a status
+// it would hide "in the house" behind "was moved" for the rest of the booking's
+// life -- the reader would lose the fact they actually need today.
+{
+  const moved = { bookingStatus: "rescheduled", checkinDate: "2026-10-02", checkoutDate: "2026-10-11" };
+  assert.strictEqual(status(moved), "active",
+    "a rescheduled booking mid-stay is active; the new dates decide");
+  assert.strictEqual(status({ ...moved, checkinDate: "2026-11-01", checkoutDate: "2026-11-05" }), "new");
+  assert.strictEqual(status({ ...moved, checkoutDate: TODAY, checkinDate: "2026-10-02" }), "departing");
+
+  // It is carried alongside instead.
+  assert.strictEqual(run(`wasRescheduled({ bookingStatus: "rescheduled" })`), true);
+  assert.strictEqual(run(`wasRescheduled({ bookingStatus: "Rescheduled" })`), true);
+  assert.strictEqual(run(`wasRescheduled({ bookingStatus: "cancelled" })`), false);
+  assert.strictEqual(run(`wasRescheduled({})`), false);
+
+  // And is not offered as a status option, or the filter would list a value no
+  // row can ever hold.
+  assert.ok(!JSON.parse(run(`JSON.stringify(STAY_STATUSES)`)).includes("rescheduled"));
+  console.log("5b) Rescheduled rides beside the status instead of replacing it");
 }
 
 // ---- 6. the filter offers what is there, in lifecycle order ----------
@@ -145,9 +168,9 @@ const status = (t, today = TODAY) => run(`stayStatus(${JSON.stringify(t)}, ${JSO
 {
   run(`DATA = { transactions: [
     { id: "t1", guestName: "Sofia Reyes", propertyName: "Villa Azul", checkinDate: "2026-10-02", checkoutDate: "2026-10-07",
-      bookingTotal: { value: 500, currency: "USD" }, paymentStatus: "paid", bookingReference: "BR-1", otaChannelName: "Airbnb" },
+      bookingTotal: 500, paymentStatus: "paid", bookingReference: "BR-1", otaChannelName: "Airbnb" },
     { id: "t2", guestName: "Luis Mora", propertyName: "Casa Bonita", checkinDate: "2026-12-01", checkoutDate: "2026-12-05",
-      bookingTotal: { value: 900, currency: "USD" }, paymentStatus: "pending", bookingReference: "BR-2", otaChannelName: "Direct" },
+      bookingTotal: 900, paymentStatus: "pending", bookingReference: "BR-2", otaChannelName: "Direct" },
   ] }`);
   run(`renderTransactions()`);
   const html = panels["#panel-transactions"].innerHTML;
@@ -186,6 +209,48 @@ const status = (t, today = TODAY) => run(`stayStatus(${JSON.stringify(t)}, ${JSO
   console.log("8) Choosing a status filters the table to it");
 }
 
+// ---- 8b. the moved booking shows both facts, and filters on either ---
+{
+  run(`DATA = { transactions: [
+    { id: "m1", guestName: "Ana Pena", propertyName: "Villa Azul", checkinDate: "2026-10-02", checkoutDate: "2026-10-11",
+      bookingStatus: "rescheduled", bookingTotal: 700, paymentStatus: "paid" },
+    { id: "m2", guestName: "Ruben Diaz", propertyName: "Casa Bonita", checkinDate: "2026-11-01", checkoutDate: "2026-11-05",
+      bookingStatus: "cancelled", bookingTotal: 975.20, paymentStatus: "paid" },
+    { id: "m3", guestName: "Pedro Luna", propertyName: "Casa Bonita", checkinDate: "2026-10-02", checkoutDate: "2026-10-11",
+      bookingTotal: 400, paymentStatus: "paid" },
+  ] }`);
+  run(`filterState.transactions = {}; renderTransactions();`);
+  let html = panels["#panel-transactions"].innerHTML;
+
+  // The moved one says where it is AND that it moved. Both, in one cell.
+  assert.match(html, /Active<\/span><span class="badge warn">Rescheduled<\/span>/,
+    "a rescheduled booking mid-stay reads Active + Rescheduled, not Rescheduled alone");
+  assert.match(html, /<span class="badge bad">Cancelled<\/span>/,
+    "and a cancelled one reads Cancelled although its dates are in November");
+
+  // A cancelled booking still showing as paid is correct and is the point: the
+  // guest's money has not moved, which is the thing somebody has to decide about.
+  assert.match(html, /Ruben Diaz[\s\S]*?\$975\.20[\s\S]*?Paid/,
+    "the cancelled booking still shows what is sitting on it");
+
+  // The Changed filter appears because something was moved, and selects on it.
+  assert.match(html, /data-field="stayChanged"/);
+  run(`filterState.transactions.stayChanged = "rescheduled"; renderTransactions();`);
+  html = panels["#panel-transactions"].innerHTML;
+  assert.ok(html.includes("Ana Pena"), "the moved booking is kept");
+  assert.ok(!html.includes("Pedro Luna"), "the one on identical dates that was never moved is not");
+  assert.ok(!html.includes("Ruben Diaz"));
+
+  // And it is absent when nothing has been moved, rather than offering a filter
+  // that can only return an empty table.
+  run(`filterState.transactions = {};
+       DATA = { transactions: [{ id: "x", guestName: "A", checkinDate: "2026-10-02", checkoutDate: "2026-10-11" }] };
+       renderTransactions();`);
+  assert.ok(!/data-field="stayChanged"/.test(panels["#panel-transactions"].innerHTML),
+    "no Changed filter when nothing was changed");
+  console.log("8b) A moved booking shows status and moved-ness, and each filters separately");
+}
+
 // ---- 9. every label is translatable ---------------------------------
 // The audience is Dominican. A badge built in JS is prose like any other, and
 // the locale pass only translates what the dictionary holds.
@@ -209,6 +274,41 @@ const status = (t, today = TODAY) => run(`stayStatus(${JSON.stringify(t)}, ${JSO
   const bare = normalizeTransaction({ id: "y", properties: { guest_name: "A" } });
   assert.ok(!bare.bookingStatus, "and its absence today is not an error");
   console.log("10) The normalizer reads booking_status, so the field only has to be created and written");
+}
+
+// ---- 11. the dates printed are the dates stored ----------------------
+// Separate from the status maths, and found by it: case 8b printed a stay as
+// 10/1 -> 10/10 while its record said 10/02 -> 10/11. dateFmt sent a calendar
+// date through `new Date()`, which reads it as UTC midnight, and then rendered
+// it in the reader's zone -- a day earlier everywhere west of Greenwich. The DR
+// is UTC-4, so every date in this dashboard was a day early for the people it
+// was built for.
+//
+// Asserted against a LOCALLY-built date rather than a literal string, so the
+// test means the same thing on a machine in any zone, including a UTC one where
+// the bug is invisible.
+{
+  const localDay = (y, m, d) => new Date(y, m - 1, d).toLocaleDateString();
+  assert.strictEqual(run(`dateFmt("2026-10-02")`), localDay(2026, 10, 2));
+  assert.strictEqual(run(`dateFmt("2026-10-02T00:00:00.000Z")`), localDay(2026, 10, 2),
+    "a UTC-midnight timestamp is the day it names -- this is the form GHL returns");
+  assert.strictEqual(run(`dateFmt("2026-01-01")`), localDay(2026, 1, 1),
+    "and a new year's day does not become the year before");
+  assert.strictEqual(run(`dateFmt("")`), "—");
+  assert.strictEqual(run(`dateFmt(null)`), "—");
+
+  // A value with a real time on it is a genuine instant and still belongs in
+  // the reader's zone.
+  assert.strictEqual(run(`dateFmt("2026-10-02T18:30:00.000Z")`),
+    new Date("2026-10-02T18:30:00.000Z").toLocaleDateString(),
+    "a real timestamp is still localised");
+
+  // Through the panel, which is where it was wrong.
+  run(`DATA = { transactions: [{ id: "d1", guestName: "G", checkinDate: "2026-10-02", checkoutDate: "2026-10-11" }] };
+       filterState.transactions = {}; renderTransactions();`);
+  assert.ok(panels["#panel-transactions"].innerHTML.includes(`${localDay(2026, 10, 2)} → ${localDay(2026, 10, 11)}`),
+    "the Stay Dates cell prints the days the record holds");
+  console.log("11) A stay prints the dates it was booked for, in any timezone");
 }
 
 console.log("\nPASS — a reservation shows guest, property, dates and where it is in its life.");

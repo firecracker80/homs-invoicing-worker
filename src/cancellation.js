@@ -758,17 +758,35 @@ export async function handleCancel(request, env, { notify = true, voidInvoice: s
       const result = await writeAndSyncRows(env, tenant, snapshot, rows);
       if (!result.d1.ok) console.error(`Cancellation D1 write failed for ${snapshot.bookingId}: ${result.d1.reason} ${result.d1.error || ""}`);
       if (!result.ghl.ok) console.error(`Cancellation GHL sync failed for ${snapshot.bookingId}: ${result.ghl.reason} ${result.ghl.error || ""}`);
-
-      const transactionId = resolveTransactionId(snapshot);
-      if (transactionId) {
-        const pit = resolveSecret(tenant, env, "ghlPitSecretName", "ghlPit");
-        if (pit) await updateObjectRecord(pit, snapshot.locationId, "custom_objects.transactions", transactionId, { payment_status: "refunded" });
-      }
       if (!result.d1.ok || !result.ghl.ok) {
         snapshot.cancellationSyncFailed = true;
         snapshot.cancellationSyncError = [result.d1.error, result.ghl.error].filter(Boolean).join("; ");
         await env.BOOKINGS.put(snapshot.bookingId, JSON.stringify(snapshot));
       }
+    }
+
+    // Outside the rows check, which is where it used to be. Whether a
+    // cancellation produces a ledger row has nothing to do with whether it
+    // happened: a booking with no rent, no cleaning fee and no deposit produces
+    // none, and wrote nothing at all.
+    //
+    // (Not the cause of the $975.20 that sat "paid" on a cancelled booking in
+    // the multi-listing test -- that one had no Transaction record at all, so
+    // resolveTransactionId found nothing to write to.)
+    const transactionId = resolveTransactionId(snapshot);
+    if (transactionId) {
+      const pit = resolveSecret(tenant, env, "ghlPitSecretName", "ghlPit");
+
+      // Two different facts, written into one field until now. The booking is
+      // cancelled either way; whether money went back is separate, and a guest
+      // charged 100% under a late-cancellation tier has been refunded nothing.
+      //
+      // rentUnitRefund rather than totalRefund: the latter includes the
+      // security deposit, which is the guest's own money and was never booking
+      // revenue. Returning it does not make the booking refunded.
+      const props = { booking_status: "cancelled" };
+      if (calc.rentUnitRefund > 0) props.payment_status = "refunded";
+      if (pit) await updateObjectRecord(pit, snapshot.locationId, "custom_objects.transactions", transactionId, props);
     }
   } catch (err) {
     console.error(`Cancellation ledger sync failed for ${snapshot.bookingId}: ${err.message}`);
@@ -870,11 +888,18 @@ export async function handleDepositRefund(request, env) {
       if (!result.d1.ok) console.error(`Deposit refund D1 write failed for ${snapshot.bookingId}: ${result.d1.reason} ${result.d1.error || ""}`);
       if (!result.ghl.ok) console.error(`Deposit refund GHL sync failed for ${snapshot.bookingId}: ${result.ghl.reason} ${result.ghl.error || ""}`);
 
-      const transactionId = resolveTransactionId(snapshot);
-      if (transactionId && status === "refunded") {
-        const pit = resolveSecret(tenant, env, "ghlPitSecretName", "ghlPit");
-        if (pit) await updateObjectRecord(pit, snapshot.locationId, "custom_objects.transactions", transactionId, { payment_status: "refunded" });
-      }
+      // The Transaction record is deliberately NOT touched here.
+      //
+      // This path is the security deposit being released after inspection --
+      // the ordinary end of a stay that went fine. It used to write
+      // payment_status: "refunded" onto the booking whenever the deposit came
+      // back clean, so a completed stay, paid in full, read as refunded in the
+      // CRM and on the dashboard. Two different moneys: the guest's deposit is
+      // not the booking's revenue, and returning one says nothing about the
+      // other.
+      //
+      // The deposit's own status lives on the snapshot (securityDeposit.status)
+      // and in the ledger rows written just above.
     }
   } catch (err) {
     console.error(`Deposit refund ledger sync failed for ${snapshot.bookingId}:`, err.message);

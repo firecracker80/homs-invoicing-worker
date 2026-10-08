@@ -419,7 +419,24 @@ const moneyIn = (n, cur) => {
   return Number.isFinite(v) ? `${CURRENCY_SYMBOLS[cur] || cur + " "}${v.toFixed(2)}` : "—";
 };
 const dash = (v) => (v === null || v === undefined || v === "" ? "—" : esc(v));
-const dateFmt = (v) => (v ? new Date(v).toLocaleDateString() : "—");
+const dateFmt = (v) => {
+  if (!v) return "—";
+  // A calendar date is not an instant, and treating it as one moves it.
+  // "2026-10-02" and "2026-10-02T00:00:00Z" both parse as UTC midnight, which
+  // toLocaleDateString then renders in the reader's own zone -- the 1st, for
+  // everyone west of Greenwich. GHL stores stay dates this way and the DR is
+  // UTC-4, so every date in this dashboard has been shown a day early to
+  // exactly the people it was built for. Found 2026-10-07 by a test that
+  // printed a stay as 10/1 -> 10/10 when the record said 10/02 -> 10/11.
+  //
+  // Rebuilt from its parts as a LOCAL date, so formatting it locally gives back
+  // the day the record states.
+  const cal = /^(\d{4})-(\d{2})-(\d{2})(?:T00:00:00(?:\.000)?Z?)?$/.exec(String(v));
+  if (cal) return new Date(+cal[1], +cal[2] - 1, +cal[3]).toLocaleDateString();
+  // Anything with a real time on it is a genuine instant -- createdAt and the
+  // like -- and belongs in the reader's zone.
+  return new Date(v).toLocaleDateString();
+};
 
 // --- Reservation status -----------------------------------------------------
 // What a manager opens this for is which bookings need them today, and the
@@ -444,11 +461,18 @@ function todayISO(now = new Date()) {
   return `${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())}`;
 }
 
-// Cancelled and rescheduled are not derivable -- nothing in the data records
-// either. They come from booking_status, which the Worker writes on cancel and
-// on reschedule once that field exists on the Transactions object. Until then
-// this list is the vocabulary and the dates supply the rest.
-const STAY_STATUSES = ["new", "active", "departing", "past", "cancelled", "rescheduled"];
+// Cancelled and rescheduled are not derivable -- nothing in the dates records
+// either. Both come from booking_status, written by the Worker on cancel and on
+// reschedule, and the two are handled differently on purpose:
+//
+//   cancelled   is terminal. It outranks the dates, because a cancelled booking
+//               still has a check-in next week and the dates would call it new.
+//   rescheduled is NOT. A moved booking is live, with new dates, and will become
+//               active and then depart like any other. Treated as a status it
+//               would hide "in the house" behind "was moved" for the rest of the
+//               booking's life -- so it is carried beside the status instead.
+const TERMINAL_STATUS = "cancelled";
+const STAY_STATUSES = ["new", "active", "departing", "past", "cancelled"];
 const STAY_LABELS = {
   new: "New", active: "Active", departing: "Departing",
   past: "Past", cancelled: "Cancelled", rescheduled: "Rescheduled",
@@ -458,11 +482,15 @@ const STAY_TONES = {
   past: "neutral", cancelled: "bad", rescheduled: "warn",
 };
 
+const bookingStatusOf = (t) => String(t.bookingStatus || "").toLowerCase();
+
+// Whether this booking has been moved at some point. Orthogonal to where it is
+// in its life, so it gets its own cell marker and its own filter rather than
+// competing for the status.
+const wasRescheduled = (t) => bookingStatusOf(t) === "rescheduled";
+
 function stayStatus(t, today = todayISO()) {
-  // A written status outranks the dates: a cancelled booking still has a
-  // check-in next week, and the dates would call it "new".
-  const stored = String(t.bookingStatus || "").toLowerCase();
-  if (STAY_STATUSES.includes(stored)) return stored;
+  if (bookingStatusOf(t) === TERMINAL_STATUS) return TERMINAL_STATUS;
 
   const inD = dateOnly(t.checkinDate), outD = dateOnly(t.checkoutDate);
 
@@ -1962,13 +1990,23 @@ function renderTransactions() {
   // read fields off the record, and because one `today` for the whole pass
   // keeps a render that straddles midnight internally consistent.
   const today = todayISO();
-  DATA.transactions.forEach((t) => { t.stayStatus = stayStatus(t, today); });
+  DATA.transactions.forEach((t) => {
+    t.stayStatus = stayStatus(t, today);
+    // A string rather than a boolean: matchesFilters compares the record's own
+    // value to the selected option, and "" is what an unset filter means.
+    t.stayChanged = wasRescheduled(t) ? "rescheduled" : "";
+  });
 
   renderFilterableTab({
     tabKey: "transactions", panelId: "#panel-transactions", list: DATA.transactions,
     filterDefs: [
       { key: "propertyId", label: "Property", options: distinctPairs(DATA.transactions, "propertyId", "propertyName") },
       { key: "stayStatus", label: "Status", options: stayStatusOptions(DATA.transactions) },
+      // Offered only when something has been moved, so the bar does not carry a
+      // filter that can only ever return nothing.
+      ...(DATA.transactions.some(wasRescheduled)
+        ? [{ key: "stayChanged", label: "Changed", options: [{ value: "rescheduled", label: "Rescheduled" }] }]
+        : []),
       { key: "otaChannelId", label: "OTA Channel", options: distinctPairs(DATA.transactions, "otaChannelId", "otaChannelName") },
       { key: "paymentStatus", label: "Payment", options: distinct(DATA.transactions, "paymentStatus") },
     ],
@@ -1984,7 +2022,7 @@ function renderTransactions() {
       <td>${dash(t.guestName)}</td>
       <td>${dash(t.propertyName)}</td>
       <td>${dateFmt(t.checkinDate)} → ${dateFmt(t.checkoutDate)}</td>
-      <td>${stayBadge(t.stayStatus)}</td>
+      <td>${stayBadge(t.stayStatus)}${wasRescheduled(t) ? badge("Rescheduled", "warn") : ""}</td>
       <td>${money(t.bookingTotal)}</td>
       <td>${paymentBadge(t.paymentStatus)}</td>
       <td>${dash(t.otaChannelName)}</td>
@@ -2547,7 +2585,9 @@ function openDetail(kind, id) {
     title = record.name;
     rows = [
       ["Guest", record.guestName], ["Property", record.propertyName],
-      ["Status", STAY_LABELS[stayStatus(record)] || ""], ["OTA Channel", record.otaChannelName],
+      ["Status", [STAY_LABELS[stayStatus(record)], wasRescheduled(record) ? "Rescheduled" : ""]
+        .filter(Boolean).join(" · ")],
+      ["OTA Channel", record.otaChannelName],
       ["Booking Reference", record.bookingReference], ["Check-in", dateFmt(record.checkinDate)],
       ["Check-out", dateFmt(record.checkoutDate)], ["Booking Total", money(record.bookingTotal)],
       ["Platform Fee", money(record.platformFee)], ["Net Payout", money(record.netPayout)],
