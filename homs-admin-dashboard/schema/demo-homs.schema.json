@@ -1,6 +1,6 @@
 {
   "locationId": "ZghxU8I60bEm39JUbtCm",
-  "capturedAt": "2026-10-08T16:23:57.173Z",
+  "capturedAt": "2026-10-08T16:37:05.609Z",
   "objects": {
     "custom_objects.properties": {
       "primaryDisplayProperty": "custom_objects.properties.property_name",
@@ -16,6 +16,8 @@
         "custom_objects.properties.property_name": {
           "dataType": "TEXT",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Property Name",
           "description": null
         },
@@ -26,6 +28,8 @@
             "inactive",
             "seasonal"
           ],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Status",
           "description": null
         },
@@ -38,48 +42,64 @@
             "room",
             "villa"
           ],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Property Type",
           "description": null
         },
         "custom_objects.properties.address": {
           "dataType": "TEXT",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Address",
           "description": null
         },
         "custom_objects.properties.bedrooms": {
           "dataType": "NUMERICAL",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Bedrooms",
           "description": null
         },
         "custom_objects.properties.bathrooms": {
           "dataType": "NUMERICAL",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Bathrooms",
           "description": null
         },
         "custom_objects.properties.max_occupancy": {
           "dataType": "NUMERICAL",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Max Occupancy",
           "description": null
         },
         "custom_objects.properties.base_nightly_rate": {
           "dataType": "MONETORY",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Base Nightly Rate",
           "description": null
         },
         "custom_objects.properties.cleaning_fee": {
           "dataType": "MONETORY",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Cleaning Fee",
           "description": null
         },
         "custom_objects.properties.pet_fee": {
           "dataType": "MONETORY",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Pet Fee",
           "description": null
         }
@@ -99,24 +119,32 @@
         "custom_objects.ota_channels.channel_name": {
           "dataType": "TEXT",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Channel Name",
           "description": null
         },
         "custom_objects.ota_channels.external_listing_id": {
           "dataType": "TEXT",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "External Listing ID",
           "description": null
         },
         "custom_objects.ota_channels.listing_url": {
           "dataType": "TEXT",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Listing URL",
           "description": null
         },
         "custom_objects.ota_channels.ical_link": {
           "dataType": "TEXT",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "iCal Link",
           "description": null
         },
@@ -127,18 +155,24 @@
             "disconnected",
             "error"
           ],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Sync Status",
           "description": null
         },
         "custom_objects.ota_channels.commission_rate": {
           "dataType": "NUMERICAL",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Commission Rate",
           "description": null
         },
         "custom_objects.ota_channels.last_synced": {
           "dataType": "DATE",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Last Synced",
           "description": null
         }
@@ -158,48 +192,64 @@
         "custom_objects.transactions.transaction_name": {
           "dataType": "TEXT",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Transaction Name",
           "description": null
         },
         "custom_objects.transactions.guest_name": {
           "dataType": "TEXT",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Guest Name",
           "description": null
         },
         "custom_objects.transactions.checkin_date": {
           "dataType": "DATE",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Check-in Date",
           "description": null
         },
         "custom_objects.transactions.checkout_date": {
           "dataType": "DATE",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Check-out Date",
           "description": null
         },
         "custom_objects.transactions.booking_reference": {
           "dataType": "TEXT",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Booking Reference",
           "description": null
         },
         "custom_objects.transactions.booking_total": {
           "dataType": "MONETORY",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Booking Total",
           "description": null
         },
         "custom_objects.transactions.platform_fee": {
           "dataType": "MONETORY",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Platform Fee",
           "description": null
         },
         "custom_objects.transactions.net_payout": {
           "dataType": "MONETORY",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Net Payout",
           "description": null
         },
@@ -211,12 +261,16 @@
             "pending",
             "refunded"
           ],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Payment Status",
           "description": null
         },
         "custom_objects.transactions.guest_request_notes": {
           "dataType": "LARGE_TEXT",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Guest Request Notes",
           "description": "Guest-initiated requests (cancellation, reschedule, service) recorded by the assistant. Append newest first with a date stamp; this field is overwritten on each write, so read it before writing."
         },
@@ -227,6 +281,8 @@
             "confirmed",
             "rescheduled"
           ],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Booking Status",
           "description": "The booking's lifecycle, not its money - Payment Status covers that. Written by the Worker: cancelled on cancellation, rescheduled when dates move. Empty on a normal booking: the dashboard derives new/active/departing/past from the dates. Only cancelled overrides them."
         }
@@ -246,30 +302,40 @@
         "custom_objects.jobs_tmpl.job_name": {
           "dataType": "TEXT",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Job name",
           "description": null
         },
         "custom_objects.jobs_tmpl.cleaner_cost": {
           "dataType": "MONETORY",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Cleaner Cost",
           "description": "What the cleaner was paid for this turnover. The cleaning fee charged to the guest is revenue; this is the cost against it. Without it the manager statement reports the whole cleaning fee as earnings."
         },
         "custom_objects.jobs_tmpl.completion_date": {
           "dataType": "DATE",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Date Cleaned",
           "description": ""
         },
         "custom_objects.jobs_tmpl.cleaner_name__service": {
           "dataType": "TEXT",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Cleaner Name / Service",
           "description": null
         },
         "custom_objects.jobs_tmpl.cleaner_paid_on": {
           "dataType": "DATE",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Cleaner Paid On",
           "description": "When the cleaner was actually paid. Blank means the turnover is done but the cleaner is still owed, which is the manager's unpaid liability."
         },
@@ -280,6 +346,8 @@
             "midstay_clean",
             "standard_turnover"
           ],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Turnover Type",
           "description": null
         },
@@ -290,6 +358,8 @@
             "needs_followup",
             "pass__guest_ready"
           ],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Overall Status",
           "description": null
         },
@@ -302,6 +372,8 @@
             "fresh_linens_on_all_beds",
             "surfaces_dusted"
           ],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Bedroom Checklist",
           "description": null
         },
@@ -314,6 +386,8 @@
             "toilet_cleaned__disinfected",
             "trash_emptied"
           ],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Bathroom Checklist",
           "description": null
         },
@@ -326,6 +400,8 @@
             "dishwasher_run__emptied",
             "trash__recycling_removed"
           ],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Kitchen Checklist",
           "description": null
         },
@@ -337,6 +413,8 @@
             "hightouch_surfaces_disinfected_door_handles_light_switches_remotes",
             "surfaces__ceiling_fans_dusted"
           ],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Living Area Checklist",
           "description": null
         },
@@ -347,6 +425,8 @@
             "patio_furniture_cleaned",
             "trash__debris_removed"
           ],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Outdoor Checklist",
           "description": null
         },
@@ -360,42 +440,60 @@
             "welcome_materials_in_place",
             "wifi_tested"
           ],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Final Walkthrough Checklist",
           "description": null
         },
         "custom_objects.jobs_tmpl.damage__issues_noted": {
           "dataType": "LARGE_TEXT",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Damage / Issues Noted",
           "description": null
         },
         "custom_objects.jobs_tmpl.missing__low_supplies": {
           "dataType": "LARGE_TEXT",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Missing / Low Supplies",
           "description": null
         },
         "custom_objects.jobs_tmpl.guest_items_found": {
           "dataType": "LARGE_TEXT",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Guest Items Found",
           "description": null
         },
         "custom_objects.jobs_tmpl.photos": {
           "dataType": "FILE_UPLOAD",
           "options": [],
+          "acceptedFormats": [
+            ".jpeg",
+            ".jpg",
+            ".png"
+          ],
+          "maxFileLimit": 20,
           "name": "Photos",
           "description": null
         },
         "custom_objects.jobs_tmpl.property_name": {
           "dataType": "TEXT",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Property Name",
           "description": null
         },
         "custom_objects.jobs_tmpl.booking_reference": {
           "dataType": "TEXT",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Booking Reference",
           "description": null
         },
@@ -405,12 +503,18 @@
             "post_clean",
             "pre_clean"
           ],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Inspection Stage",
           "description": null
         },
         "custom_objects.jobs_tmpl.video": {
           "dataType": "FILE_UPLOAD",
           "options": [],
+          "acceptedFormats": [
+            "all"
+          ],
+          "maxFileLimit": 5,
           "name": "Video",
           "description": null
         }
@@ -430,12 +534,16 @@
         "custom_objects.expenses.expense_name": {
           "dataType": "TEXT",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Expense Name",
           "description": null
         },
         "custom_objects.expenses.paid_on": {
           "dataType": "DATE",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Paid On",
           "description": null
         },
@@ -454,12 +562,16 @@
             "software_subscriptions",
             "utilities"
           ],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Category",
           "description": null
         },
         "custom_objects.expenses.amount": {
           "dataType": "MONETORY",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Amount",
           "description": null
         },
@@ -469,18 +581,29 @@
             "approved",
             "needs_review"
           ],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Review Status",
           "description": null
         },
         "custom_objects.expenses.receipt_photo": {
           "dataType": "FILE_UPLOAD",
           "options": [],
+          "acceptedFormats": [
+            ".jpeg",
+            ".jpg",
+            ".pdf",
+            ".png"
+          ],
+          "maxFileLimit": 5,
           "name": "Receipt Photo",
           "description": null
         },
         "custom_objects.expenses.line_item_description": {
           "dataType": "TEXT",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Line Item Description",
           "description": null
         },
@@ -491,30 +614,40 @@
             "eur",
             "usd"
           ],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Currency",
           "description": null
         },
         "custom_objects.expenses.converted_amount": {
           "dataType": "MONETORY",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Converted Amount",
           "description": null
         },
         "custom_objects.expenses.exchange_rate": {
           "dataType": "NUMERICAL",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Exchange Rate",
           "description": null
         },
         "custom_objects.expenses.rate_date": {
           "dataType": "DATE",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Rate Date",
           "description": null
         },
         "custom_objects.expenses.rate_source": {
           "dataType": "TEXT",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Rate Source",
           "description": null
         },
@@ -524,6 +657,8 @@
             "manager",
             "owner"
           ],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Paid By",
           "description": "Whose cost this is. Owner = the property owner bears it. Manager = the management company bears it, like cleaning staff. / De quien es el costo: del propietario o del administrador."
         }
@@ -543,6 +678,8 @@
         "custom_objects.property_inventory.item_name": {
           "dataType": "TEXT",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Item Name",
           "description": null
         },
@@ -560,12 +697,16 @@
             "safety_security",
             "supplies"
           ],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Category",
           "description": null
         },
         "custom_objects.property_inventory.quantity": {
           "dataType": "NUMERICAL",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Quantity",
           "description": null
         },
@@ -578,36 +719,48 @@
             "needs_replacement",
             "new"
           ],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Condition",
           "description": null
         },
         "custom_objects.property_inventory.location_in_property": {
           "dataType": "TEXT",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Location in Property",
           "description": null
         },
         "custom_objects.property_inventory.purchase_date": {
           "dataType": "DATE",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Purchase Date",
           "description": null
         },
         "custom_objects.property_inventory.purchase_cost": {
           "dataType": "MONETORY",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Purchase Cost",
           "description": null
         },
         "custom_objects.property_inventory.last_verified_date": {
           "dataType": "DATE",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Last Verified Date",
           "description": null
         },
         "custom_objects.property_inventory.notes": {
           "dataType": "TEXT",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Notes",
           "description": null
         }
@@ -627,6 +780,8 @@
         "custom_objects.payments.payment_reference": {
           "dataType": "TEXT",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Payment Reference",
           "description": null
         },
@@ -660,6 +815,8 @@
             "security_deposit",
             "shadow_ota_commission"
           ],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Entry Type",
           "description": null
         },
@@ -669,18 +826,24 @@
             "paypal",
             "stripe"
           ],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Payment Method",
           "description": null
         },
         "custom_objects.payments.gateway_transaction_id": {
           "dataType": "TEXT",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Gateway Transaction ID",
           "description": null
         },
         "custom_objects.payments.amount": {
           "dataType": "MONETORY",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Amount",
           "description": null
         },
@@ -691,6 +854,8 @@
             "paid",
             "pending"
           ],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Payment Status",
           "description": null
         },
@@ -700,18 +865,24 @@
             "no",
             "yes"
           ],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Cleared for Payout",
           "description": null
         },
         "custom_objects.payments.processed_at": {
           "dataType": "DATE",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Processed At",
           "description": null
         },
         "custom_objects.payments.notes": {
           "dataType": "LARGE_TEXT",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Notes",
           "description": null
         },
@@ -723,12 +894,16 @@
             "owner",
             "platform"
           ],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Recipient",
           "description": null
         },
         "custom_objects.payments.recipient_name": {
           "dataType": "TEXT",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Recipient Name",
           "description": null
         },
@@ -740,6 +915,8 @@
             "pass_through",
             "shadow"
           ],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Category",
           "description": null
         }
@@ -759,12 +936,16 @@
         "custom_objects.service_requests.service_item": {
           "dataType": "TEXT",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Service Item",
           "description": null
         },
         "custom_objects.service_requests.vendor": {
           "dataType": "TEXT",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Vendor",
           "description": null
         },
@@ -778,6 +959,8 @@
             "plumbing",
             "refrigeration"
           ],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Category",
           "description": null
         },
@@ -791,60 +974,80 @@
             "requested",
             "scheduled"
           ],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Status",
           "description": null
         },
         "custom_objects.service_requests.requested_on": {
           "dataType": "DATE",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Requested On",
           "description": null
         },
         "custom_objects.service_requests.scheduled_date": {
           "dataType": "DATE",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Scheduled Date",
           "description": null
         },
         "custom_objects.service_requests.completed_date": {
           "dataType": "DATE",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Completed Date",
           "description": null
         },
         "custom_objects.service_requests.quoted_amount": {
           "dataType": "MONETORY",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Quoted Amount",
           "description": null
         },
         "custom_objects.service_requests.additional_amount": {
           "dataType": "MONETORY",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Additional Amount",
           "description": null
         },
         "custom_objects.service_requests.invoice_total": {
           "dataType": "MONETORY",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Invoice Total",
           "description": null
         },
         "custom_objects.service_requests.invoice_link": {
           "dataType": "TEXT",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Invoice Link",
           "description": null
         },
         "custom_objects.service_requests.vendor_request_id": {
           "dataType": "TEXT",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Vendor Request ID",
           "description": null
         },
         "custom_objects.service_requests.request_notes": {
           "dataType": "LARGE_TEXT",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Notes",
           "description": null
         },
@@ -855,30 +1058,40 @@
             "eur",
             "usd"
           ],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Currency",
           "description": null
         },
         "custom_objects.service_requests.converted_total": {
           "dataType": "MONETORY",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Converted Total",
           "description": null
         },
         "custom_objects.service_requests.exchange_rate": {
           "dataType": "NUMERICAL",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Exchange Rate",
           "description": null
         },
         "custom_objects.service_requests.rate_date": {
           "dataType": "DATE",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Rate Date",
           "description": null
         },
         "custom_objects.service_requests.rate_source": {
           "dataType": "TEXT",
           "options": [],
+          "acceptedFormats": [],
+          "maxFileLimit": null,
           "name": "Rate Source",
           "description": null
         }
