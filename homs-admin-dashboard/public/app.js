@@ -31,7 +31,9 @@ const I18N = {
     // the rendered page, which is what lets the walker swap it.
     "Manager Statement": "Estado de Cuenta del Administrador",
     "Owed to owners": "Adeudado a propietarios",
-    "Owner": "Propietario",
+    // "Owner" lives in the Paid By group below, which is the other place it is
+    // printed. One entry, since the dictionary is keyed by the English text and
+    // a second copy is dead weight that the next patch anchors on by mistake.
     "Total owed": "Total adeudado",
     "What this period earned for each owner, for you to pay through your own payout method. This page does not move money and does not record whether you have paid.":
       "Lo que este período generó para cada propietario, para que usted lo pague por su propio método. Esta página no transfiere dinero ni registra si ya pagó.",
@@ -108,10 +110,15 @@ const I18N = {
     "Loading receipts…": "Cargando recibos…",
     "No receipt filed for this expense.": "No hay recibo archivado para este gasto.",
     "in GHL": "en GHL",
-    "Paid By": "Pagado Por",
-    "Owner": "Propietario",
-    "Manager": "Administrador",
+    // "Paid By", "Owner" and "Manager" are NOT repeated here: the manager P&L
+    // block above already carries them. A duplicate key in an object literal is
+    // legal and the last one wins, so three of them sat here silently until a
+    // patch tried to anchor on one and matched twice.
     "Unattributed": "Sin Asignar",
+    "Currency": "Moneda",
+    "DOP — Dominican peso": "DOP — peso dominicano",
+    "USD — US dollar": "USD — dólar estadounidense",
+    "EUR — euro": "EUR — euro",
     "Submit Expense": "Enviar Gasto",
     "Property": "Propiedad",
     "Paid On": "Fecha de Pago",
@@ -2104,6 +2111,20 @@ const EXPENSE_CATEGORY_OPTIONS = [
   ["other", "Other"],
 ];
 
+// The options on custom_objects.expenses.currency. Stored lowercase, which is
+// what the field's option keys are; the normalizer uppercases on the way back
+// out for display and comparison.
+const EXPENSE_CURRENCIES = [["dop", "DOP — Dominican peso"], ["usd", "USD — US dollar"], ["eur", "EUR — euro"]];
+
+// So the amount box says what unit it is in. A field labelled "Amount ($)" next
+// to a currency dropdown reading DOP is a contradiction the reader has to
+// resolve, and the whole point of the dropdown is that it is not always $.
+function paintAmountLabel() {
+  const label = $("#aeAmountLabel");
+  const picked = ($("#aeCurrency")?.value || "").toUpperCase();
+  if (label) label.childNodes[0].nodeValue = `Amount (${CURRENCY_SYMBOLS[picked] || picked || "—"}) `;
+}
+
 // Receipts selected in the Add Expense form, as {filename, mediaType, data}.
 // Held until the expense exists: the upload names each file after the record
 // id, which nothing knows until the record is created.
@@ -2191,6 +2212,12 @@ async function readReceiptIntoForm() {
     setIfEmpty("#aeName", [e.name, e.vendor].filter(Boolean).join(" — "));
     setIfEmpty("#aeAmount", e.amount);
     setIfEmpty("#aeDescription", e.notes);
+    // The receipt's own currency, which is the field most likely to be wrong if
+    // nobody touches it: a Dominican receipt read on a USD account.
+    if (e.currency && EXPENSE_CURRENCIES.some(([k]) => k === e.currency)) {
+      $("#aeCurrency").value = e.currency;
+      paintAmountLabel();
+    }
     // Paid On is prefilled with today by openAddExpenseModal, so it is never
     // empty -- the receipt's own date is better and replaces it.
     if (e.paidOn) $("#aePaidOn").value = e.paidOn;
@@ -2215,6 +2242,18 @@ function openAddExpenseModal() {
 
   const catSelect = $("#aeCategory");
   catSelect.innerHTML = EXPENSE_CATEGORY_OPTIONS.map(([key, label]) => `<option value="${key}">${esc(label)}</option>`).join("");
+
+  // Preselected to the account's own currency, because most expenses are in it
+  // and the field only existed to catch the ones that are not. It is still
+  // required: an untagged amount is read as the account's currency by both the
+  // dashboard and the statement, so a peso receipt saved by someone who never
+  // looked at this field would be counted at about 59 times its cost.
+  const curSelect = $("#aeCurrency");
+  const preferred = (DATA.accountCurrency || "").toUpperCase();
+  curSelect.innerHTML = EXPENSE_CURRENCIES
+    .map(([key, label]) => `<option value="${key}"${key.toUpperCase() === preferred ? " selected" : ""}>${esc(label)}</option>`)
+    .join("");
+  paintAmountLabel();
 
   $("#addExpenseForm").reset();
   AE_FILES = [];
@@ -2248,6 +2287,7 @@ async function submitAddExpense(e) {
     paidBy: $("#aePaidBy").value,
     lineItemDescription: $("#aeDescription").value.trim(),
     amount: $("#aeAmount").value,
+    currency: $("#aeCurrency").value,
   };
 
   const errBox = $("#aeError");
@@ -2984,4 +3024,5 @@ document.addEventListener("DOMContentLoaded", () => {
   // On change rather than on submit: the whole point is that the fields are
   // filled in before the person reads them, so they can correct the read.
   $("#aeReceipts").addEventListener("change", readReceiptIntoForm);
+  $("#aeCurrency").addEventListener("change", paintAmountLabel);
 });

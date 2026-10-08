@@ -116,7 +116,10 @@
         <label>Description
           <input type="text" id="aeDescription" placeholder="e.g. Pest control" />
         </label>
-        <label>Amount ($)
+        <label>Currency
+          <select id="aeCurrency" required></select>
+        </label>
+        <label id="aeAmountLabel">Amount
           <input type="number" id="aeAmount" step="0.01" min="0" required />
         </label>
         <div id="aeError" class="form-error" hidden></div>
