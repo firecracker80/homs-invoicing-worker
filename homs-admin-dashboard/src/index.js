@@ -1,5 +1,7 @@
 import { fetchAllObjectRecords, fetchContacts, createObjectRecord, fetchAssociations, createRelation, fetchCustomValues,
   ensureReceiptsFolder, uploadReceipt, listReceipts } from "./ghl.js";
+// readClientCurrencySettings is already imported with the service handlers below.
+import { currencyKey, fetchRate, describeRate, round2 } from "./services.js";
 import {
   normalizeProperty,
   normalizeOtaChannel,
@@ -278,7 +280,7 @@ function base64ToBytes(b64) {
 
 async function handleCreateExpense(request, env) {
   const body = await request.json();
-  const { locationId, propertyId, ownerContactId, name, paidOn, categoryKey, lineItemDescription, amount, paidBy } = body;
+  const { locationId, propertyId, ownerContactId, name, paidOn, categoryKey, lineItemDescription, amount, paidBy, currency } = body;
 
   const { tenant, pit, error } = await resolveTenantPit(env, locationId);
   if (error) return error;
@@ -308,6 +310,51 @@ async function handleCreateExpense(request, env) {
   if (paidOn) properties.paid_on = paidOn;
   if (lineItemDescription) properties.line_item_description = lineItemDescription;
 
+  // The currency, and the conversion that has to come with it.
+  //
+  // Nothing wrote this field before, so every expense entered here landed
+  // untagged -- and an untagged amount is read as the ACCOUNT's currency by
+  // both the dashboard and manager-pl.js. A 16,246.63 peso bar tab recorded on
+  // a USD account was therefore counted as $16,246.63, about 59 times its real
+  // cost. Yari hit exactly that on 2026-10-08.
+  //
+  // Converted here rather than left for a workflow, because manager-pl.js
+  // refuses a foreign record that carries no rate (correctly -- adding pesos to
+  // dollars produces a number nobody can tell is wrong) and would silently drop
+  // the expense from the statement instead.
+  //
+  // Same helpers as services.js, which already does this for vendor invoices,
+  // so a hand-entered expense and a service-generated one carry identical
+  // conversion fields.
+  const currencyOpt = currencyKey(currency);
+  const conversion = { applied: false };
+  if (currencyOpt) {
+    properties.currency = currencyOpt;
+
+    const settings = readClientCurrencySettings(await fetchCustomValues(pit, locationId).catch(() => []));
+    const accountCurrency = settings.accountCurrency || String(tenant.currency || "").toUpperCase() || null;
+    const from = currencyOpt.toUpperCase();
+
+    if (accountCurrency && from !== accountCurrency) {
+      // The rate for the day the money moved, not today's -- an expense from
+      // March must not be revalued every time a statement is run.
+      const on = paidOn || new Date().toISOString().slice(0, 10);
+      const fx = await fetchRate(from, accountCurrency, on).catch(() => null);
+      if (fx) {
+        properties.converted_amount = { value: round2(Number(amount) * fx.rate), currency: "default" };
+        properties.exchange_rate = fx.rate;
+        properties.rate_date = fx.rateDate;
+        properties.rate_source = describeRate(from, accountCurrency, fx.rate, fx.rateDate);
+        Object.assign(conversion, { applied: true, from, to: accountCurrency, rate: fx.rate, rateDate: fx.rateDate });
+      } else {
+        // Recorded in its own currency with no rate. The expense is still
+        // saved -- losing it would be worse -- but it will show on a statement
+        // as unconverted rather than being netted, so the caller is told.
+        conversion.reason = `no ${from}->${accountCurrency} rate found for ${on}`;
+      }
+    }
+  }
+
   try {
     const record = await createObjectRecord(pit, locationId, "custom_objects.expenses", properties);
     const newId = record.id;
@@ -321,7 +368,7 @@ async function handleCreateExpense(request, env) {
       links.owner = await linkIfPossible(pit, locationId, associations, "custom_objects.expenses", newId, "contact", ownerContactId);
     }
 
-    return Response.json({ success: true, id: newId, links });
+    return Response.json({ success: true, id: newId, links, conversion });
   } catch (err) {
     return Response.json(
       { error: err.message || "Unknown error" },
