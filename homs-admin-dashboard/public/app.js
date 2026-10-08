@@ -100,6 +100,13 @@ const I18N = {
     // Expense entry
     "+ Add Expense": "+ Agregar Gasto",
     "Add Expense": "Agregar Gasto",
+    "Receipt": "Recibo",
+    "Receipts": "Recibos",
+    "Name": "Nombre",
+    "A photo or PDF. The first one is read to fill in the fields below — check them before saving.":
+      "Una foto o PDF. El primero se lee para llenar los campos siguientes — revísalos antes de guardar.",
+    "Loading receipts…": "Cargando recibos…",
+    "No receipt filed for this expense.": "No hay recibo archivado para este gasto.",
     "Submit Expense": "Enviar Gasto",
     "Property": "Propiedad",
     "Paid On": "Fecha de Pago",
@@ -2075,9 +2082,116 @@ const EXPENSE_CATEGORY_OPTIONS = [
   ["insurance", "Insurance"],
   ["property_tax", "Property Tax"],
   ["management_fee", "Management Fee"],
+  // Added to the GHL field 2026-10-06 and missed here, so the form could not
+  // select a category the object already had. test-expense-receipts.mjs now
+  // asserts this list and the reader's own list stay identical.
+  ["software_subscriptions", "Software & Subscriptions"],
   ["miscellaneous", "Miscellaneous Expenses"],
   ["other", "Other"],
 ];
+
+// Receipts selected in the Add Expense form, as {filename, mediaType, data}.
+// Held until the expense exists: the upload names each file after the record
+// id, which nothing knows until the record is created.
+let AE_FILES = [];
+
+// Receipts already filed, keyed by expense record id. Fetched once when the
+// Expenses tab first needs it rather than on every dashboard load -- it is one
+// media-library listing, and most visits never open an expense.
+let RECEIPTS = null;
+
+async function loadReceipts({ force = false } = {}) {
+  if (RECEIPTS && !force) return RECEIPTS;
+  try {
+    const res = await apiFetch(`/api/expenses/receipts?locationId=${encodeURIComponent(getLocationId())}`);
+    RECEIPTS = (await res.json()).receipts || {};
+  } catch {
+    // A dashboard that cannot reach the media library still shows every
+    // expense; it just cannot show their receipts.
+    RECEIPTS = {};
+  }
+  return RECEIPTS;
+}
+
+// FileReader rather than arrayBuffer + btoa: a 5 MB photo overflows the call
+// stack when spread into String.fromCharCode. Same reason as the importer.
+function readFileAsBase64(file) {
+  return new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onerror = () => reject(new Error(`Could not read ${file.name}`));
+    fr.onload = () => resolve({
+      filename: file.name,
+      mediaType: file.type,
+      data: String(fr.result).split(",").pop(),
+    });
+    fr.readAsDataURL(file);
+  });
+}
+
+// Read the first receipt and fill in what it says. Only ever fills a field the
+// person has not already typed into, so re-picking a file cannot wipe a
+// correction they just made.
+async function readReceiptIntoForm() {
+  const status = $("#aeReadStatus");
+  const input = $("#aeReceipts");
+  const picked = [...(input?.files || [])];
+  AE_FILES = [];
+  status.textContent = "";
+
+  if (!picked.length) return;
+  if (picked.length > 5) {
+    status.textContent = "Five receipts per expense is the limit.";
+    input.value = "";
+    return;
+  }
+
+  try {
+    AE_FILES = await Promise.all(picked.map(readFileAsBase64));
+  } catch (err) {
+    status.textContent = err.message;
+    return;
+  }
+
+  status.textContent = `Reading ${AE_FILES[0].filename}…`;
+  try {
+    const res = await apiFetch("/api/expenses/read-receipt", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ locationId: getLocationId(), ...AE_FILES[0] }),
+    });
+    const out = await res.json();
+
+    if (!res.ok || !out.ok) {
+      // The files stay attached: a document this could not read is still the
+      // receipt for an expense somebody is about to type in by hand.
+      status.textContent = out.message || out.error || "That file could not be read — fill the fields in by hand.";
+      return;
+    }
+
+    const e = out.expense;
+    const setIfEmpty = (sel, value) => {
+      const el = $(sel);
+      if (el && value !== null && value !== undefined && value !== "" && !el.value) el.value = value;
+    };
+    // Name and amount are what a person most wants saved from typing.
+    setIfEmpty("#aeName", [e.name, e.vendor].filter(Boolean).join(" — "));
+    setIfEmpty("#aeAmount", e.amount);
+    setIfEmpty("#aeDescription", e.notes);
+    // Paid On is prefilled with today by openAddExpenseModal, so it is never
+    // empty -- the receipt's own date is better and replaces it.
+    if (e.paidOn) $("#aePaidOn").value = e.paidOn;
+    if (e.category) $("#aeCategory").value = e.category;
+
+    const parts = [`Read ${AE_FILES.length} file${AE_FILES.length === 1 ? "" : "s"}.`];
+    if (e.confidence !== "high") parts.push(`The read was ${e.confidence} confidence — check the amount and the date.`);
+    if (!e.amount) parts.push("The amount could not be read.");
+    if (!e.paidOn) parts.push("The date could not be read.");
+    if (out.extra > 0) parts.push(`This document lists ${out.extra} more charge${out.extra === 1 ? "" : "s"} — use Import for those.`);
+    status.textContent = parts.join(" ");
+  } catch (err) {
+    status.textContent = "Could not read the receipt: " + err.message;
+  }
+}
 
 function openAddExpenseModal() {
   const propSelect = $("#aeProperty");
@@ -2089,7 +2203,11 @@ function openAddExpenseModal() {
   catSelect.innerHTML = EXPENSE_CATEGORY_OPTIONS.map(([key, label]) => `<option value="${key}">${esc(label)}</option>`).join("");
 
   $("#addExpenseForm").reset();
-  $("#aePaidOn").value = new Date().toISOString().slice(0, 10);
+  AE_FILES = [];
+  $("#aeReadStatus").textContent = "";
+  // todayISO, not toISOString: the latter is UTC, so after 8pm in the DR the
+  // form would default to tomorrow's date.
+  $("#aePaidOn").value = todayISO();
   $("#aeError").hidden = true;
   $("#aeError").textContent = "";
   $("#aeSubmit").disabled = false;
@@ -2106,7 +2224,11 @@ async function submitAddExpense(e) {
     locationId: getLocationId(),
     propertyId,
     ownerContactId: property?.ownerContactId || null,
-    name: EXPENSE_CATEGORY_OPTIONS.find(([key]) => key === $("#aeCategory").value)?.[1] || "Expense",
+    // The category label is the fallback it always was, not the only option:
+    // a receipt read gives a real name ("Pool pump replacement"), and the
+    // expense name was previously always just the category over again.
+    name: $("#aeName").value.trim() ||
+      EXPENSE_CATEGORY_OPTIONS.find(([key]) => key === $("#aeCategory").value)?.[1] || "Expense",
     paidOn: $("#aePaidOn").value || null,
     categoryKey: $("#aeCategory").value,
     paidBy: $("#aePaidBy").value,
@@ -2129,7 +2251,30 @@ async function submitAddExpense(e) {
     const json = await res.json();
     if (!res.ok) throw new Error(json.error || "Failed to create expense");
 
+    // Files go up after the record exists, because each is named after its id.
+    // A failure here is reported and NOT thrown: the expense is already saved,
+    // and telling someone it failed would invite them to enter it twice.
+    if (AE_FILES.length && json.id) {
+      try {
+        const up = await apiFetch("/api/expenses/receipt", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ locationId: getLocationId(), recordId: json.id, files: AE_FILES }),
+        });
+        const result = await up.json();
+        if (result.failed?.length) {
+          errBox.textContent = `Expense saved. ${result.failed.length} receipt(s) did not upload — attach them from the expense record.`;
+          errBox.hidden = false;
+        }
+        await loadReceipts({ force: true });
+      } catch (err) {
+        errBox.textContent = "Expense saved, but the receipt did not upload: " + err.message;
+        errBox.hidden = false;
+      }
+    }
+
     $("#addExpenseOverlay").hidden = true;
+    AE_FILES = [];
     await loadData();
     showTab("expenses");
   } catch (err) {
@@ -2627,8 +2772,36 @@ function openDetail(kind, id) {
     <h2>${esc(title)}</h2>
     <dl class="detail-grid">
       ${rows.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${dash(v)}</dd>`).join("")}
-    </dl>`;
+    </dl>
+    ${kind === "expense" ? `<div id="detailReceipts"></div>` : ""}`;
   $("#detailOverlay").hidden = false;
+
+  // Filled in after the panel is up rather than before: the listing is a call
+  // to the media library, and a drawer that waits for it reads as a dead click.
+  if (kind === "expense") paintReceipts(record.id);
+}
+
+// The receipts filed against one expense. Links rather than inline images: a
+// receipt may be a PDF, the file is on GHL's CDN, and a drawer that silently
+// downloads five phone photos every time it opens is worse than one click.
+async function paintReceipts(recordId) {
+  const host = $("#detailReceipts");
+  if (!host) return;
+  host.innerHTML = `<p class="form-note">Loading receipts…</p>`;
+  const all = await loadReceipts();
+  // The drawer may have been closed, or another record opened, while that ran.
+  if (!document.body.contains(host)) return;
+
+  const mine = all[recordId] || [];
+  if (!mine.length) {
+    host.innerHTML = `<p class="form-note">No receipt filed for this expense.</p>`;
+    return;
+  }
+  host.innerHTML =
+    `<h3>Receipts</h3><ul class="receipt-list">` +
+    mine.map((r) => `<li><a href="${esc(r.url)}" target="_blank" rel="noopener noreferrer">${esc(r.name)}</a>` +
+      `<span class="count">${r.uploadedAt ? dateFmt(r.uploadedAt) : ""}</span></li>`).join("") +
+    `</ul>`;
 }
 
 // ---------- CSV export ----------
@@ -2780,4 +2953,7 @@ document.addEventListener("DOMContentLoaded", () => {
     if (e.target.id === "addExpenseOverlay") $("#addExpenseOverlay").hidden = true;
   });
   $("#addExpenseForm").addEventListener("submit", submitAddExpense);
+  // On change rather than on submit: the whole point is that the fields are
+  // filled in before the person reads them, so they can correct the read.
+  $("#aeReceipts").addEventListener("change", readReceiptIntoForm);
 });

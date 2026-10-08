@@ -274,6 +274,103 @@ export async function listEstimates(pit, locationId, { limit = 50 } = {}) {
 }
 
 // Contact task, assigned to a user. Tasks can only be assigned to users, not contacts.
+// ---- Receipts in the media library -----------------------------------------
+//
+// A receipt's file goes in the media library, and the JOIN to its expense lives
+// in the filename plus one folder. Not in a field, and not in an index.
+//
+// Not a field, because FILE_UPLOAD custom fields cannot be SET through the
+// records API -- probed on DEMO-HOMS 2026-10-07, ten value shapes, every one
+// 422 "We couldn't process file updates for Receipt Photo", and a bare url
+// string returns 200 and is silently dropped. A plain TEXT field would hold one
+// url and be overwritten by the second receipt, where the native field takes
+// five.
+//
+// Not a KV or D1 index, because that is a second copy of something the media
+// library already knows, free to drift from it. Here the library is the only
+// source of truth, and a one-folder listing is a real query: parentId filters
+// on both upload and list (verified) -- unlike `query`, which is accepted and
+// then ignored, returning everything.
+const RECEIPTS_FOLDER = "HOMS Receipts";
+const RECEIPT_SEP = "--";
+
+// The record id leads, so the id is always the part before the FIRST separator
+// even when the original filename contains one too. Slashes out, because the
+// name becomes a path segment; tail-truncated, because the extension is the
+// part worth keeping when a phone hands over a 200-character name.
+export const receiptFileName = (recordId, filename) =>
+  `${recordId}${RECEIPT_SEP}${String(filename || "receipt").replace(/[/\\]/g, "_").slice(-80)}`;
+
+export function recordIdFromReceipt(name) {
+  const at = String(name || "").indexOf(RECEIPT_SEP);
+  return at > 0 ? String(name).slice(0, at) : null;
+}
+
+export async function ensureReceiptsFolder(pit, locationId) {
+  const list = await ghlRequest(pit, "GET",
+    `/medias/files?altType=location&altId=${encodeURIComponent(locationId)}&type=folder&limit=100`);
+  const found = (list.files || []).find((f) => f.name === RECEIPTS_FOLDER);
+  if (found) return found._id || found.id;
+
+  const made = await ghlRequest(pit, "POST", "/medias/folder",
+    { name: RECEIPTS_FOLDER, altType: "location", altId: locationId });
+  const id = made.folder?._id || made._id || made.id;
+  if (!id) throw new Error("Could not create the receipts folder in the media library");
+  return id;
+}
+
+// Multipart, so not ghlRequest: that sets Content-Type: application/json, and
+// a FormData body needs fetch to set it so the boundary matches.
+export async function uploadReceipt(pit, locationId, { recordId, filename, bytes, contentType, parentId }) {
+  const name = receiptFileName(recordId, filename);
+  const fd = new FormData();
+  fd.append("file", new Blob([bytes], { type: contentType }), name);
+  fd.append("hosted", "false");
+  fd.append("name", name);
+  if (parentId) fd.append("parentId", parentId);
+
+  const res = await fetch(
+    `${BASE}/medias/upload-file?altType=location&altId=${encodeURIComponent(locationId)}`,
+    { method: "POST", headers: { Authorization: `Bearer ${pit}`, Version: VERSION }, body: fd });
+
+  const text = await res.text();
+  let json; try { json = text ? JSON.parse(text) : {}; } catch { json = { raw: text }; }
+  if (!res.ok) {
+    const err = new Error(json.message || `Receipt upload failed (${res.status})`);
+    err.status = res.status;
+    throw err;
+  }
+  return { documentId: json.fileId, url: json.url, name };
+}
+
+// Every receipt on the account, grouped by the expense it belongs to. Paged:
+// one page is 100 files, and a client that has been filing receipts for a year
+// has more than that -- a silent truncation would quietly stop showing the
+// oldest ones.
+export async function listReceipts(pit, locationId, parentId, { cap = 2000, pageLimit = 100 } = {}) {
+  const byRecord = {};
+  for (let offset = 0; offset < cap; offset += pageLimit) {
+    const out = await ghlRequest(pit, "GET",
+      `/medias/files?altType=location&altId=${encodeURIComponent(locationId)}` +
+      `&type=file&parentId=${encodeURIComponent(parentId)}&limit=${pageLimit}&offset=${offset}` +
+      `&sortBy=createdAt&sortOrder=desc`);
+    const files = out.files || [];
+    for (const f of files) {
+      const id = recordIdFromReceipt(f.name);
+      if (!id) continue; // something a person dropped in the folder by hand
+      (byRecord[id] ||= []).push({
+        url: f.url,
+        name: String(f.name).slice(id.length + RECEIPT_SEP.length),
+        contentType: f.contentType || null,
+        size: f.size ?? null,
+        uploadedAt: f.createdAt || null,
+      });
+    }
+    if (files.length < pageLimit) break;
+  }
+  return byRecord;
+}
+
 export async function createContactTask(pit, contactId, { title, body, dueDate, assignedTo }) {
   const res = await ghlRequest(pit, "POST", `/contacts/${contactId}/tasks`, {
     title,
