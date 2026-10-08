@@ -174,6 +174,25 @@ const I18N = {
     // the account writes, not free text, so they translate safely.
     "Connected": "Conectado",
     "Approved": "Aprobado",
+    // Transactions table headers. These were English on every Spanish account
+    // until now -- the table was built before the locale pass and nobody went
+    // back for it. Found by the completeness check in test-reservation-status.
+    "Guest": "Huésped",
+    "Stay Dates": "Fechas de Estancia",
+    "Payment": "Pago",
+    "OTA Channel": "Canal OTA",
+    "Booking Ref": "Ref. de Reserva",
+    // Same word in Spanish. Present rather than omitted, so the check that
+    // every header has an entry cannot be passed by leaving one out.
+    "Total": "Total",
+
+    // Reservation lifecycle. Feminine: the noun behind them is "la reserva".
+    "New": "Nueva",
+    "Active": "Activa",
+    "Departing": "Saliendo",
+    "Past": "Pasada",
+    "Cancelled": "Cancelada",
+    "Rescheduled": "Reprogramada",
     "Paid": "Pagado",
     "Pending": "Pendiente",
     "Needs Review": "Requiere Revisión",
@@ -401,6 +420,73 @@ const moneyIn = (n, cur) => {
 };
 const dash = (v) => (v === null || v === undefined || v === "" ? "—" : esc(v));
 const dateFmt = (v) => (v ? new Date(v).toLocaleDateString() : "—");
+
+// --- Reservation status -----------------------------------------------------
+// What a manager opens this for is which bookings need them today, and the
+// Transactions tab could not answer it: it showed a payment status and left the
+// reader to read two dates and work the rest out.
+//
+// Derived rather than stored, because it changes with the calendar and not with
+// the record. A booking that was "new" yesterday is "active" today, and nothing
+// wrote to it in between -- so a stored value would be stale by exactly the
+// amount nobody was watching.
+//
+// Compared as YYYY-MM-DD strings, never as Date objects. A date-only value
+// parses as UTC midnight, so in the DR (UTC-4) `new Date("2026-10-07")` is the
+// evening of the 6th locally: every status would be a day early for precisely
+// the people who use this.
+const dateOnly = (v) => /^(\d{4}-\d{2}-\d{2})/.exec(String(v ?? ""))?.[1] || null;
+
+// The reader's own day, not UTC's. A manager in Santo Domingo at 9pm is still
+// working on the 7th while UTC has already moved to the 8th.
+function todayISO(now = new Date()) {
+  const p = (n) => String(n).padStart(2, "0");
+  return `${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())}`;
+}
+
+// Cancelled and rescheduled are not derivable -- nothing in the data records
+// either. They come from booking_status, which the Worker writes on cancel and
+// on reschedule once that field exists on the Transactions object. Until then
+// this list is the vocabulary and the dates supply the rest.
+const STAY_STATUSES = ["new", "active", "departing", "past", "cancelled", "rescheduled"];
+const STAY_LABELS = {
+  new: "New", active: "Active", departing: "Departing",
+  past: "Past", cancelled: "Cancelled", rescheduled: "Rescheduled",
+};
+const STAY_TONES = {
+  new: "neutral", active: "good", departing: "warn",
+  past: "neutral", cancelled: "bad", rescheduled: "warn",
+};
+
+function stayStatus(t, today = todayISO()) {
+  // A written status outranks the dates: a cancelled booking still has a
+  // check-in next week, and the dates would call it "new".
+  const stored = String(t.bookingStatus || "").toLowerCase();
+  if (STAY_STATUSES.includes(stored)) return stored;
+
+  const inD = dateOnly(t.checkinDate), outD = dateOnly(t.checkoutDate);
+
+  // Departing comes first because a checkout today is also inside the stay,
+  // and "somebody leaves today" is the part that needs doing.
+  if (outD && outD === today) return "departing";
+  if (outD && outD < today) return "past";
+  if (inD && inD > today) return "new";
+  // Reached only when the checkout exists and is later than today, and the
+  // check-in exists and is not later -- i.e. in-house. No further comparison
+  // is needed, and adding one would be a clause no input can falsify.
+  if (inD && outD) return "active";
+  return null; // one date missing: nothing honest to say
+}
+
+const stayBadge = (s) => (s ? badge(STAY_LABELS[s], STAY_TONES[s]) : badge("", "neutral"));
+
+// Lifecycle order, not alphabetical: distinct() would offer Active, Departing,
+// New, Past, which is no order at all to a reader scanning for today's work.
+// Only statuses actually present are offered, so no filter can select nothing.
+function stayStatusOptions(list) {
+  const seen = new Set(list.map((t) => t.stayStatus).filter(Boolean));
+  return STAY_STATUSES.filter((s) => seen.has(s)).map((s) => ({ value: s, label: STAY_LABELS[s] }));
+}
 
 // Per-tenant color theming: each client's KV entry can set branding.primary;
 // tenants without one get the platform default (set server-side). Deriving a
@@ -1872,26 +1958,37 @@ function renderOta() {
 
 // ---------- Transactions ----------
 function renderTransactions() {
+  // Stamped onto the records because matchesFilters() and the filter bar both
+  // read fields off the record, and because one `today` for the whole pass
+  // keeps a render that straddles midnight internally consistent.
+  const today = todayISO();
+  DATA.transactions.forEach((t) => { t.stayStatus = stayStatus(t, today); });
+
   renderFilterableTab({
     tabKey: "transactions", panelId: "#panel-transactions", list: DATA.transactions,
     filterDefs: [
       { key: "propertyId", label: "Property", options: distinctPairs(DATA.transactions, "propertyId", "propertyName") },
+      { key: "stayStatus", label: "Status", options: stayStatusOptions(DATA.transactions) },
       { key: "otaChannelId", label: "OTA Channel", options: distinctPairs(DATA.transactions, "otaChannelId", "otaChannelName") },
       { key: "paymentStatus", label: "Payment", options: distinct(DATA.transactions, "paymentStatus") },
     ],
     dateField: "checkinDate",
-    headers: ["Transaction", "Guest", "Property", "OTA Channel", "Booking Ref", "Stay Dates", "Total", "Payment"],
+    // Guest, property, dates and status lead, in that order. The old first
+    // column was transaction_name, which the Worker builds as
+    // "<guest> — <check-in>" -- it repeated the next column and the one after
+    // it, so the widest column on the row carried nothing of its own.
+    headers: ["Guest", "Property", "Stay Dates", "Status", "Total", "Payment", "OTA Channel", "Booking Ref"],
     colspan: 8, emptyLabel: "transactions",
     rowFn: (t) => `
     <tr data-kind="transaction" data-id="${t.id}">
-      <td>${dash(t.name)}</td>
       <td>${dash(t.guestName)}</td>
       <td>${dash(t.propertyName)}</td>
-      <td>${dash(t.otaChannelName)}</td>
-      <td>${dash(t.bookingReference)}</td>
       <td>${dateFmt(t.checkinDate)} → ${dateFmt(t.checkoutDate)}</td>
+      <td>${stayBadge(t.stayStatus)}</td>
       <td>${money(t.bookingTotal)}</td>
       <td>${paymentBadge(t.paymentStatus)}</td>
+      <td>${dash(t.otaChannelName)}</td>
+      <td>${dash(t.bookingReference)}</td>
     </tr>`,
   });
 }
@@ -2449,7 +2546,8 @@ function openDetail(kind, id) {
   } else if (kind === "transaction") {
     title = record.name;
     rows = [
-      ["Guest", record.guestName], ["Property", record.propertyName], ["OTA Channel", record.otaChannelName],
+      ["Guest", record.guestName], ["Property", record.propertyName],
+      ["Status", STAY_LABELS[stayStatus(record)] || ""], ["OTA Channel", record.otaChannelName],
       ["Booking Reference", record.bookingReference], ["Check-in", dateFmt(record.checkinDate)],
       ["Check-out", dateFmt(record.checkoutDate)], ["Booking Total", money(record.bookingTotal)],
       ["Platform Fee", money(record.platformFee)], ["Net Payout", money(record.netPayout)],
