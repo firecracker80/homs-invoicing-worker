@@ -18,6 +18,45 @@ function prop(record, key, fallback = null) {
 
 // MONETORY fields are stored as {value, currency} objects -- verified live
 // against the GHL API (currency is literally the string "default").
+// The urls out of a FILE_UPLOAD field, whatever shape it arrives in.
+//
+// Deliberately permissive about the shape and strict about the result: every
+// branch has to produce an http(s) url or nothing. A field this code has never
+// seen populated is not the place to assume a shape, and the failure mode to
+// avoid is rendering "[object Object]" as a link.
+export function fileUrlsProp(record, key) {
+  const v = record.properties ? record.properties[key] : undefined;
+  if (v === null || v === undefined || v === "") return [];
+
+  const urlOf = (x) => {
+    if (typeof x === "string") return x.trim();
+    if (x && typeof x === "object") return String(x.url || x.fileUrl || x.link || "").trim();
+    return "";
+  };
+  const nameOf = (x, url) => {
+    const named = x && typeof x === "object" ? String(x.name || x.filename || "").trim() : "";
+    if (named) return named;
+    // Fall back to the last path segment, minus any query string.
+    try { return decodeURIComponent(new URL(url).pathname.split("/").pop()) || "receipt"; }
+    catch { return "receipt"; }
+  };
+
+  // A single value, an array of them, or a comma/newline separated string.
+  const items = Array.isArray(v) ? v
+    : typeof v === "string" ? v.split(/[\n,]+/)
+    : [v];
+
+  const out = [];
+  for (const item of items) {
+    const url = urlOf(item);
+    // http(s) only: this becomes an href, and a javascript: or data: value in a
+    // CRM field must not become a link the reader can click.
+    if (!/^https?:\/\//i.test(url)) continue;
+    out.push({ url, name: nameOf(item, url), source: "ghl_field" });
+  }
+  return out;
+}
+
 function moneyProp(record, key) {
   const v = record.properties ? record.properties[key] : undefined;
   if (v && typeof v === "object" && typeof v.value === "number") return v.value;
@@ -152,6 +191,10 @@ export function normalizeChecklist(record) {
   };
 }
 
+// The options on custom_objects.expenses.paid_by. Labelled for a reader rather
+// than shown as the stored key, the way category already is.
+const PAID_BY_LABELS = { owner: "Owner", manager: "Manager" };
+
 export function normalizeExpense(record) {
   const categoryKey = prop(record, "category");
   const reviewStatusKey = prop(record, "review_status");
@@ -160,6 +203,14 @@ export function normalizeExpense(record) {
     kind: "expense",
     name: prop(record, "expense_name", "(untitled expense)"),
     paidOn: prop(record, "paid_on"),
+    // Whose cost it is -- the single most consequential field on an expense,
+    // and the dashboard has never read it. An owner-borne cost is deducted
+    // from that owner's payout; a manager-borne one is the management
+    // company's own. The Worker requires it on create and manager-pl.js nets
+    // on it, so a record carrying it was being shown next to three dead
+    // reimbursement fields that describe a process which does not exist.
+    paidByKey: prop(record, "paid_by"),
+    paidBy: PAID_BY_LABELS[prop(record, "paid_by")] || prop(record, "paid_by"),
     categoryKey,
     category: categoryKey ? EXPENSE_CATEGORY_LABELS[categoryKey] || categoryKey : null,
     lineItemDescription: prop(record, "line_item_description"),
@@ -172,9 +223,31 @@ export function normalizeExpense(record) {
     exchangeRate: prop(record, "exchange_rate"),
     rateDate: prop(record, "rate_date"),
     rateSource: prop(record, "rate_source"),
-    canReimburse: moneyProp(record, "can_reimburse"),
-    alreadyReimbursed: moneyProp(record, "already_reimbursed"),
-    reimbursingNow: moneyProp(record, "reimbursing_now"),
+    // can_reimburse, already_reimbursed and reimbursing_now are NOT read.
+    //
+    // They describe a reimbursement cycle that does not exist: a stateside
+    // manager collects the booking income, subtracts the owner's costs, and
+    // sends the remainder -- an owner's cost is DEDUCTED FROM THEIR PAYOUT, it
+    // is never invoiced to them and never reimbursed. Paid By is the whole
+    // model. The fields are still on the object and three DEMO-HOMS records
+    // still carry values, so they are left in place rather than deleted;
+    // nothing reads them, here or in manager-pl.js.
+    //
+    // Receipts attached inside GHL, as opposed to through this dashboard.
+    //
+    // Two places a receipt can live, because only one of them is writable:
+    // FILE_UPLOAD fields cannot be SET through the records API (probed
+    // 2026-10-07, ten shapes, all 422), so the dashboard files its own uploads
+    // in a media-library folder instead. This reads the other half so the
+    // dashboard can show one list rather than half of one.
+    //
+    // UNVERIFIED on the way in: no expense record on any account has ever had a
+    // receipt attached, so whether GHL returns a populated FILE_UPLOAD field at
+    // all is unknown -- an empty one is simply omitted from `properties`. The
+    // shapes below are the ones GHL uses elsewhere for files; if it returns
+    // something else, this yields [] rather than throwing, and the folder half
+    // keeps working. One receipt attached by hand in the GHL UI settles it.
+    receiptPhotos: fileUrlsProp(record, "receipt_photo"),
     reviewStatusKey,
     reviewStatus: reviewStatusKey ? EXPENSE_REVIEW_STATUS_LABELS[reviewStatusKey] || reviewStatusKey : null,
     propertyId: relatedId(record, "custom_objects.properties"),
