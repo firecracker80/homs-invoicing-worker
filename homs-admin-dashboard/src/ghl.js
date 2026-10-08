@@ -170,6 +170,16 @@ export async function fetchTransactions(pit, locationId, { limit = 100 } = {}) {
 }
 
 // --- Services flow (src/services.js) -----------------------------------------
+// Restores a field's own constraints. The whole field is sent because
+// update-custom-field replaces it: `showInForms` is REQUIRED on this endpoint,
+// so omitting it silently flips whether the field appears in forms, and `name`
+// is echoed so a repair never renames anything -- which matters most on a
+// Spanish account, where the name is the translated label.
+export async function updateCustomField(pit, fieldId, body) {
+  const res = await ghlRequest(pit, "PUT", `/custom-fields/${encodeURIComponent(fieldId)}`, body);
+  return res.field || res;
+}
+
 // ---- Object schemas, for verifying a provisioned account --------------------
 // Read-only. The PIT lives on the Worker as a per-tenant secret, which is why
 // this belongs here and not in a local script: capturing a client account's

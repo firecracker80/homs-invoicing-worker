@@ -1,6 +1,7 @@
 import { fetchAllObjectRecords, fetchContacts, createObjectRecord, fetchAssociations, createRelation, fetchCustomValues,
   ensureReceiptsFolder, uploadReceipt, listReceipts, fetchObjectSchemas, fetchObjectFields } from "./ghl.js";
 import { fingerprint } from "./schema-fingerprint.js";
+import { updateCustomField } from "./ghl.js";
 // readClientCurrencySettings is already imported with the service handlers below.
 import { currencyKey, fetchRate, describeRate, round2 } from "./services.js";
 import {
@@ -199,6 +200,88 @@ async function handleSchemaFingerprint(request, env) {
     return Response.json({ error: err.message || "Unknown error" },
       { status: err.status && err.status >= 400 && err.status < 600 ? err.status : 502 });
   }
+}
+
+// Puts back the FILE_UPLOAD constraints a snapshot drops.
+//
+// Narrow on purpose: the caller names fields and the two constraint values, and
+// nothing else can be written through here. Each field is re-read first and
+// skipped unless it really is FILE_UPLOAD, so a mistyped key cannot reach
+// update-custom-field and rewrite something else.
+async function handleSchemaRepair(request, env) {
+  const denied = await requireProvision(request, env);
+  if (denied) return denied;
+
+  let body;
+  try { body = await request.json(); } catch { return Response.json({ error: "Invalid JSON body" }, { status: 400 }); }
+
+  const { locationId, repairs, apply = false } = body;
+  const { pit, error } = await resolveTenantPit(env, locationId);
+  if (error) return error;
+  if (!Array.isArray(repairs) || !repairs.length) {
+    return Response.json({ error: "repairs[] is required" }, { status: 400 });
+  }
+
+  // One read of the whole account, so each repair is checked against what is
+  // actually there rather than against what the caller believes.
+  const live = new Map();
+  try {
+    for (const o of (await fetchObjectSchemas(pit, locationId)).filter((x) => x.type === "USER_DEFINED")) {
+      for (const f of (await fetchObjectFields(pit, locationId, o.key)).fields) live.set(f.fieldKey, f);
+    }
+  } catch (err) {
+    return Response.json({ error: `Could not read the account's fields: ${err.message}` }, { status: 502 });
+  }
+
+  const planned = [];
+  const applied = [];
+  const skipped = [];
+  const failed = [];
+
+  for (const r of repairs) {
+    const f = live.get(r?.fieldKey);
+    if (!f) { skipped.push({ fieldKey: r?.fieldKey, reason: "no such field on this account" }); continue; }
+    if (f.dataType !== "FILE_UPLOAD") {
+      skipped.push({ fieldKey: r.fieldKey, reason: `not a FILE_UPLOAD field (${f.dataType})` });
+      continue;
+    }
+
+    const want = {
+      acceptedFormats: Array.isArray(r.acceptedFormats) ? r.acceptedFormats : [],
+      maxFileLimit: Number.isFinite(Number(r.maxFileLimit)) ? Number(r.maxFileLimit) : null,
+    };
+    const has = {
+      acceptedFormats: Array.isArray(f.acceptedFormats) ? f.acceptedFormats : [],
+      maxFileLimit: Number.isFinite(Number(f.maxFileLimit)) ? Number(f.maxFileLimit) : null,
+    };
+    if (String([...want.acceptedFormats].sort()) === String([...has.acceptedFormats].sort()) &&
+        want.maxFileLimit === has.maxFileLimit) {
+      skipped.push({ fieldKey: r.fieldKey, reason: "already correct" });
+      continue;
+    }
+
+    const payload = {
+      // Echoed, not changed. showInForms is required by the endpoint and name
+      // must survive a repair untouched -- on a translated account it is the
+      // Spanish label.
+      name: f.name,
+      showInForms: f.showInForms !== false,
+      acceptedFormats: want.acceptedFormats,
+      ...(want.maxFileLimit === null ? {} : { maxFileLimit: want.maxFileLimit }),
+    };
+    planned.push({ fieldKey: r.fieldKey, from: has, to: want });
+
+    if (!apply) continue;
+    try {
+      await updateCustomField(pit, f.id, payload);
+      applied.push({ fieldKey: r.fieldKey, from: has, to: want });
+    } catch (err) {
+      failed.push({ fieldKey: r.fieldKey, error: err.message });
+    }
+  }
+
+  return Response.json({ locationId, apply, planned, applied, skipped, failed },
+    { status: failed.length && !applied.length ? 502 : 200 });
 }
 
 // ---- Receipts ---------------------------------------------------------------
@@ -947,6 +1030,10 @@ export default {
     // dashboard gate below for the same reason as the intake webhook.
     if (url.pathname === "/api/schema/fingerprint" && request.method === "GET") {
       return handleSchemaFingerprint(request, env);
+    }
+
+    if (url.pathname === "/api/schema/repair" && request.method === "POST") {
+      return handleSchemaRepair(request, env);
     }
 
     if (url.pathname === "/api/onboarding/configure/plan" && request.method === "POST") {

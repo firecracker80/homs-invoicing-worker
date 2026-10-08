@@ -197,6 +197,57 @@ export function diffSchemas(expected, actual, { expectedAbsent = EXPECTED_ABSENT
   return { ok: failures.length === 0, failures, notes };
 }
 
+/**
+ * The subset of a diff that can be put right by writing to the account.
+ *
+ * Only FILE_UPLOAD constraints, because they are the only difference a
+ * snapshot is known to produce and the only one safe to fix blind: a missing
+ * FIELD or a moved option KEY needs a person, since writing one would be
+ * guessing at what records already hold.
+ *
+ * Verified on YV Guest Properties 2026-10-08, the first snapshot load ever
+ * checked: every object, field key and option key came through, and all three
+ * FILE_UPLOAD fields across two objects lost both acceptedFormats and
+ * maxFileLimit. Three for three, so this is how snapshots behave, not a flake.
+ */
+export function repairsFor(expected, actual) {
+  const out = [];
+  for (const [objectKey, e] of Object.entries(expected?.objects || {})) {
+    const a = actual?.objects?.[objectKey];
+    if (!a) continue; // a missing object is not repairable by writing a field
+
+    for (const [fieldKey, ef] of Object.entries(e.fields || {})) {
+      const af = a.fields?.[fieldKey];
+      if (!af) continue; // likewise a missing field
+      // Defence in depth, and an EQUIVALENT MUTANT: deleting this line changes
+      // no behaviour, because a non-upload field carries neither constraint, so
+      // both sides compare empty and nothing is proposed anyway. Kept because it
+      // states the intent at the only place a reader looks for it. The guard
+      // that actually bites is in handleSchemaRepair, which re-reads each field
+      // and refuses to write one that is not FILE_UPLOAD -- that one is tested.
+      if (ef.dataType !== "FILE_UPLOAD" || af.dataType !== "FILE_UPLOAD") continue;
+
+      const formatsDiffer = ef.acceptedFormats !== undefined &&
+        String(ef.acceptedFormats) !== String(af.acceptedFormats ?? []);
+      const limitDiffers = ef.maxFileLimit !== undefined &&
+        ef.maxFileLimit !== (af.maxFileLimit ?? null);
+      if (!formatsDiffer && !limitDiffers) continue;
+
+      out.push({
+        objectKey,
+        fieldKey,
+        // Both are sent together even when only one differs: update-custom-field
+        // takes the whole field, and sending half of a pair invites the other
+        // half to be reset to a default nobody chose.
+        acceptedFormats: ef.acceptedFormats ?? [],
+        maxFileLimit: ef.maxFileLimit ?? null,
+        was: { acceptedFormats: af.acceptedFormats ?? [], maxFileLimit: af.maxFileLimit ?? null },
+      });
+    }
+  }
+  return out;
+}
+
 /** Human-readable, grouped, failures first. */
 export function formatDiff({ ok, failures, notes }, { expectedLabel = "expected", actualLabel = "actual" } = {}) {
   const lines = [];
