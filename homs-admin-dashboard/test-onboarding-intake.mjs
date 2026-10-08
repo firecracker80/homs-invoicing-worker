@@ -127,15 +127,27 @@ const email = (o) => ({ messageType: "TYPE_EMAIL", threadId: "t1", conversationI
     seenUrl = String(url);
     return { ok: true, status: 200, text: async () => JSON.stringify({ messages: [{ id: "m1" }] }) };
   };
-  await listContactEmails("pit", "contact1", { limit: 3 });
+  await listContactEmails("pit", "contact1", { limit: 3, locationId: "LOC1" });
   const q = new URL(seenUrl).searchParams;
   assert.equal(q.get("channel"), "Email");
   assert.equal(q.get("contactId"), "contact1");
   assert.ok(Number(q.get("limit")) >= 10, "GHL 422s on a limit under 10, so it is floored");
 
+  // The endpoint is "Export messages BY LOCATION ID". Without it GHL answers
+  // 400 CONVERSATIONS_LOCATION_ID_REQUIRED -- which reads as "Location ID is
+  // required" to whoever called the Worker, as if their own request were
+  // malformed. Found 2026-10-08 on the first real onboarding run; verified
+  // live that the identical request is 400 without it and 200 with it.
+  assert.equal(q.get("locationId"), "LOC1", "the conversation's account is sent");
+
+  // Refused here rather than at GHL, because a call without it cannot succeed
+  // and the local message says which account is meant.
+  await assert.rejects(() => listContactEmails("pit", "c1", { limit: 3 }), /locationId/,
+    "a missing locationId fails locally with a useful message");
+
   globalThis.fetch = async () => ({ ok: false, status: 401, text: async () => JSON.stringify({ message: "bad token" }) });
-  await assert.rejects(() => listContactEmails("pit", "c1"), /bad token/);
-  console.log("7) Email listing floors the limit at GHL's minimum and surfaces its errors");
+  await assert.rejects(() => listContactEmails("pit", "c1", { locationId: "LOC1" }), /bad token/);
+  console.log("7) Email listing sends the location, floors the limit, and surfaces GHL's errors");
 }
 
 // ---- 8. cross-check never picks a winner ----------------------------------
