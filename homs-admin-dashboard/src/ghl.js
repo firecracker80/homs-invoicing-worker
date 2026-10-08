@@ -170,6 +170,22 @@ export async function fetchTransactions(pit, locationId, { limit = 100 } = {}) {
 }
 
 // --- Services flow (src/services.js) -----------------------------------------
+// ---- Object schemas, for verifying a provisioned account --------------------
+// Read-only. The PIT lives on the Worker as a per-tenant secret, which is why
+// this belongs here and not in a local script: capturing a client account's
+// schema from a laptop would mean exporting that secret.
+
+export async function fetchObjectSchemas(pit, locationId) {
+  const res = await ghlRequest(pit, "GET", `/objects/?locationId=${encodeURIComponent(locationId)}`);
+  return res.objects || [];
+}
+
+export async function fetchObjectFields(pit, locationId, objectKey) {
+  const res = await ghlRequest(pit, "GET",
+    `/custom-fields/object-key/${encodeURIComponent(objectKey)}?locationId=${encodeURIComponent(locationId)}`);
+  return { fields: res.fields || [], folders: res.folders || [] };
+}
+
 // Record/contact/estimate/invoice calls against a service vendor's own account
 // (RL Santana first). Shapes checked against describe_operation 2026-09-14.
 

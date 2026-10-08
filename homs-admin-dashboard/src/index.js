@@ -1,5 +1,6 @@
 import { fetchAllObjectRecords, fetchContacts, createObjectRecord, fetchAssociations, createRelation, fetchCustomValues,
-  ensureReceiptsFolder, uploadReceipt, listReceipts } from "./ghl.js";
+  ensureReceiptsFolder, uploadReceipt, listReceipts, fetchObjectSchemas, fetchObjectFields } from "./ghl.js";
+import { fingerprint } from "./schema-fingerprint.js";
 // readClientCurrencySettings is already imported with the service handlers below.
 import { currencyKey, fetchRate, describeRate, round2 } from "./services.js";
 import {
@@ -149,6 +150,55 @@ function buildManifest(locationId) {
       { src: "/icons/icon-512.png", sizes: "512x512", type: "image/png", purpose: "any" },
     ],
   };
+}
+
+// The object layer of one account, in a form that can be compared to another.
+//
+// Here rather than in tools-schema.mjs because a client's PIT is a Worker
+// secret: capturing a provisioned account from a laptop would mean exporting
+// it. The diff stays local -- this returns the fingerprint and
+// `tools-schema.mjs diff` holds it against the committed contract, so the
+// comparison logic has one home and one set of tests.
+//
+// Read-only, and gated by PROVISION_KEY rather than the dashboard login: this
+// is a provisioning tool, used by whoever just loaded a snapshot, and the
+// account being checked usually has no dashboard user yet.
+async function handleSchemaFingerprint(request, env) {
+  const denied = await requireProvision(request, env);
+  if (denied) return denied;
+
+  const locationId = new URL(request.url).searchParams.get("locationId");
+  const { pit, error } = await resolveTenantPit(env, locationId);
+  if (error) return error;
+
+  try {
+    const objects = await fetchObjectSchemas(pit, locationId);
+    const userDefined = objects.filter((o) => o.type === "USER_DEFINED");
+
+    // Sequential, not Promise.all: eight objects on a freshly provisioned
+    // account is not worth risking a rate limit over, and this runs once.
+    const fieldsByObject = {};
+    const unreadable = [];
+    for (const o of userDefined) {
+      try {
+        fieldsByObject[o.key] = await fetchObjectFields(pit, locationId, o.key);
+      } catch (err) {
+        // An object whose fields cannot be read is reported, not silently
+        // fingerprinted as having none -- which would read as "every field is
+        // missing" in the diff and send somebody looking in the wrong place.
+        unreadable.push({ objectKey: o.key, error: err.message });
+        fieldsByObject[o.key] = { fields: [] };
+      }
+    }
+
+    return Response.json({
+      ...fingerprint({ locationId, objects, fieldsByObject }),
+      ...(unreadable.length ? { unreadable } : {}),
+    });
+  } catch (err) {
+    return Response.json({ error: err.message || "Unknown error" },
+      { status: err.status && err.status >= 400 && err.status < 600 ? err.status : 502 });
+  }
 }
 
 // ---- Receipts ---------------------------------------------------------------
@@ -893,6 +943,10 @@ export default {
 
     // Both gated by PROVISION_KEY inside the handler, and placed above the
     // dashboard gate below for the same reason as the intake webhook.
+    if (url.pathname === "/api/schema/fingerprint" && request.method === "GET") {
+      return handleSchemaFingerprint(request, env);
+    }
+
     if (url.pathname === "/api/onboarding/configure/plan" && request.method === "POST") {
       return handleConfigure(request, env, { apply: false });
     }
