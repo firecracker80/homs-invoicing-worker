@@ -107,6 +107,11 @@ const I18N = {
       "Una foto o PDF. El primero se lee para llenar los campos siguientes — revísalos antes de guardar.",
     "Loading receipts…": "Cargando recibos…",
     "No receipt filed for this expense.": "No hay recibo archivado para este gasto.",
+    "in GHL": "en GHL",
+    "Paid By": "Pagado Por",
+    "Owner": "Propietario",
+    "Manager": "Administrador",
+    "Unattributed": "Sin Asignar",
     "Submit Expense": "Enviar Gasto",
     "Property": "Propiedad",
     "Paid On": "Fecha de Pago",
@@ -2065,6 +2070,15 @@ function renderChecklists() {
 }
 
 // ---------- Expenses ----------
+// Whose cost it is. An expense with no answer is the one worth noticing: it
+// counts against nobody and lands on a statement flagged, so it reads as a
+// warning rather than as a blank cell.
+function paidByBadge(key, label) {
+  if (key === "owner") return badge(label || "Owner", "neutral");
+  if (key === "manager") return badge(label || "Manager", "good");
+  return badge("Unattributed", "warn");
+}
+
 function reviewBadge(status) {
   if (status === "Approved") return badge("Approved", "good");
   if (status === "Needs Review") return badge("Needs Review", "warn");
@@ -2294,9 +2308,13 @@ function renderExpenses() {
       { key: "category", label: "Category", options: distinct(DATA.expenses, "category") },
       { key: "reviewStatus", label: "Review Status", options: distinct(DATA.expenses, "reviewStatus") },
       { key: "ownerContactId", label: "Owner", options: distinctPairs(DATA.expenses, "ownerContactId", "ownerContactName") },
+      // Whose cost it is. Worth filtering on more than most of this row: it is
+      // the difference between a deduction from an owner's payout and a cost
+      // the management company carries itself.
+      { key: "paidBy", label: "Paid By", options: distinct(DATA.expenses, "paidBy") },
     ],
     dateField: "paidOn",
-    headers: ["Expense", "Paid On", "Category", "Property", "Owner", "Amount", "Converted", "Review Status"],
+    headers: ["Expense", "Paid On", "Category", "Property", "Paid By", "Amount", "Converted", "Review Status"],
     colspan: 8, emptyLabel: "expenses",
     extraToolbarHtml: `<div class="toolbar" style="margin-bottom:12px"><button class="btn btn-primary" id="openAddExpense">+ Add Expense</button></div>`,
     rowFn: (e) => `
@@ -2305,7 +2323,7 @@ function renderExpenses() {
       <td>${dateFmt(e.paidOn)}</td>
       <td>${dash(e.category)}</td>
       <td>${dash(e.propertyName)}</td>
-      <td>${dash(e.ownerContactName)}</td>
+      <td>${paidByBadge(e.paidByKey, e.paidBy)}</td>
       <td>${moneyIn(e.amount, e.currency)}</td>
       <td${e.rateSource ? ` title="${esc(e.rateSource)}"` : ""}>${e.convertedAmount ? money(e.convertedAmount) : "—"}</td>
       <td>${reviewBadge(e.reviewStatus)}</td>
@@ -2752,8 +2770,7 @@ function openDetail(kind, id) {
       ["Paid On", dateFmt(record.paidOn)], ["Category", record.category],
       ["Description", record.lineItemDescription], ["Amount", moneyIn(record.amount, record.currency)],
       ["Converted", record.convertedAmount ? money(record.convertedAmount) : null], ["Exchange Rate", record.rateSource],
-      ["Can Reimburse", money(record.canReimburse)], ["Already Reimbursed", money(record.alreadyReimbursed)],
-      ["Reimbursing Now", money(record.reimbursingNow)], ["Review Status", record.reviewStatus],
+      ["Paid By", record.paidBy], ["Review Status", record.reviewStatus],
     ];
   } else if (kind === "inventory_item") {
     rows = [
@@ -2792,7 +2809,18 @@ async function paintReceipts(recordId) {
   // The drawer may have been closed, or another record opened, while that ran.
   if (!document.body.contains(host)) return;
 
-  const mine = all[recordId] || [];
+  // Both places a receipt can live, in one list.
+  //
+  // A receipt attached inside GHL lands in the record's own FILE_UPLOAD field;
+  // one filed from here lands in a media-library folder, because that field
+  // cannot be written by API. Which half a receipt is in says only where it was
+  // entered, which is no use to someone looking for the receipt -- so the
+  // reader gets one list and the provenance is a quiet label.
+  const record = DATA.expenses.find((e) => e.id === recordId);
+  const fromGhl = record?.receiptPhotos || [];
+  const fromHere = (all[recordId] || []).map((r) => ({ ...r, source: "dashboard" }));
+  const mine = [...fromGhl, ...fromHere];
+
   if (!mine.length) {
     host.innerHTML = `<p class="form-note">No receipt filed for this expense.</p>`;
     return;
@@ -2800,7 +2828,7 @@ async function paintReceipts(recordId) {
   host.innerHTML =
     `<h3>Receipts</h3><ul class="receipt-list">` +
     mine.map((r) => `<li><a href="${esc(r.url)}" target="_blank" rel="noopener noreferrer">${esc(r.name)}</a>` +
-      `<span class="count">${r.uploadedAt ? dateFmt(r.uploadedAt) : ""}</span></li>`).join("") +
+      `<span class="count">${esc(r.source === "ghl_field" ? "in GHL" : r.uploadedAt ? dateFmt(r.uploadedAt) : "")}</span></li>`).join("") +
     `</ul>`;
 }
 
