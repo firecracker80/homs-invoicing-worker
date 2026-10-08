@@ -132,6 +132,11 @@ const REPAIR = { fieldKey: "custom_objects.expenses.receipt_photo", acceptedForm
   assert.strictEqual(puts[0].body.showInForms, true, "required by the endpoint, so always sent");
   assert.deepStrictEqual(puts[0].body.acceptedFormats, [".jpg", ".pdf"]);
   assert.strictEqual(puts[0].body.maxFileLimit, 5);
+  // locationId travels in the BODY on this endpoint and is REJECTED in the
+  // query -- the opposite of the records endpoint. All three repairs failed
+  // with "LocationId can.t be undefined" on the first real run because of it.
+  assert.strictEqual(puts[0].body.locationId, LOC, "sent in the body, where this endpoint wants it");
+  assert.ok(!puts[0].id.includes("locationId="), "and never in the query, which this endpoint 422s on");
   console.log("5) Applying sends the constraints and echoes name and showInForms unchanged");
 }
 

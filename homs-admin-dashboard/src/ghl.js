@@ -175,8 +175,19 @@ export async function fetchTransactions(pit, locationId, { limit = 100 } = {}) {
 // so omitting it silently flips whether the field appears in forms, and `name`
 // is echoed so a repair never renames anything -- which matters most on a
 // Spanish account, where the name is the translated label.
-export async function updateCustomField(pit, fieldId, body) {
-  const res = await ghlRequest(pit, "PUT", `/custom-fields/${encodeURIComponent(fieldId)}`, body);
+export async function updateCustomField(pit, locationId, fieldId, body) {
+  if (!locationId) throw new Error("updateCustomField needs a locationId");
+  // In the BODY, and the query form is REJECTED -- the exact opposite of
+  // updateObjectRecord above, which takes locationId in the QUERY and refuses
+  // it in the body. Verified live on DEMO-HOMS 2026-10-08: query form 422
+  // "locationId must be a string", body form 200.
+  //
+  // GHL is not consistent about this between endpoints -- records want it in
+  // the query, custom fields in the body, record DELETE refuses it entirely,
+  // and the conversations export wants it in the query. Neither convention can
+  // be inferred from the other; each one has to be checked.
+  const res = await ghlRequest(pit, "PUT", `/custom-fields/${encodeURIComponent(fieldId)}`,
+    { ...body, locationId });
   return res.field || res;
 }
 

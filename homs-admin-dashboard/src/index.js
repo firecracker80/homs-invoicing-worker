@@ -273,7 +273,7 @@ async function handleSchemaRepair(request, env) {
 
     if (!apply) continue;
     try {
-      await updateCustomField(pit, f.id, payload);
+      await updateCustomField(pit, locationId, f.id, payload);
       applied.push({ fieldKey: r.fieldKey, from: has, to: want });
     } catch (err) {
       failed.push({ fieldKey: r.fieldKey, error: err.message });
