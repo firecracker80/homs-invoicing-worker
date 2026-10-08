@@ -74,6 +74,16 @@ export function fingerprint({ locationId, objects, fieldsByObject, capturedAt = 
         // Integrity.
         dataType: f.dataType || null,
         options: sortedKeys(f.options),
+        // A FILE_UPLOAD field carries its own constraints, and a snapshot does
+        // NOT reproduce them. Verified 2026-10-08 on the first real load:
+        // receipt_photo arrived on YV with neither acceptedFormats nor
+        // maxFileLimit, while DEMO-HOMS has [".jpeg",".jpg",".png",".pdf"] and
+        // 5. Without these captured, the check called that account identical
+        // when it was not -- this file's own blind spot, found on first use.
+        acceptedFormats: Array.isArray(f.acceptedFormats)
+          ? [...f.acceptedFormats].sort()
+          : f.acceptedFormats ? [String(f.acceptedFormats)] : [],
+        maxFileLimit: Number.isFinite(Number(f.maxFileLimit)) ? Number(f.maxFileLimit) : null,
         // Cosmetic.
         name: f.name ?? null,
         description: f.description ?? null,
@@ -149,6 +159,20 @@ export function diffSchemas(expected, actual, { expectedAbsent = EXPECTED_ABSENT
       if (ef.dataType !== af.dataType) {
         failures.push({ kind: "data_type_changed", object: key, field: fk,
           expected: ef.dataType, actual: af.dataType });
+      }
+      // An upload field that lost its constraints accepts files nothing
+      // downstream expects, or stops accepting the five it was built for.
+      // Older fingerprints predate these keys, so an undefined expectation is
+      // "not captured", not "expected empty" -- otherwise re-capturing the
+      // contract would be required before the check could run at all.
+      if (ef.acceptedFormats !== undefined &&
+          String(ef.acceptedFormats) !== String(af.acceptedFormats ?? [])) {
+        failures.push({ kind: "accepted_formats_changed", object: key, field: fk,
+          expected: ef.acceptedFormats, actual: af.acceptedFormats ?? [] });
+      }
+      if (ef.maxFileLimit !== undefined && ef.maxFileLimit !== (af.maxFileLimit ?? null)) {
+        failures.push({ kind: "max_file_limit_changed", object: key, field: fk,
+          expected: ef.maxFileLimit, actual: af.maxFileLimit ?? null });
       }
       // The one that would be silent and unrecoverable: option keys are stored
       // ON records (paid_by: "owner"). A key that moved orphans every record

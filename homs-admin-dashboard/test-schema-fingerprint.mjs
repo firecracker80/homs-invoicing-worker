@@ -176,6 +176,49 @@ const base = () => fingerprint({
   console.log("6) ota_channels may be absent; anything else missing still fails");
 }
 
+// ---- 6b. an upload field that lost its constraints FAILS --------------
+// Found on the first real load, and this file had the same blind spot: Yy
+// Guest Properties' receipt_photo arrived with neither acceptedFormats nor
+// maxFileLimit, while DEMO-HOMS has [".jpeg",".jpg",".png",".pdf"] and 5. The
+// check called that account identical, because it was not looking.
+{
+  const withUpload = (accepted, limit) => fingerprint({
+    locationId: "X",
+    objects: objectsOf(["custom_objects.expenses"]),
+    fieldsByObject: {
+      "custom_objects.expenses": {
+        fields: [{
+          fieldKey: "custom_objects.expenses.receipt_photo", dataType: "FILE_UPLOAD",
+          name: "Receipt Photo", acceptedFormats: accepted, maxFileLimit: limit,
+        }],
+      },
+    },
+  });
+
+  const expected = withUpload([".jpeg", ".jpg", ".png", ".pdf"], 5);
+  assert.deepStrictEqual(
+    expected.objects["custom_objects.expenses"].fields["custom_objects.expenses.receipt_photo"].acceptedFormats,
+    [".jpeg", ".jpg", ".pdf", ".png"], "captured and sorted, so order is not a false difference");
+
+  // What the snapshot actually produced: both constraints gone.
+  const r = diffSchemas(expected, withUpload(undefined, undefined));
+  assert.strictEqual(r.ok, false, "a dropped upload constraint must fail");
+  assert.ok(r.failures.some((x) => x.kind === "accepted_formats_changed"));
+  assert.ok(r.failures.some((x) => x.kind === "max_file_limit_changed" && x.expected === 5 && x.actual === null));
+
+  // Same constraints either way is clean, and order does not matter.
+  assert.strictEqual(diffSchemas(expected, withUpload([".pdf", ".png", ".jpg", ".jpeg"], 5)).ok, true);
+
+  // A fingerprint captured before these keys existed must still be usable:
+  // undefined means "not captured", not "expected empty".
+  const old = withUpload([".jpeg"], 5);
+  delete old.objects["custom_objects.expenses"].fields["custom_objects.expenses.receipt_photo"].acceptedFormats;
+  delete old.objects["custom_objects.expenses"].fields["custom_objects.expenses.receipt_photo"].maxFileLimit;
+  assert.strictEqual(diffSchemas(old, withUpload([".pdf"], 2)).ok, true,
+    "an older contract does not fail on a field it never recorded");
+  console.log("6b) An upload field that lost acceptedFormats or maxFileLimit fails");
+}
+
 // ---- 7. the report leads with what breaks data ------------------------
 {
   const broken = base();
