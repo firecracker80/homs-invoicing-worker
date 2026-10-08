@@ -34,7 +34,14 @@ export function fileUrlsProp(record, key) {
     return "";
   };
   const nameOf = (x, url) => {
-    const named = x && typeof x === "object" ? String(x.name || x.filename || "").trim() : "";
+    // meta.name is where GHL actually puts it. Confirmed 2026-10-08, the first
+    // time a receipt was attached through the object's own widget:
+    //   [{ url, meta: { name: "WhatsApp Image ... .jpeg", extension, size } }]
+    // Without it the reader fell through to the url's last segment, which is a
+    // uuid -- a correct link labelled with nothing a person could recognise.
+    const named = x && typeof x === "object"
+      ? String(x.meta?.name || x.name || x.filename || "").trim()
+      : "";
     if (named) return named;
     // Fall back to the last path segment, minus any query string.
     try { return decodeURIComponent(new URL(url).pathname.split("/").pop()) || "receipt"; }
