@@ -157,4 +157,38 @@ const getManifest = async (qs = "") => {
   console.log("6) The page points the manifest at its own account and handles the notch");
 }
 
+// ---- 7. one brand colour, in all three places it is written ---------
+// It is declared in the stylesheet, in a meta tag and in the manifest, and
+// nothing relates them. That is how the icon ended up teal while the interface
+// and the status bar stayed blue -- noticed by eye, which is not a mechanism.
+{
+  const css = fs.readFileSync("./public/styles.css", "utf8");
+  const html = fs.readFileSync("./public/index.html", "utf8");
+
+  const accent = css.match(/--accent:\s*(#[0-9a-f]{6})/i)?.[1]?.toLowerCase();
+  const meta = html.match(/name="theme-color" content="(#[0-9a-f]{6})"/i)?.[1]?.toLowerCase();
+  const manifest = (await getManifest()).body.theme_color.toLowerCase();
+
+  assert.ok(accent, "the stylesheet declares an accent");
+  assert.strictEqual(meta, accent, "the status bar colour matches the interface");
+  assert.strictEqual(manifest, accent, "and so does the installed app's");
+
+  // And it matches the mark it was taken from, sampled from the icon itself
+  // rather than copied from a note somewhere.
+  const icon = decodePng(fs.readFileSync("./public/icons/icon-512.png"));
+  const i = (Math.round(512 * 0.5) * 512 + Math.round(512 * 0.3)) * 4;
+  const disc = "#" + [icon.rgba[i], icon.rgba[i + 1], icon.rgba[i + 2]]
+    .map((c) => c.toString(16).padStart(2, "0")).join("");
+  assert.strictEqual(disc, accent, `the accent is the mark's own colour: icon says ${disc}`);
+
+  // White text sits on the accent -- buttons, the active language toggle -- so
+  // it has to stay readable if somebody changes it again.
+  const lin = (c) => { const s = c / 255; return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4; };
+  const [r, g, b] = [1, 3, 5].map((p) => parseInt(accent.slice(p, p + 2), 16));
+  const L = 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
+  const contrast = 1.05 / (L + 0.05);
+  assert.ok(contrast >= 4.5, `white on the accent is ${contrast.toFixed(2)}:1, below WCAG AA's 4.5`);
+  console.log(`7) One brand colour in all three places, taken from the mark, ${contrast.toFixed(2)}:1 against white`);
+}
+
 console.log("\nPASS — installable, opens standalone on the right account, with icons that exist.");

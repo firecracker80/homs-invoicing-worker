@@ -4,8 +4,14 @@
   --border: #e2e5ea;
   --text: #1a1d24;
   --muted: #6b7280;
-  --accent: #2f6fed;
-  --accent-weak: #eaf0fe;
+  /* The keyhole mark's own teal, so the interface and the home-screen icon are
+     the same brand. 4.60:1 against white -- WCAG AA for normal text, and a shade
+     better than the blue it replaces, which mattered because white text sits on
+     this in buttons and the active language toggle.
+     --accent-weak is a 10% tint of it, chosen to match the old one's lightness
+     so every surface using it keeps the weight it had. */
+  --accent: #028476;
+  --accent-weak: #e6f3f1;
   --good: #16794f;
   --good-bg: #e6f6ee;
   --warn: #92400e;
