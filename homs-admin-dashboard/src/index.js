@@ -1,7 +1,7 @@
 import { fetchAllObjectRecords, fetchContacts, createObjectRecord, fetchAssociations, createRelation, fetchCustomValues,
   ensureReceiptsFolder, uploadReceipt, listReceipts, fetchObjectSchemas, fetchObjectFields } from "./ghl.js";
 import { fingerprint } from "./schema-fingerprint.js";
-import { updateCustomField } from "./ghl.js";
+import { updateCustomField, createCustomField, deleteCustomField, countObjectRecords } from "./ghl.js";
 // readClientCurrencySettings is already imported with the service handlers below.
 import { currencyKey, fetchRate, describeRate, round2 } from "./services.js";
 import {
@@ -215,7 +215,7 @@ async function handleSchemaRepair(request, env) {
   let body;
   try { body = await request.json(); } catch { return Response.json({ error: "Invalid JSON body" }, { status: 400 }); }
 
-  const { locationId, repairs, apply = false } = body;
+  const { locationId, repairs, apply = false, recreate = false } = body;
   const { pit, error } = await resolveTenantPit(env, locationId);
   if (error) return error;
   if (!Array.isArray(repairs) || !repairs.length) {
@@ -235,8 +235,13 @@ async function handleSchemaRepair(request, env) {
 
   const planned = [];
   const applied = [];
+  const recreated = [];
   const skipped = [];
   const failed = [];
+  const lost = [];
+  // Record counts are per object and only fetched when a delete is actually on
+  // the table, so an account that needs no recreate pays nothing for the guard.
+  const counts = new Map();
 
   for (const r of repairs) {
     const f = live.get(r?.fieldKey);
@@ -275,13 +280,67 @@ async function handleSchemaRepair(request, env) {
     try {
       await updateCustomField(pit, locationId, f.id, payload);
       applied.push({ fieldKey: r.fieldKey, from: has, to: want });
+      continue;
     } catch (err) {
-      failed.push({ fieldKey: r.fieldKey, error: err.message });
+      // An update that fails is not automatically a field to destroy. A
+      // snapshot-created FILE_UPLOAD field arrives WITHOUT maxFileLimit, which
+      // create-custom-field refuses to make and update then 500s on, so the
+      // field cannot be put right in place. That is the only case worth
+      // deleting for, and it is reached only after the gentle path has
+      // actually failed -- never predicted from the field's shape.
+      if (!recreate) {
+        failed.push({ fieldKey: r.fieldKey, error: err.message, hint: "pass recreate:true to delete and rebuild this field" });
+        continue;
+      }
+
+      // Deleting a custom field takes its stored values with it. An object
+      // holding records is refused outright: a guardrail is not worth data.
+      let count;
+      try {
+        count = counts.has(f.objectKey) ? counts.get(f.objectKey)
+          : (counts.set(f.objectKey, await countObjectRecords(pit, locationId, f.objectKey)), counts.get(f.objectKey));
+      } catch (e) {
+        failed.push({ fieldKey: r.fieldKey, error: `could not count records before deleting: ${e.message}` });
+        continue;
+      }
+      if (count > 0) {
+        failed.push({ fieldKey: r.fieldKey, error: err.message,
+          hint: `${f.objectKey} holds ${count} record(s); deleting this field would take its values with it. Fix it in the GHL UI instead.` });
+        continue;
+      }
+
+      // The definition needed to put it back, captured BEFORE the delete so a
+      // failed create still leaves a recipe behind rather than a hole.
+      const definition = {
+        name: f.name,
+        fieldKey: f.fieldKey,
+        objectKey: f.objectKey,
+        dataType: f.dataType,
+        showInForms: f.showInForms !== false,
+        parentId: f.parentId,
+        acceptedFormats: want.acceptedFormats,
+        ...(want.maxFileLimit === null ? {} : { maxFileLimit: want.maxFileLimit }),
+      };
+      try {
+        await deleteCustomField(pit, locationId, f.id);
+      } catch (e) {
+        failed.push({ fieldKey: r.fieldKey, error: `update failed (${err.message}) and delete failed (${e.message}); field untouched` });
+        continue;
+      }
+      try {
+        const made = await createCustomField(pit, locationId, definition);
+        recreated.push({ fieldKey: r.fieldKey, from: has, to: want, newId: made?.id ?? null,
+          note: "position is reassigned on create; GHL does not accept one" });
+      } catch (e) {
+        // The dangerous outcome, and the only one that loses something. The
+        // definition travels with the error so it can be put back by hand.
+        lost.push({ fieldKey: r.fieldKey, error: e.message, definition });
+      }
     }
   }
 
-  return Response.json({ locationId, apply, planned, applied, skipped, failed },
-    { status: failed.length && !applied.length ? 502 : 200 });
+  return Response.json({ locationId, apply, recreate, planned, applied, recreated, skipped, failed, ...(lost.length ? { lost } : {}) },
+    { status: lost.length ? 500 : (failed.length && !applied.length && !recreated.length ? 502 : 200) });
 }
 
 // ---- Receipts ---------------------------------------------------------------

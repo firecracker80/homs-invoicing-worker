@@ -191,6 +191,23 @@ export async function updateCustomField(pit, locationId, fieldId, body) {
   return res.field || res;
 }
 
+export async function createCustomField(pit, locationId, body) {
+  const res = await ghlRequest(pit, "POST", "/custom-fields/", { ...body, locationId });
+  return res.field || res;
+}
+
+export async function deleteCustomField(pit, locationId, fieldId) {
+  return ghlRequest(pit, "DELETE", `/custom-fields/${encodeURIComponent(fieldId)}?locationId=${encodeURIComponent(locationId)}`);
+}
+
+// How many records an object holds. Used before deleting a field, because
+// deleting a custom field in GHL takes its stored values with it.
+export async function countObjectRecords(pit, locationId, objectKey) {
+  const res = await ghlRequest(pit, "POST", `/objects/${objectKey}/records/search`,
+    { locationId, page: 1, pageLimit: 1 });
+  return Number(res.total ?? (res.records || []).length);
+}
+
 // ---- Object schemas, for verifying a provisioned account --------------------
 // Read-only. The PIT lives on the Worker as a per-tenant secret, which is why
 // this belongs here and not in a local script: capturing a client account's
