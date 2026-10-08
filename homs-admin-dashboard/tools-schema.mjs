@@ -1,7 +1,13 @@
 // Capture one account's object layer, or compare two captures.
 //
 //   node tools-schema.mjs capture <locationId> [out.json]     # needs a PIT
+//   node tools-schema.mjs fetch <locationId> [out.json]       # via the Worker
 //   node tools-schema.mjs diff <expected.json> <actual.json>
+//
+// `fetch` is the one to use for a client account: the Worker already holds that
+// tenant's PIT as a secret, so nothing has to be exported to run the check.
+// `capture` remains for an account whose PIT you legitimately hold, DEMO-HOMS
+// being the one that matters -- it is how the committed contract is made.
 //
 // The PIT comes from GHL_PIT, or from --pit-file <tenant.json> (the ghlPit field
 // of a tenant record). Never passed on the command line, where it would land in
@@ -62,7 +68,32 @@ async function capture(locationId) {
   return fingerprint({ locationId, objects, fieldsByObject });
 }
 
-if (cmd === "capture") {
+if (cmd === "fetch") {
+  const [locationId, out] = args;
+  if (!locationId) throw new Error("usage: fetch <locationId> [out.json]");
+  const base = flag("worker") || process.env.DASHBOARD_URL ||
+    "https://homs-admin-dashboard.yari-058.workers.dev";
+  const key = process.env.PROVISION_KEY;
+  if (!key) throw new Error("set PROVISION_KEY to call the Worker");
+
+  const res = await fetch(`${base}/api/schema/fingerprint?locationId=${encodeURIComponent(locationId)}`,
+    { headers: { Authorization: `Bearer ${key}` } });
+  const text = await res.text();
+  if (!res.ok) throw new Error(`${res.status}: ${text.slice(0, 300)}`);
+  const fp = JSON.parse(text);
+  if (fp.unreadable) console.error(`  ! ${fp.unreadable.length} object(s) unreadable: ` +
+    fp.unreadable.map((u) => u.objectKey).join(", "));
+
+  const json = JSON.stringify(fp, null, 2) + "\n";
+  if (out) {
+    await fs.writeFile(out, json);
+    const objs = Object.keys(fp.objects);
+    console.log(`${out}: ${objs.length} objects, ` +
+      `${objs.reduce((n, k) => n + Object.keys(fp.objects[k].fields).length, 0)} fields`);
+  } else {
+    process.stdout.write(json);
+  }
+} else if (cmd === "capture") {
   const [locationId, out] = args;
   if (!locationId) throw new Error("usage: capture <locationId> [out.json]");
   const fp = await capture(locationId);
@@ -86,6 +117,11 @@ if (cmd === "capture") {
   // Non-zero only on integrity failures, so this can gate a provisioning step.
   process.exit(result.ok ? 0 : 1);
 } else {
-  console.log("usage:\n  node tools-schema.mjs capture <locationId> [out.json] [--pit-file t.json]\n  node tools-schema.mjs diff <expected.json> <actual.json>");
+  console.log([
+    "usage:",
+    "  node tools-schema.mjs fetch   <locationId> [out.json]   # via the Worker, needs PROVISION_KEY",
+    "  node tools-schema.mjs capture <locationId> [out.json] [--pit-file t.json]",
+    "  node tools-schema.mjs diff    <expected.json> <actual.json>",
+  ].join("\n"));
   process.exit(2);
 }
