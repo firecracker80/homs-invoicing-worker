@@ -1,4 +1,5 @@
-import { fetchAllObjectRecords, fetchContacts, createObjectRecord, fetchAssociations, createRelation, fetchCustomValues } from "./ghl.js";
+import { fetchAllObjectRecords, fetchContacts, createObjectRecord, fetchAssociations, createRelation, fetchCustomValues,
+  ensureReceiptsFolder, uploadReceipt, listReceipts } from "./ghl.js";
 import {
   normalizeProperty,
   normalizeOtaChannel,
@@ -15,7 +16,10 @@ import { invoicingFetch } from "./invoicing.js";
 import { provision } from "./provision.js";
 import { handleVendorData } from "./vendor.js";
 import { mapCsvRows, loadExistingExpenses, importRows } from "./expenses-import.js";
-import { extractFromFile, rowsFromExtraction, estimateCost, resolveModel, MODELS, MAX_FILE_BYTES } from "./receipt-extract.js";
+import {
+  extractFromFile, rowsFromExtraction, expenseFromExtraction, estimateCost,
+  resolveModel, resolveProfile, MODELS, MAX_FILE_BYTES, FILE_TYPES,
+} from "./receipt-extract.js";
 import { parsePortfolio, loadExistingPropertyNames, importProperties } from "./portfolio-import.js";
 import { listContactEmails, findWorkbookReply, downloadWorkbook, crossCheck, saveIntake, loadIntake, mergeIntake, fetchLatestSubmission } from "./onboarding-intake.js";
 import { getContact } from "./ghl.js";
@@ -143,6 +147,133 @@ function buildManifest(locationId) {
       { src: "/icons/icon-512.png", sizes: "512x512", type: "image/png", purpose: "any" },
     ],
   };
+}
+
+// ---- Receipts ---------------------------------------------------------------
+// Three routes, and the division between them is the point: reading a receipt
+// stores nothing, and storing one reads nothing. Either is useful without the
+// other -- a receipt can be read to fill a form that is then corrected by hand,
+// and one can be attached to an expense recorded weeks ago.
+
+// Read a receipt into the fields of ONE expense, for prefilling a form. Nothing
+// is written anywhere. The property chart of accounts, not the operations one:
+// a plumbing invoice has nowhere to go in "platform / infrastructure / telecom".
+async function handleReadReceipt(request, env) {
+  const body = await request.json();
+  const { locationId, filename, mediaType, data } = body;
+
+  const { tenant, error } = await resolveTenantPit(env, locationId);
+  if (error) return error;
+
+  if (typeof data !== "string" || !data) {
+    return Response.json({ error: "data (base64) is required" }, { status: 400 });
+  }
+  if (!FILE_TYPES.includes(mediaType)) {
+    return Response.json({ error: `Unsupported file type ${mediaType || "(none)"}. Use a JPEG, PNG, WebP or PDF.` }, { status: 400 });
+  }
+  // Base64 carries 3 bytes per 4 characters; checked before it goes anywhere.
+  if (Math.floor((data.length * 3) / 4) > MAX_FILE_BYTES) {
+    return Response.json({ error: "That file is too large (5 MB max). Photograph the receipt again at a lower resolution." }, { status: 413 });
+  }
+
+  try {
+    const model = resolveModel(body.model, resolveModel(tenant.receiptModel));
+    const extracted = await extractFromFile(env.ANTHROPIC_API_KEY, { mediaType, data }, {
+      model,
+      profile: "property",
+      ...(env.ANTHROPIC_WORKSPACE_ID ? { workspaceId: env.ANTHROPIC_WORKSPACE_ID } : {}),
+    });
+    const out = expenseFromExtraction(extracted, { profile: "property" });
+    const cost = estimateCost(model, extracted.usage);
+
+    // Not a receipt: 422 with the reason, so the form can say what it was
+    // looking at instead of silently filling nothing in.
+    if (!out.ok) return Response.json({ ...out, filename, model, cost }, { status: 422 });
+    return Response.json({ ...out, filename, model, cost });
+  } catch (err) {
+    return Response.json({ error: err.message || "Unknown error" },
+      { status: err.status && err.status >= 400 && err.status < 600 ? err.status : 502 });
+  }
+}
+
+// Attach files to an expense that already exists. Separate from creating one so
+// the create path keeps its contract, and so a receipt can be added later.
+async function handleUploadReceipt(request, env) {
+  const body = await request.json();
+  const { locationId, recordId, files } = body;
+
+  const { pit, error } = await resolveTenantPit(env, locationId);
+  if (error) return error;
+
+  // The record id becomes the filename prefix and therefore the whole join, so
+  // it is checked for shape rather than trusted: a name with a separator or a
+  // slash in it would split wrong on the way back out.
+  if (!recordId || !/^[A-Za-z0-9]{6,64}$/.test(String(recordId))) {
+    return Response.json({ error: "recordId is required and must be a GHL record id" }, { status: 400 });
+  }
+  if (!Array.isArray(files) || files.length === 0) {
+    return Response.json({ error: "files is required" }, { status: 400 });
+  }
+  // The native field's own limit, kept here so both paths behave the same.
+  if (files.length > 5) {
+    return Response.json({ error: "Five receipts per expense is the limit." }, { status: 400 });
+  }
+  for (const f of files) {
+    if (!FILE_TYPES.includes(f?.mediaType)) {
+      return Response.json({ error: `Unsupported file type ${f?.mediaType || "(none)"}. Use a JPEG, PNG, WebP or PDF.` }, { status: 400 });
+    }
+    if (typeof f.data !== "string" || !f.data) {
+      return Response.json({ error: "Every file needs data (base64)" }, { status: 400 });
+    }
+    if (Math.floor((f.data.length * 3) / 4) > MAX_FILE_BYTES) {
+      return Response.json({ error: `${f.filename || "That file"} is too large (5 MB max).` }, { status: 413 });
+    }
+  }
+
+  try {
+    const parentId = await ensureReceiptsFolder(pit, locationId);
+    const uploaded = [];
+    const failed = [];
+    for (const f of files) {
+      try {
+        uploaded.push(await uploadReceipt(pit, locationId, {
+          recordId, filename: f.filename, bytes: base64ToBytes(f.data),
+          contentType: f.mediaType, parentId,
+        }));
+      } catch (err) {
+        // One bad file out of five must not lose the other four, and the
+        // expense itself is already saved by this point.
+        failed.push({ filename: f.filename || null, error: err.message || "upload failed" });
+      }
+    }
+    return Response.json({ uploaded, failed }, { status: failed.length && !uploaded.length ? 502 : 200 });
+  } catch (err) {
+    return Response.json({ error: err.message || "Unknown error" },
+      { status: err.status && err.status >= 400 && err.status < 600 ? err.status : 502 });
+  }
+}
+
+// Every receipt on the account, keyed by the expense it belongs to.
+async function handleListReceipts(request, env) {
+  const locationId = new URL(request.url).searchParams.get("locationId");
+  const { pit, error } = await resolveTenantPit(env, locationId);
+  if (error) return error;
+  try {
+    const parentId = await ensureReceiptsFolder(pit, locationId);
+    return Response.json({ receipts: await listReceipts(pit, locationId, parentId) });
+  } catch (err) {
+    // An account that has never filed a receipt is not a failure; it has none.
+    return Response.json({ receipts: {}, note: err.message || "could not read the media library" });
+  }
+}
+
+// atob gives one character per byte; Uint8Array.from reads the code units back
+// out. Done here rather than in ghl.js so the GHL client keeps taking bytes.
+function base64ToBytes(b64) {
+  const bin = atob(String(b64).includes(",") ? String(b64).split(",").pop() : b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
 }
 
 async function handleCreateExpense(request, env) {
@@ -874,6 +1005,18 @@ export default {
 
     if (url.pathname === "/api/expenses/parse-file" && request.method === "POST") {
       return handleReceiptParse(request, env);
+    }
+
+    if (url.pathname === "/api/expenses/read-receipt" && request.method === "POST") {
+      return handleReadReceipt(request, env);
+    }
+
+    if (url.pathname === "/api/expenses/receipt" && request.method === "POST") {
+      return handleUploadReceipt(request, env);
+    }
+
+    if (url.pathname === "/api/expenses/receipts" && request.method === "GET") {
+      return handleListReceipts(request, env);
     }
 
     if (url.pathname === "/api/expenses/import" && request.method === "POST") {

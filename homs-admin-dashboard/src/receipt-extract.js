@@ -53,7 +53,55 @@ export const FILE_TYPES = [...IMAGE_TYPES, "application/pdf"];
 // vendor PDF should ever be, and base64 inflates it by a third on the way out.
 export const MAX_FILE_BYTES = 5 * 1024 * 1024;
 
-const SCHEMA = {
+// Which chart of accounts the receipt is being read into.
+//
+// "Profile" rather than "book": resolveVendorBook() in index.js already means
+// WHICH ACCOUNT'S P&L (HOMS or DTCS), and this is a different axis entirely --
+// which vocabulary of categories the reader is allowed to choose from.
+//
+// It has to be a parameter because naming the categories is most of what makes
+// the read accurate. The original comment here was right that without them
+// every cloud bill lands in "software"; the same holds in reverse, and a
+// plumbing invoice read against the operations vocabulary has nowhere to go
+// but "other". The two charts share no category at all.
+export const PROFILES = {
+  // DTCS's own costs -- what it spends to run HOMS. The P&L importer's book.
+  operations: {
+    categories: CATEGORIES,
+    business: "a small software and consulting business in the Dominican Republic",
+    categoryLine:
+      "platform (GoHighLevel and its usage), infrastructure (hosting, domains, Cloudflare), " +
+      "software (other subscriptions), telecom (phone, WhatsApp, A2P), office (rent, internet, utilities), " +
+      "contractors (professional services, accounting, legal), marketing (ads), " +
+      "payment_fees (processing fees), other",
+  },
+  // One property's own costs, borne by its owner or by the manager. These are
+  // the live options on custom_objects.expenses.category -- when that field
+  // changes, this list has to change with it, and the test asserts they match.
+  property: {
+    categories: [
+      "maintenance_repairs", "cleaning_supplies", "utilities", "pest_control", "landscaping",
+      "insurance", "property_tax", "management_fee", "software_subscriptions", "miscellaneous", "other",
+    ],
+    business:
+      "a short-term rental management company in the Dominican Republic, recording what was spent " +
+      "on one of the properties it manages",
+    categoryLine:
+      "maintenance_repairs (plumbing, electrical, appliances, construction, building repairs), " +
+      "cleaning_supplies (consumables and cleaning products -- NOT the cleaner's labour), " +
+      "utilities (water, power, gas, internet at the property), pest_control, " +
+      "landscaping (gardening, pool service), insurance, property_tax, management_fee, " +
+      "software_subscriptions, miscellaneous, other",
+  },
+};
+
+// The profile arrives from the browser, so anything unknown falls back rather
+// than reaching the API as an empty category enum.
+export function resolveProfile(requested) {
+  return Object.hasOwn(PROFILES, String(requested)) ? String(requested) : "operations";
+}
+
+const schemaFor = (profile) => ({
   type: "object",
   properties: {
     is_expense_document: {
@@ -75,7 +123,7 @@ const SCHEMA = {
           amount: { type: ["number", "null"], description: "The total actually charged, after tax and tip. Null if not legible." },
           currency: { type: ["string", "null"], enum: [...CURRENCIES, null], description: "usd or dop. Null if not stated." },
           paid_on: { type: ["string", "null"], description: "Date of the charge as YYYY-MM-DD. Null if not legible." },
-          category: { type: "string", enum: CATEGORIES },
+          category: { type: "string", enum: PROFILES[profile].categories },
           recurrence: { type: "string", enum: RECURRENCES, description: "monthly or annual only when the document itself says so (a subscription period, 'renews', 'monthly plan')." },
           billing_period: { type: ["string", "null"], description: "The period the charge covers, e.g. 2026-09, if stated." },
           notes: { type: ["string", "null"], description: "Anything a human would need to place this charge. Null if nothing." },
@@ -88,40 +136,38 @@ const SCHEMA = {
   },
   required: ["is_expense_document", "document_note", "expenses"],
   additionalProperties: false,
-};
+});
 
-// Naming the book's own categories matters more than any general instruction:
-// without them every cloud bill lands in "software" and the P&L stops separating
-// the platform spend that is the whole point of tracking it.
-const PROMPT = `Read this document and record the business expenses on it.
+const promptFor = (profile) => `Read this document and record the business expenses on it.
 
-It belongs to a small software and consulting business in the Dominican Republic. Documents arrive in Spanish and English, and amounts in Dominican pesos (RD$, DOP) or US dollars (US$, USD).
+It belongs to ${PROFILES[profile].business}. Documents arrive in Spanish and English, and amounts in Dominican pesos (RD$, DOP) or US dollars (US$, USD).
 
 Rules:
 - Record the amount actually charged: the total after tax, tip and discounts. Not a subtotal, not a balance, not an amount due later.
 - Dates: use the date of the charge, formatted YYYY-MM-DD. Dominican documents usually write day first (25/09/2026 is 25 September). If the year is missing or the date is unreadable, use null -- never guess a date.
 - If a figure is not legible, use null rather than a best guess, and set confidence to "low".
-- Categories: platform (GoHighLevel and its usage), infrastructure (hosting, domains, Cloudflare), software (other subscriptions), telecom (phone, WhatsApp, A2P), office (rent, internet, utilities), contractors (professional services, accounting, legal), marketing (ads), payment_fees (processing fees), other.
+- Categories: ${PROFILES[profile].categoryLine}.
 - recurrence is one_off unless the document itself states a subscription or billing period.
 - A refund or credit note is not an expense: leave it out and say so in document_note.
 - If this is not a receipt, invoice, bill or payment confirmation, set is_expense_document to false and return an empty expenses array.`;
 
 /** The content blocks for one file. Images and PDFs take different block types. */
-export function contentBlocksFor({ mediaType, data }) {
+export function contentBlocksFor({ mediaType, data }, profile = "operations") {
   const block = mediaType === "application/pdf"
     ? { type: "document", source: { type: "base64", media_type: mediaType, data } }
     : { type: "image", source: { type: "base64", media_type: mediaType, data } };
   // The file goes first: the model reads better when the document precedes the ask.
-  return [block, { type: "text", text: PROMPT }];
+  return [block, { type: "text", text: promptFor(resolveProfile(profile)) }];
 }
 
-export function requestBodyFor(file, model = DEFAULT_MODEL) {
+export function requestBodyFor(file, model = DEFAULT_MODEL, profile = "operations") {
+  const p = resolveProfile(profile);
   return {
     model,
     max_tokens: 8000,
     // Extraction, not reasoning. Low effort keeps the cost near a cent a receipt.
-    output_config: { effort: "low", format: { type: "json_schema", schema: SCHEMA } },
-    messages: [{ role: "user", content: contentBlocksFor(file) }],
+    output_config: { effort: "low", format: { type: "json_schema", schema: schemaFor(p) } },
+    messages: [{ role: "user", content: contentBlocksFor(file, p) }],
   };
 }
 
@@ -133,7 +179,7 @@ export class ExtractError extends Error {
 }
 
 /** Calls Claude and returns the parsed object. No GHL, no KV -- testable alone. */
-export async function extractFromFile(apiKey, file, { model = DEFAULT_MODEL, workspaceId = null } = {}) {
+export async function extractFromFile(apiKey, file, { model = DEFAULT_MODEL, workspaceId = null, profile = "operations" } = {}) {
   if (!apiKey) throw new ExtractError("Reading receipts is not configured: the ANTHROPIC_API_KEY secret is not set on this Worker.", 503);
   if (!FILE_TYPES.includes(file.mediaType)) throw new ExtractError(`Unsupported file type ${file.mediaType}. Use a JPEG, PNG, GIF, WebP or PDF.`, 400);
   if (!file.data) throw new ExtractError("Empty file", 400);
@@ -150,7 +196,7 @@ export async function extractFromFile(apiKey, file, { model = DEFAULT_MODEL, wor
       "anthropic-version": API_VERSION,
       ...(workspaceId ? { "anthropic-workspace-id": workspaceId } : {}),
     },
-    body: JSON.stringify(requestBodyFor(file, model)),
+    body: JSON.stringify(requestBodyFor(file, model, profile)),
   });
   const text = await res.text();
   if (!res.ok) {
@@ -181,6 +227,55 @@ const clean = (v) => {
   const s = typeof v === "string" ? v.trim() : v;
   return s === "" || s === undefined ? null : s;
 };
+
+/**
+ * One expense out of a read, for prefilling a form someone is looking at.
+ *
+ * Deliberately NOT rowsFromExtraction: that exists to feed the import queue and
+ * carries the duplicate check, the include/hold-back rules and a line number,
+ * none of which mean anything when a person is filling in a single expense and
+ * can see what they are about to save.
+ *
+ * Takes the FIRST expense only. A paper receipt is one charge; a multi-charge
+ * statement belongs in the import queue, and `extra` says so rather than
+ * silently dropping the rest.
+ */
+export function expenseFromExtraction(extracted, { profile = "operations" } = {}) {
+  if (!extracted?.is_expense_document || !Array.isArray(extracted.expenses) || extracted.expenses.length === 0) {
+    return {
+      ok: false,
+      error: "not_an_expense_document",
+      message: clean(extracted?.document_note) || "This does not look like a receipt, invoice or bill.",
+    };
+  }
+
+  const e = extracted.expenses[0];
+  const categories = PROFILES[resolveProfile(profile)].categories;
+  const amount = Number(e.amount);
+  // A vendor is worth having in the name -- "Pool pump" alone does not say who
+  // was paid, and the name is the only free text on the record besides the
+  // description. Never the vendor alone: the schema already forbids that.
+  const vendor = clean(e.vendor);
+
+  return {
+    ok: true,
+    expense: {
+      name: clean(e.name) || null,
+      vendor,
+      // null, not 0: a receipt whose total could not be read must leave the
+      // field empty for a person to fill, not prefill a plausible zero.
+      amount: Number.isFinite(amount) && amount > 0 ? Math.round(amount * 100) / 100 : null,
+      currency: clean(e.currency) ? String(e.currency).toLowerCase() : null,
+      paidOn: /^\d{4}-\d{2}-\d{2}$/.test(String(e.paid_on || "")) ? e.paid_on : null,
+      // The model is schema-bound to the profile's list, but a category that is
+      // not on it would silently become an invalid option on the record.
+      category: categories.includes(e.category) ? e.category : null,
+      notes: clean(e.notes),
+      confidence: ["high", "medium", "low"].includes(e.confidence) ? e.confidence : "low",
+    },
+    extra: extracted.expenses.length - 1,
+  };
+}
 
 /**
  * Turns an extraction into the same draft rows the CSV path produces, so both

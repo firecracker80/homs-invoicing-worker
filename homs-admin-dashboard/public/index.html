@@ -85,8 +85,20 @@
       <button id="addExpenseClose" class="detail-close">&times;</button>
       <h2>Add Expense</h2>
       <form id="addExpenseForm" class="stacked-form">
+        <!-- First, because this is the flow: photograph the receipt, let it fill
+             the form in, then check it. Everything below stays typeable for a
+             cost with no paper behind it. -->
+        <label>Receipt
+          <input type="file" id="aeReceipts" multiple
+                 accept="image/jpeg,image/jpg,image/png,image/webp,application/pdf" />
+        </label>
+        <p class="form-note" id="aeReadNote">A photo or PDF. The first one is read to fill in the fields below — check them before saving.</p>
+        <div id="aeReadStatus" class="form-note"></div>
         <label>Property
           <select id="aeProperty" required></select>
+        </label>
+        <label>Name
+          <input type="text" id="aeName" placeholder="e.g. Pool pump replacement" />
         </label>
         <label>Paid On
           <input type="date" id="aePaidOn" required />

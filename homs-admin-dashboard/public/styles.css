@@ -396,3 +396,14 @@ tbody tr:hover { background: var(--accent-weak); }
 #portfolioChecklist .chk-line { font-size: 12px; line-height: 1.6; }
 #portfolioChecklist .chk-line .muted { display: inline-block; min-width: 190px; color: var(--muted); }
 #portfolioFile { font-size: 13px; }
+
+/* Receipts filed against one expense, in the detail drawer. */
+.receipt-list { list-style: none; margin: 6px 0 0; padding: 0; }
+.receipt-list li {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
+  padding: 8px 0; border-bottom: 1px solid var(--border);
+}
+.receipt-list li:last-child { border-bottom: 0; }
+.receipt-list a { color: var(--accent); overflow-wrap: anywhere; }
+/* A thumb has to be able to hit the link on a phone. */
+@media (max-width: 600px) { .receipt-list a { display: inline-block; min-height: 32px; } }

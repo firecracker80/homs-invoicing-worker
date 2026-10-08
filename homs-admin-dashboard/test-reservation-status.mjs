@@ -34,6 +34,31 @@ vm.runInContext(APP, sandbox);
 const run = (code) => vm.runInContext(code, sandbox);
 
 const TODAY = "2026-10-07";
+
+// Cases 1-6 pass an explicit `today`, so their literal dates stay meaningful
+// forever. Cases 7, 8, 8b and 11 go through renderTransactions(), which reads
+// the REAL clock -- so their fixtures have to be relative to it.
+//
+// They were not. Written on 2026-10-07 with a checkout of 2026-10-07 to mean
+// "departing", the suite passed that day and failed the next morning when the
+// same date meant "past". A test that expires is worse than no test: it fails
+// on a day nobody changed anything, and teaches people to ignore it.
+const day = (n) => {
+  const d = new Date();
+  d.setDate(d.getDate() + n);
+  const p = (x) => String(x).padStart(2, "0");
+  return [d.getFullYear(), p(d.getMonth() + 1), p(d.getDate())].join("-");
+};
+const DEPARTS_TODAY = { checkinDate: day(-5), checkoutDate: day(0) };
+const IN_HOUSE = { checkinDate: day(-5), checkoutDate: day(4) };
+const UPCOMING = { checkinDate: day(54), checkoutDate: day(58) };
+
+// Fixtures are built in THIS scope and serialised into the context. Written as
+// a literal inside run(), a spread of the constants above is evaluated in the
+// vm, where they do not exist.
+const setData = (transactions) => {
+  run("DATA = " + JSON.stringify({ transactions }) + "; renderTransactions();");
+};
 const status = (t, today = TODAY) => run(`stayStatus(${JSON.stringify(t)}, ${JSON.stringify(today)})`);
 
 // ---- 1. the four states the dates can tell us -----------------------
@@ -166,12 +191,12 @@ const status = (t, today = TODAY) => run(`stayStatus(${JSON.stringify(t)}, ${JSO
 // dash on every row while the filter offers nothing -- i.e. the whole defect,
 // untouched. Asserted through the panel the reader looks at.
 {
-  run(`DATA = { transactions: [
-    { id: "t1", guestName: "Sofia Reyes", propertyName: "Villa Azul", checkinDate: "2026-10-02", checkoutDate: "2026-10-07",
+  setData([
+    { id: "t1", guestName: "Sofia Reyes", propertyName: "Villa Azul", ...DEPARTS_TODAY,
       bookingTotal: 500, paymentStatus: "paid", bookingReference: "BR-1", otaChannelName: "Airbnb" },
-    { id: "t2", guestName: "Luis Mora", propertyName: "Casa Bonita", checkinDate: "2026-12-01", checkoutDate: "2026-12-05",
+    { id: "t2", guestName: "Luis Mora", propertyName: "Casa Bonita", ...UPCOMING,
       bookingTotal: 900, paymentStatus: "pending", bookingReference: "BR-2", otaChannelName: "Direct" },
-  ] }`);
+  ]);
   run(`renderTransactions()`);
   const html = panels["#panel-transactions"].innerHTML;
 
@@ -211,14 +236,14 @@ const status = (t, today = TODAY) => run(`stayStatus(${JSON.stringify(t)}, ${JSO
 
 // ---- 8b. the moved booking shows both facts, and filters on either ---
 {
-  run(`DATA = { transactions: [
-    { id: "m1", guestName: "Ana Pena", propertyName: "Villa Azul", checkinDate: "2026-10-02", checkoutDate: "2026-10-11",
+  setData([
+    { id: "m1", guestName: "Ana Pena", propertyName: "Villa Azul", ...IN_HOUSE,
       bookingStatus: "rescheduled", bookingTotal: 700, paymentStatus: "paid" },
-    { id: "m2", guestName: "Ruben Diaz", propertyName: "Casa Bonita", checkinDate: "2026-11-01", checkoutDate: "2026-11-05",
+    { id: "m2", guestName: "Ruben Diaz", propertyName: "Casa Bonita", ...UPCOMING,
       bookingStatus: "cancelled", bookingTotal: 975.20, paymentStatus: "paid" },
-    { id: "m3", guestName: "Pedro Luna", propertyName: "Casa Bonita", checkinDate: "2026-10-02", checkoutDate: "2026-10-11",
+    { id: "m3", guestName: "Pedro Luna", propertyName: "Casa Bonita", ...IN_HOUSE,
       bookingTotal: 400, paymentStatus: "paid" },
-  ] }`);
+  ]);
   run(`filterState.transactions = {}; renderTransactions();`);
   let html = panels["#panel-transactions"].innerHTML;
 
@@ -243,9 +268,8 @@ const status = (t, today = TODAY) => run(`stayStatus(${JSON.stringify(t)}, ${JSO
 
   // And it is absent when nothing has been moved, rather than offering a filter
   // that can only return an empty table.
-  run(`filterState.transactions = {};
-       DATA = { transactions: [{ id: "x", guestName: "A", checkinDate: "2026-10-02", checkoutDate: "2026-10-11" }] };
-       renderTransactions();`);
+  run(`filterState.transactions = {};`);
+  setData([{ id: "x", guestName: "A", ...IN_HOUSE }]);
   assert.ok(!/data-field="stayChanged"/.test(panels["#panel-transactions"].innerHTML),
     "no Changed filter when nothing was changed");
   console.log("8b) A moved booking shows status and moved-ness, and each filters separately");
@@ -304,8 +328,8 @@ const status = (t, today = TODAY) => run(`stayStatus(${JSON.stringify(t)}, ${JSO
     "a real timestamp is still localised");
 
   // Through the panel, which is where it was wrong.
-  run(`DATA = { transactions: [{ id: "d1", guestName: "G", checkinDate: "2026-10-02", checkoutDate: "2026-10-11" }] };
-       filterState.transactions = {}; renderTransactions();`);
+  run(`filterState.transactions = {};`);
+  setData([{ id: "d1", guestName: "G", checkinDate: "2026-10-02", checkoutDate: "2026-10-11" }]);
   assert.ok(panels["#panel-transactions"].innerHTML.includes(`${localDay(2026, 10, 2)} → ${localDay(2026, 10, 11)}`),
     "the Stay Dates cell prints the days the record holds");
   console.log("11) A stay prints the dates it was booked for, in any timezone");
