@@ -1,0 +1,888 @@
+{
+  "locationId": "ZghxU8I60bEm39JUbtCm",
+  "capturedAt": "2026-10-08T16:23:57.173Z",
+  "objects": {
+    "custom_objects.properties": {
+      "primaryDisplayProperty": "custom_objects.properties.property_name",
+      "requiredProperties": [
+        "custom_objects.properties.property_name"
+      ],
+      "labels": {
+        "singular": "Property",
+        "plural": "Properties"
+      },
+      "description": "Record of properties from property managers",
+      "fields": {
+        "custom_objects.properties.property_name": {
+          "dataType": "TEXT",
+          "options": [],
+          "name": "Property Name",
+          "description": null
+        },
+        "custom_objects.properties.status": {
+          "dataType": "SINGLE_OPTIONS",
+          "options": [
+            "active",
+            "inactive",
+            "seasonal"
+          ],
+          "name": "Status",
+          "description": null
+        },
+        "custom_objects.properties.property_type": {
+          "dataType": "SINGLE_OPTIONS",
+          "options": [
+            "apartment",
+            "house",
+            "other",
+            "room",
+            "villa"
+          ],
+          "name": "Property Type",
+          "description": null
+        },
+        "custom_objects.properties.address": {
+          "dataType": "TEXT",
+          "options": [],
+          "name": "Address",
+          "description": null
+        },
+        "custom_objects.properties.bedrooms": {
+          "dataType": "NUMERICAL",
+          "options": [],
+          "name": "Bedrooms",
+          "description": null
+        },
+        "custom_objects.properties.bathrooms": {
+          "dataType": "NUMERICAL",
+          "options": [],
+          "name": "Bathrooms",
+          "description": null
+        },
+        "custom_objects.properties.max_occupancy": {
+          "dataType": "NUMERICAL",
+          "options": [],
+          "name": "Max Occupancy",
+          "description": null
+        },
+        "custom_objects.properties.base_nightly_rate": {
+          "dataType": "MONETORY",
+          "options": [],
+          "name": "Base Nightly Rate",
+          "description": null
+        },
+        "custom_objects.properties.cleaning_fee": {
+          "dataType": "MONETORY",
+          "options": [],
+          "name": "Cleaning Fee",
+          "description": null
+        },
+        "custom_objects.properties.pet_fee": {
+          "dataType": "MONETORY",
+          "options": [],
+          "name": "Pet Fee",
+          "description": null
+        }
+      }
+    },
+    "custom_objects.ota_channels": {
+      "primaryDisplayProperty": "custom_objects.ota_channels.channel_name",
+      "requiredProperties": [
+        "custom_objects.ota_channels.channel_name"
+      ],
+      "labels": {
+        "singular": "OTA Channel",
+        "plural": "OTA Channels"
+      },
+      "description": "Record for the various booking channels each property manager is enrolled in.",
+      "fields": {
+        "custom_objects.ota_channels.channel_name": {
+          "dataType": "TEXT",
+          "options": [],
+          "name": "Channel Name",
+          "description": null
+        },
+        "custom_objects.ota_channels.external_listing_id": {
+          "dataType": "TEXT",
+          "options": [],
+          "name": "External Listing ID",
+          "description": null
+        },
+        "custom_objects.ota_channels.listing_url": {
+          "dataType": "TEXT",
+          "options": [],
+          "name": "Listing URL",
+          "description": null
+        },
+        "custom_objects.ota_channels.ical_link": {
+          "dataType": "TEXT",
+          "options": [],
+          "name": "iCal Link",
+          "description": null
+        },
+        "custom_objects.ota_channels.sync_status": {
+          "dataType": "SINGLE_OPTIONS",
+          "options": [
+            "connected",
+            "disconnected",
+            "error"
+          ],
+          "name": "Sync Status",
+          "description": null
+        },
+        "custom_objects.ota_channels.commission_rate": {
+          "dataType": "NUMERICAL",
+          "options": [],
+          "name": "Commission Rate",
+          "description": null
+        },
+        "custom_objects.ota_channels.last_synced": {
+          "dataType": "DATE",
+          "options": [],
+          "name": "Last Synced",
+          "description": null
+        }
+      }
+    },
+    "custom_objects.transactions": {
+      "primaryDisplayProperty": "custom_objects.transactions.transaction_name",
+      "requiredProperties": [
+        "custom_objects.transactions.transaction_name"
+      ],
+      "labels": {
+        "singular": "Transaction",
+        "plural": "Transactions"
+      },
+      "description": "Record of the transactions for each property managed.",
+      "fields": {
+        "custom_objects.transactions.transaction_name": {
+          "dataType": "TEXT",
+          "options": [],
+          "name": "Transaction Name",
+          "description": null
+        },
+        "custom_objects.transactions.guest_name": {
+          "dataType": "TEXT",
+          "options": [],
+          "name": "Guest Name",
+          "description": null
+        },
+        "custom_objects.transactions.checkin_date": {
+          "dataType": "DATE",
+          "options": [],
+          "name": "Check-in Date",
+          "description": null
+        },
+        "custom_objects.transactions.checkout_date": {
+          "dataType": "DATE",
+          "options": [],
+          "name": "Check-out Date",
+          "description": null
+        },
+        "custom_objects.transactions.booking_reference": {
+          "dataType": "TEXT",
+          "options": [],
+          "name": "Booking Reference",
+          "description": null
+        },
+        "custom_objects.transactions.booking_total": {
+          "dataType": "MONETORY",
+          "options": [],
+          "name": "Booking Total",
+          "description": null
+        },
+        "custom_objects.transactions.platform_fee": {
+          "dataType": "MONETORY",
+          "options": [],
+          "name": "Platform Fee",
+          "description": null
+        },
+        "custom_objects.transactions.net_payout": {
+          "dataType": "MONETORY",
+          "options": [],
+          "name": "Net Payout",
+          "description": null
+        },
+        "custom_objects.transactions.payment_status": {
+          "dataType": "SINGLE_OPTIONS",
+          "options": [
+            "failed",
+            "paid",
+            "pending",
+            "refunded"
+          ],
+          "name": "Payment Status",
+          "description": null
+        },
+        "custom_objects.transactions.guest_request_notes": {
+          "dataType": "LARGE_TEXT",
+          "options": [],
+          "name": "Guest Request Notes",
+          "description": "Guest-initiated requests (cancellation, reschedule, service) recorded by the assistant. Append newest first with a date stamp; this field is overwritten on each write, so read it before writing."
+        },
+        "custom_objects.transactions.booking_status": {
+          "dataType": "SINGLE_OPTIONS",
+          "options": [
+            "cancelled",
+            "confirmed",
+            "rescheduled"
+          ],
+          "name": "Booking Status",
+          "description": "The booking's lifecycle, not its money - Payment Status covers that. Written by the Worker: cancelled on cancellation, rescheduled when dates move. Empty on a normal booking: the dashboard derives new/active/departing/past from the dates. Only cancelled overrides them."
+        }
+      }
+    },
+    "custom_objects.jobs_tmpl": {
+      "primaryDisplayProperty": "custom_objects.jobs_tmpl.job_name",
+      "requiredProperties": [
+        "custom_objects.jobs_tmpl.job_name"
+      ],
+      "labels": {
+        "singular": "Cleaning Checklist",
+        "plural": "Cleaning Checklists"
+      },
+      "description": "Post-turnover cleaning checklist for a property, tied to the booking and the cleaner who completed i",
+      "fields": {
+        "custom_objects.jobs_tmpl.job_name": {
+          "dataType": "TEXT",
+          "options": [],
+          "name": "Job name",
+          "description": null
+        },
+        "custom_objects.jobs_tmpl.cleaner_cost": {
+          "dataType": "MONETORY",
+          "options": [],
+          "name": "Cleaner Cost",
+          "description": "What the cleaner was paid for this turnover. The cleaning fee charged to the guest is revenue; this is the cost against it. Without it the manager statement reports the whole cleaning fee as earnings."
+        },
+        "custom_objects.jobs_tmpl.completion_date": {
+          "dataType": "DATE",
+          "options": [],
+          "name": "Date Cleaned",
+          "description": ""
+        },
+        "custom_objects.jobs_tmpl.cleaner_name__service": {
+          "dataType": "TEXT",
+          "options": [],
+          "name": "Cleaner Name / Service",
+          "description": null
+        },
+        "custom_objects.jobs_tmpl.cleaner_paid_on": {
+          "dataType": "DATE",
+          "options": [],
+          "name": "Cleaner Paid On",
+          "description": "When the cleaner was actually paid. Blank means the turnover is done but the cleaner is still owed, which is the manager's unpaid liability."
+        },
+        "custom_objects.jobs_tmpl.turnover_type": {
+          "dataType": "SINGLE_OPTIONS",
+          "options": [
+            "deep_clean",
+            "midstay_clean",
+            "standard_turnover"
+          ],
+          "name": "Turnover Type",
+          "description": null
+        },
+        "custom_objects.jobs_tmpl.overall_status": {
+          "dataType": "SINGLE_OPTIONS",
+          "options": [
+            "failed_inspection",
+            "needs_followup",
+            "pass__guest_ready"
+          ],
+          "name": "Overall Status",
+          "description": null
+        },
+        "custom_objects.jobs_tmpl.bedroom_checklist": {
+          "dataType": "CHECKBOX",
+          "options": [
+            "beds_stripped",
+            "closets__drawers_checked_for_guest_items",
+            "floors_vacuumedmopped",
+            "fresh_linens_on_all_beds",
+            "surfaces_dusted"
+          ],
+          "name": "Bedroom Checklist",
+          "description": null
+        },
+        "custom_objects.jobs_tmpl.bathroom_checklist": {
+          "dataType": "CHECKBOX",
+          "options": [
+            "fresh_towels__toiletries_restocked",
+            "showertub_cleaned",
+            "sink__mirror_cleaned",
+            "toilet_cleaned__disinfected",
+            "trash_emptied"
+          ],
+          "name": "Bathroom Checklist",
+          "description": null
+        },
+        "custom_objects.jobs_tmpl.kitchen_checklist": {
+          "dataType": "CHECKBOX",
+          "options": [
+            "appliances_cleaned_inside__out",
+            "coffeekitchen_supplies_restocked",
+            "counters__cabinets_wiped",
+            "dishwasher_run__emptied",
+            "trash__recycling_removed"
+          ],
+          "name": "Kitchen Checklist",
+          "description": null
+        },
+        "custom_objects.jobs_tmpl.living_area_checklist": {
+          "dataType": "CHECKBOX",
+          "options": [
+            "floors_vacuumedmopped",
+            "furniture_arranged",
+            "hightouch_surfaces_disinfected_door_handles_light_switches_remotes",
+            "surfaces__ceiling_fans_dusted"
+          ],
+          "name": "Living Area Checklist",
+          "description": null
+        },
+        "custom_objects.jobs_tmpl.outdoor_checklist": {
+          "dataType": "CHECKBOX",
+          "options": [
+            "grill_checkedcleaned",
+            "patio_furniture_cleaned",
+            "trash__debris_removed"
+          ],
+          "name": "Outdoor Checklist",
+          "description": null
+        },
+        "custom_objects.jobs_tmpl.final_walkthrough_checklist": {
+          "dataType": "CHECKBOX",
+          "options": [
+            "all_appliances_tested",
+            "damage_inspection_completed",
+            "no_guest_items_left_behind",
+            "smart_lockaccess_code_verified",
+            "welcome_materials_in_place",
+            "wifi_tested"
+          ],
+          "name": "Final Walkthrough Checklist",
+          "description": null
+        },
+        "custom_objects.jobs_tmpl.damage__issues_noted": {
+          "dataType": "LARGE_TEXT",
+          "options": [],
+          "name": "Damage / Issues Noted",
+          "description": null
+        },
+        "custom_objects.jobs_tmpl.missing__low_supplies": {
+          "dataType": "LARGE_TEXT",
+          "options": [],
+          "name": "Missing / Low Supplies",
+          "description": null
+        },
+        "custom_objects.jobs_tmpl.guest_items_found": {
+          "dataType": "LARGE_TEXT",
+          "options": [],
+          "name": "Guest Items Found",
+          "description": null
+        },
+        "custom_objects.jobs_tmpl.photos": {
+          "dataType": "FILE_UPLOAD",
+          "options": [],
+          "name": "Photos",
+          "description": null
+        },
+        "custom_objects.jobs_tmpl.property_name": {
+          "dataType": "TEXT",
+          "options": [],
+          "name": "Property Name",
+          "description": null
+        },
+        "custom_objects.jobs_tmpl.booking_reference": {
+          "dataType": "TEXT",
+          "options": [],
+          "name": "Booking Reference",
+          "description": null
+        },
+        "custom_objects.jobs_tmpl.inspection_stage": {
+          "dataType": "SINGLE_OPTIONS",
+          "options": [
+            "post_clean",
+            "pre_clean"
+          ],
+          "name": "Inspection Stage",
+          "description": null
+        },
+        "custom_objects.jobs_tmpl.video": {
+          "dataType": "FILE_UPLOAD",
+          "options": [],
+          "name": "Video",
+          "description": null
+        }
+      }
+    },
+    "custom_objects.expenses": {
+      "primaryDisplayProperty": "custom_objects.expenses.expense_name",
+      "requiredProperties": [
+        "custom_objects.expenses.expense_name"
+      ],
+      "labels": {
+        "singular": "Expense",
+        "plural": "Expenses"
+      },
+      "description": null,
+      "fields": {
+        "custom_objects.expenses.expense_name": {
+          "dataType": "TEXT",
+          "options": [],
+          "name": "Expense Name",
+          "description": null
+        },
+        "custom_objects.expenses.paid_on": {
+          "dataType": "DATE",
+          "options": [],
+          "name": "Paid On",
+          "description": null
+        },
+        "custom_objects.expenses.category": {
+          "dataType": "SINGLE_OPTIONS",
+          "options": [
+            "cleaning_supplies",
+            "insurance",
+            "landscaping",
+            "maintenance_repairs",
+            "management_fee",
+            "miscellaneous",
+            "other",
+            "pest_control",
+            "property_tax",
+            "software_subscriptions",
+            "utilities"
+          ],
+          "name": "Category",
+          "description": null
+        },
+        "custom_objects.expenses.amount": {
+          "dataType": "MONETORY",
+          "options": [],
+          "name": "Amount",
+          "description": null
+        },
+        "custom_objects.expenses.review_status": {
+          "dataType": "SINGLE_OPTIONS",
+          "options": [
+            "approved",
+            "needs_review"
+          ],
+          "name": "Review Status",
+          "description": null
+        },
+        "custom_objects.expenses.receipt_photo": {
+          "dataType": "FILE_UPLOAD",
+          "options": [],
+          "name": "Receipt Photo",
+          "description": null
+        },
+        "custom_objects.expenses.line_item_description": {
+          "dataType": "TEXT",
+          "options": [],
+          "name": "Line Item Description",
+          "description": null
+        },
+        "custom_objects.expenses.currency": {
+          "dataType": "SINGLE_OPTIONS",
+          "options": [
+            "dop",
+            "eur",
+            "usd"
+          ],
+          "name": "Currency",
+          "description": null
+        },
+        "custom_objects.expenses.converted_amount": {
+          "dataType": "MONETORY",
+          "options": [],
+          "name": "Converted Amount",
+          "description": null
+        },
+        "custom_objects.expenses.exchange_rate": {
+          "dataType": "NUMERICAL",
+          "options": [],
+          "name": "Exchange Rate",
+          "description": null
+        },
+        "custom_objects.expenses.rate_date": {
+          "dataType": "DATE",
+          "options": [],
+          "name": "Rate Date",
+          "description": null
+        },
+        "custom_objects.expenses.rate_source": {
+          "dataType": "TEXT",
+          "options": [],
+          "name": "Rate Source",
+          "description": null
+        },
+        "custom_objects.expenses.paid_by": {
+          "dataType": "SINGLE_OPTIONS",
+          "options": [
+            "manager",
+            "owner"
+          ],
+          "name": "Paid By",
+          "description": "Whose cost this is. Owner = the property owner bears it. Manager = the management company bears it, like cleaning staff. / De quien es el costo: del propietario o del administrador."
+        }
+      }
+    },
+    "custom_objects.property_inventory": {
+      "primaryDisplayProperty": "custom_objects.property_inventory.item_name",
+      "requiredProperties": [
+        "custom_objects.property_inventory.item_name"
+      ],
+      "labels": {
+        "singular": "Inventory Item",
+        "plural": "Property Inventory"
+      },
+      "description": "Physical inventory (furniture, linens, supplies) tracked per property.",
+      "fields": {
+        "custom_objects.property_inventory.item_name": {
+          "dataType": "TEXT",
+          "options": [],
+          "name": "Item Name",
+          "description": null
+        },
+        "custom_objects.property_inventory.category": {
+          "dataType": "SINGLE_OPTIONS",
+          "options": [
+            "appliances",
+            "decor",
+            "electronics",
+            "furniture",
+            "kitchenware",
+            "linens_bedding",
+            "other",
+            "outdoor",
+            "safety_security",
+            "supplies"
+          ],
+          "name": "Category",
+          "description": null
+        },
+        "custom_objects.property_inventory.quantity": {
+          "dataType": "NUMERICAL",
+          "options": [],
+          "name": "Quantity",
+          "description": null
+        },
+        "custom_objects.property_inventory.condition": {
+          "dataType": "SINGLE_OPTIONS",
+          "options": [
+            "fair",
+            "good",
+            "missing",
+            "needs_replacement",
+            "new"
+          ],
+          "name": "Condition",
+          "description": null
+        },
+        "custom_objects.property_inventory.location_in_property": {
+          "dataType": "TEXT",
+          "options": [],
+          "name": "Location in Property",
+          "description": null
+        },
+        "custom_objects.property_inventory.purchase_date": {
+          "dataType": "DATE",
+          "options": [],
+          "name": "Purchase Date",
+          "description": null
+        },
+        "custom_objects.property_inventory.purchase_cost": {
+          "dataType": "MONETORY",
+          "options": [],
+          "name": "Purchase Cost",
+          "description": null
+        },
+        "custom_objects.property_inventory.last_verified_date": {
+          "dataType": "DATE",
+          "options": [],
+          "name": "Last Verified Date",
+          "description": null
+        },
+        "custom_objects.property_inventory.notes": {
+          "dataType": "TEXT",
+          "options": [],
+          "name": "Notes",
+          "description": null
+        }
+      }
+    },
+    "custom_objects.payments": {
+      "primaryDisplayProperty": "custom_objects.payments.payment_reference",
+      "requiredProperties": [
+        "custom_objects.payments.payment_reference"
+      ],
+      "labels": {
+        "singular": "Revenue",
+        "plural": "Revenue Streams"
+      },
+      "description": "Revenue per role (owner/manager split, fees, refunds), linked to a Transaction.",
+      "fields": {
+        "custom_objects.payments.payment_reference": {
+          "dataType": "TEXT",
+          "options": [],
+          "name": "Payment Reference",
+          "description": null
+        },
+        "custom_objects.payments.payment_type": {
+          "dataType": "SINGLE_OPTIONS",
+          "options": [
+            "cancellation_charge",
+            "cancellation_charge_manager",
+            "cancellation_charge_owner",
+            "cancellation_cleaning_refund",
+            "cancellation_deposit_refund",
+            "cancellation_rent_refund_manager",
+            "cancellation_rent_refund_owner",
+            "cleaning_fee",
+            "deposit_claim_retained",
+            "deposit_held",
+            "deposit_refund_inspection",
+            "other",
+            "processing_fee",
+            "refund",
+            "rent",
+            "rent_split_manager",
+            "rent_split_owner",
+            "reschedule_adjustment",
+            "reschedule_admin_fee_manager",
+            "reschedule_admin_fee_owner",
+            "reschedule_charge_manager",
+            "reschedule_charge_owner",
+            "reschedule_refund_manager",
+            "reschedule_refund_owner",
+            "security_deposit",
+            "shadow_ota_commission"
+          ],
+          "name": "Entry Type",
+          "description": null
+        },
+        "custom_objects.payments.payment_method": {
+          "dataType": "SINGLE_OPTIONS",
+          "options": [
+            "paypal",
+            "stripe"
+          ],
+          "name": "Payment Method",
+          "description": null
+        },
+        "custom_objects.payments.gateway_transaction_id": {
+          "dataType": "TEXT",
+          "options": [],
+          "name": "Gateway Transaction ID",
+          "description": null
+        },
+        "custom_objects.payments.amount": {
+          "dataType": "MONETORY",
+          "options": [],
+          "name": "Amount",
+          "description": null
+        },
+        "custom_objects.payments.payment_status": {
+          "dataType": "SINGLE_OPTIONS",
+          "options": [
+            "failed",
+            "paid",
+            "pending"
+          ],
+          "name": "Payment Status",
+          "description": null
+        },
+        "custom_objects.payments.cleared_for_payout": {
+          "dataType": "SINGLE_OPTIONS",
+          "options": [
+            "no",
+            "yes"
+          ],
+          "name": "Cleared for Payout",
+          "description": null
+        },
+        "custom_objects.payments.processed_at": {
+          "dataType": "DATE",
+          "options": [],
+          "name": "Processed At",
+          "description": null
+        },
+        "custom_objects.payments.notes": {
+          "dataType": "LARGE_TEXT",
+          "options": [],
+          "name": "Notes",
+          "description": null
+        },
+        "custom_objects.payments.recipient": {
+          "dataType": "SINGLE_OPTIONS",
+          "options": [
+            "guest",
+            "manager",
+            "owner",
+            "platform"
+          ],
+          "name": "Recipient",
+          "description": null
+        },
+        "custom_objects.payments.recipient_name": {
+          "dataType": "TEXT",
+          "options": [],
+          "name": "Recipient Name",
+          "description": null
+        },
+        "custom_objects.payments.category": {
+          "dataType": "SINGLE_OPTIONS",
+          "options": [
+            "income",
+            "liability",
+            "pass_through",
+            "shadow"
+          ],
+          "name": "Category",
+          "description": null
+        }
+      }
+    },
+    "custom_objects.service_requests": {
+      "primaryDisplayProperty": "custom_objects.service_requests.service_item",
+      "requiredProperties": [
+        "custom_objects.service_requests.service_item"
+      ],
+      "labels": {
+        "singular": "Service Request",
+        "plural": "Service Requests"
+      },
+      "description": "",
+      "fields": {
+        "custom_objects.service_requests.service_item": {
+          "dataType": "TEXT",
+          "options": [],
+          "name": "Service Item",
+          "description": null
+        },
+        "custom_objects.service_requests.vendor": {
+          "dataType": "TEXT",
+          "options": [],
+          "name": "Vendor",
+          "description": null
+        },
+        "custom_objects.service_requests.category": {
+          "dataType": "SINGLE_OPTIONS",
+          "options": [
+            "air_conditioning",
+            "construction_finishes",
+            "electrical",
+            "other",
+            "plumbing",
+            "refrigeration"
+          ],
+          "name": "Category",
+          "description": null
+        },
+        "custom_objects.service_requests.request_status": {
+          "dataType": "SINGLE_OPTIONS",
+          "options": [
+            "cancelled",
+            "completed",
+            "invoiced",
+            "paid",
+            "requested",
+            "scheduled"
+          ],
+          "name": "Status",
+          "description": null
+        },
+        "custom_objects.service_requests.requested_on": {
+          "dataType": "DATE",
+          "options": [],
+          "name": "Requested On",
+          "description": null
+        },
+        "custom_objects.service_requests.scheduled_date": {
+          "dataType": "DATE",
+          "options": [],
+          "name": "Scheduled Date",
+          "description": null
+        },
+        "custom_objects.service_requests.completed_date": {
+          "dataType": "DATE",
+          "options": [],
+          "name": "Completed Date",
+          "description": null
+        },
+        "custom_objects.service_requests.quoted_amount": {
+          "dataType": "MONETORY",
+          "options": [],
+          "name": "Quoted Amount",
+          "description": null
+        },
+        "custom_objects.service_requests.additional_amount": {
+          "dataType": "MONETORY",
+          "options": [],
+          "name": "Additional Amount",
+          "description": null
+        },
+        "custom_objects.service_requests.invoice_total": {
+          "dataType": "MONETORY",
+          "options": [],
+          "name": "Invoice Total",
+          "description": null
+        },
+        "custom_objects.service_requests.invoice_link": {
+          "dataType": "TEXT",
+          "options": [],
+          "name": "Invoice Link",
+          "description": null
+        },
+        "custom_objects.service_requests.vendor_request_id": {
+          "dataType": "TEXT",
+          "options": [],
+          "name": "Vendor Request ID",
+          "description": null
+        },
+        "custom_objects.service_requests.request_notes": {
+          "dataType": "LARGE_TEXT",
+          "options": [],
+          "name": "Notes",
+          "description": null
+        },
+        "custom_objects.service_requests.currency": {
+          "dataType": "SINGLE_OPTIONS",
+          "options": [
+            "dop",
+            "eur",
+            "usd"
+          ],
+          "name": "Currency",
+          "description": null
+        },
+        "custom_objects.service_requests.converted_total": {
+          "dataType": "MONETORY",
+          "options": [],
+          "name": "Converted Total",
+          "description": null
+        },
+        "custom_objects.service_requests.exchange_rate": {
+          "dataType": "NUMERICAL",
+          "options": [],
+          "name": "Exchange Rate",
+          "description": null
+        },
+        "custom_objects.service_requests.rate_date": {
+          "dataType": "DATE",
+          "options": [],
+          "name": "Rate Date",
+          "description": null
+        },
+        "custom_objects.service_requests.rate_source": {
+          "dataType": "TEXT",
+          "options": [],
+          "name": "Rate Source",
+          "description": null
+        }
+      }
+    }
+  }
+}
