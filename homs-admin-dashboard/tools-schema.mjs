@@ -2,7 +2,13 @@
 //
 //   node tools-schema.mjs capture <locationId> [out.json]     # needs a PIT
 //   node tools-schema.mjs fetch <locationId> [out.json]       # via the Worker
-//   node tools-schema.mjs diff <expected.json> <actual.json>
+//   node tools-schema.mjs diff   <expected.json> <actual.json>
+//   node tools-schema.mjs repair <locationId> [--apply]       # via the Worker
+//
+// `repair` is the whole loop in one command: fetch the account, diff it against
+// the committed contract, show what would change, optionally write it, then
+// re-fetch and re-diff so the result is proved rather than assumed. Without
+// --apply it writes nothing.
 //
 // `fetch` is the one to use for a client account: the Worker already holds that
 // tenant's PIT as a secret, so nothing has to be exported to run the check.
@@ -19,7 +25,7 @@
 // schema a versioned artifact -- schema/demo-homs.schema.json is the contract a
 // newly provisioned account is held to.
 import fs from "node:fs/promises";
-import { fingerprint, diffSchemas, formatDiff } from "./src/schema-fingerprint.js";
+import { fingerprint, diffSchemas, formatDiff, repairsFor } from "./src/schema-fingerprint.js";
 
 const BASE = "https://services.leadconnectorhq.com";
 const [, , cmd, ...rest] = process.argv;
@@ -68,19 +74,79 @@ async function capture(locationId) {
   return fingerprint({ locationId, objects, fieldsByObject });
 }
 
-if (cmd === "fetch") {
-  const [locationId, out] = args;
-  if (!locationId) throw new Error("usage: fetch <locationId> [out.json]");
-  const base = flag("worker") || process.env.DASHBOARD_URL ||
-    "https://homs-admin-dashboard.yari-058.workers.dev";
+// Shared by `fetch` and `repair`.
+const workerBase = () => flag("worker") || process.env.DASHBOARD_URL ||
+  "https://homs-admin-dashboard.yari-058.workers.dev";
+
+async function workerFetch(path, init = {}) {
   const key = process.env.PROVISION_KEY;
   if (!key) throw new Error("set PROVISION_KEY to call the Worker");
-
-  const res = await fetch(`${base}/api/schema/fingerprint?locationId=${encodeURIComponent(locationId)}`,
-    { headers: { Authorization: `Bearer ${key}` } });
+  const res = await fetch(workerBase() + path, {
+    ...init,
+    headers: { Authorization: `Bearer ${key}`, ...(init.body ? { "Content-Type": "application/json" } : {}), ...init.headers },
+  });
   const text = await res.text();
-  if (!res.ok) throw new Error(`${res.status}: ${text.slice(0, 300)}`);
-  const fp = JSON.parse(text);
+  if (!res.ok) throw new Error(`${res.status}: ${text.slice(0, 400)}`);
+  return JSON.parse(text);
+}
+
+const fingerprintOf = (locationId) =>
+  workerFetch(`/api/schema/fingerprint?locationId=${encodeURIComponent(locationId)}`);
+
+if (cmd === "repair") {
+  const [locationId] = args;
+  const willApply = rest.includes("--apply");
+  if (!locationId) throw new Error("usage: repair <locationId> [--apply]");
+
+  const expected = JSON.parse(await fs.readFile(
+    flag("contract") || new URL("./schema/demo-homs.schema.json", import.meta.url), "utf8"));
+
+  const before = await fingerprintOf(locationId);
+  if (before.unreadable) {
+    // Repairing against a half-read account would "fix" fields by writing the
+    // contract's values over whatever could not be read.
+    throw new Error(`cannot repair: ${before.unreadable.length} object(s) unreadable — ` +
+      before.unreadable.map((u) => `${u.objectKey} (${u.error})`).join("; "));
+  }
+
+  const repairs = repairsFor(expected, before);
+  if (!repairs.length) {
+    console.log("Nothing to repair — every FILE_UPLOAD constraint already matches the contract.");
+    console.log(formatDiff(diffSchemas(expected, before), { actualLabel: locationId }));
+    process.exit(0);
+  }
+
+  console.log(`${repairs.length} field(s) to repair on ${locationId}:\n`);
+  for (const r of repairs) {
+    console.log(`  ${r.fieldKey}`);
+    console.log(`    formats  ${JSON.stringify(r.was.acceptedFormats)}  ->  ${JSON.stringify(r.acceptedFormats)}`);
+    console.log(`    maxFiles ${JSON.stringify(r.was.maxFileLimit)}  ->  ${JSON.stringify(r.maxFileLimit)}`);
+  }
+
+  if (!willApply) {
+    console.log("\n(dry run — pass --apply to write)");
+    process.exit(0);
+  }
+
+  const out = await workerFetch("/api/schema/repair", {
+    method: "POST",
+    body: JSON.stringify({ locationId, repairs, apply: true }),
+  });
+  console.log(`\napplied ${out.applied.length}, skipped ${out.skipped.length}, failed ${out.failed.length}`);
+  for (const s of out.skipped) console.log(`  skipped ${s.fieldKey}: ${s.reason}`);
+  for (const f of out.failed) console.log(`  FAILED  ${f.fieldKey}: ${f.error}`);
+
+  // Proved, not assumed: GHL accepting a write is not evidence it stored it,
+  // which is exactly how the receipt_photo probe went wrong in October.
+  console.log("\nre-reading the account…\n");
+  const after = await fingerprintOf(locationId);
+  const result = diffSchemas(expected, after);
+  console.log(formatDiff(result, { expectedLabel: "contract", actualLabel: locationId }));
+  process.exit(result.ok ? 0 : 1);
+} else if (cmd === "fetch") {
+  const [locationId, out] = args;
+  if (!locationId) throw new Error("usage: fetch <locationId> [out.json]");
+  const fp = await fingerprintOf(locationId);
   if (fp.unreadable) console.error(`  ! ${fp.unreadable.length} object(s) unreadable: ` +
     fp.unreadable.map((u) => u.objectKey).join(", "));
 
@@ -122,6 +188,7 @@ if (cmd === "fetch") {
     "  node tools-schema.mjs fetch   <locationId> [out.json]   # via the Worker, needs PROVISION_KEY",
     "  node tools-schema.mjs capture <locationId> [out.json] [--pit-file t.json]",
     "  node tools-schema.mjs diff    <expected.json> <actual.json>",
+    "  node tools-schema.mjs repair  <locationId> [--apply]   # fetch, diff, fix, re-verify",
   ].join("\n"));
   process.exit(2);
 }
