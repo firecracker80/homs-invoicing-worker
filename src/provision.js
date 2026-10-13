@@ -31,7 +31,7 @@
 // extracts the slug; matching the raw string misses every value. Still run a
 // GET first and check "unmappedCustomValues" before trusting a POST.
 
-import { parseCancellationPolicy } from "./policy.js";
+import { parseCancellationPolicy, deriveProcessingFeePct } from "./policy.js";
 
 const GHL_BASE = "https://services.leadconnectorhq.com";
 const GHL_VERSION = "2021-07-28";
@@ -41,7 +41,7 @@ function json(data, status = 200) {
 }
 
 // Constant-time: compare SHA-256 digests so length and early mismatch don't leak.
-async function adminAuthorized(request, env) {
+export async function adminAuthorized(request, env) {
   const given = request.headers?.get?.("X-Admin-Secret") || "";
   if (!env.ADMIN_SECRET) return false;
   const enc = new TextEncoder();
@@ -252,12 +252,33 @@ export async function handleProvisionTenant(request, env) {
     }, 409);
   }
 
+  // Processing fee, derived rather than read: no custom value carries it, and
+  // the Worker's fee line exists only to recover what PayPal takes. See
+  // deriveProcessingFeePct in policy.js for why wpaypal_client_id is the signal
+  // and why gateway, invoiceStrategy and the *_paypal_email values are not.
+  //
+  // Applied here and not in buildTenantFromCustomValues because it has to see
+  // the EXISTING entry: a rate somebody set on purpose must survive a re-run,
+  // and provisioned fields overwrite existing ones in the merge below.
+  const feeDerived = deriveProcessingFeePct(provisioned, existing);
+  if (feeDerived) {
+    provisioned.processingFeePct = feeDerived.value;
+    // Worth saying out loud when it turns the fee ON: it puts a new 6% line on
+    // every guest invoice this account sends.
+    if (feeDerived.value > 0) {
+      warnings.push(
+        `processingFeePct set to ${feeDerived.value} (${feeDerived.reason}). Every guest invoice will carry a ${(feeDerived.value * 100).toFixed(0)}% processing-fee line. ` +
+        "If this account also has a native Additional Fee for processing on its calendars, the guest is charged twice -- remove the native one."
+      );
+    }
+  }
+
   const finalTenant = existing ? { ...existing, ...provisioned } : provisioned;
 
   if (!isWrite) {
-    return json({ dryRun: true, locationId, wouldWrite: finalTenant, mappedFromCustomValues: mapped, unmappedCustomValues: unmapped, blankCustomValues: blank, skippedSensitive, warnings, tenantAlreadyExists: Boolean(existing) });
+    return json({ dryRun: true, locationId, wouldWrite: finalTenant, mappedFromCustomValues: mapped, unmappedCustomValues: unmapped, blankCustomValues: blank, skippedSensitive, warnings, ...(feeDerived ? { processingFeeDerived: feeDerived } : {}), tenantAlreadyExists: Boolean(existing) });
   }
 
   await env.TENANTS.put(locationId, JSON.stringify(finalTenant));
-  return json({ dryRun: false, locationId, written: finalTenant, mappedFromCustomValues: mapped, unmappedCustomValues: unmapped, blankCustomValues: blank, skippedSensitive, warnings, mergedWithExisting: Boolean(existing) });
+  return json({ dryRun: false, locationId, written: finalTenant, mappedFromCustomValues: mapped, unmappedCustomValues: unmapped, blankCustomValues: blank, skippedSensitive, warnings, ...(feeDerived ? { processingFeeDerived: feeDerived } : {}), mergedWithExisting: Boolean(existing) });
 }

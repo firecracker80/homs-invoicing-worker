@@ -6,7 +6,7 @@
 // the enrich path) so older bookings and the ledger keep one shape.
 // The deposit follows the tenant's policy -- see policy.js.
 import { calcSecurityDeposit, round2 } from "./deposit-engine.js";
-import { depositConfigFor } from "./policy.js";
+import { depositConfigFor, processingFeePctFor } from "./policy.js";
 
 function nightsBetween(checkIn, checkOut) {
   return Math.round((new Date(checkOut) - new Date(checkIn)) / 86400000);
@@ -19,10 +19,11 @@ function composeBooking(payload, tenantProfile) {
   const cleaningFee = 0;
   const deposit = calcSecurityDeposit(nights, nightlyRate, depositConfigFor(tenantProfile), cleaningFee);
 
-  // Processing fee: guest-paid, default 6%, applied to rent + deposit.
+  // Processing fee: guest-paid, applied to rent + deposit. Zero unless the
+  // account takes PayPal -- see processingFeePctFor in policy.js.
   // Collected inside the RENT purchase unit so the DEP unit stays pure —
   // deposit refunds return 100% of the deposit; the fee is never refunded.
-  const feePct = tenantProfile.processingFeePct ?? 0.06;
+  const feePct = processingFeePctFor(tenantProfile);
   const processingFee = round2(feePct * (rentTotal + cleaningFee + deposit.totalDeposit));
 
   // Commission basis: rent only (gross — guest covers processing)

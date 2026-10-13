@@ -78,6 +78,34 @@ where that workflow already exists in the client's sub-account:
 - `ghlDepositRefundUrl` — deposit refunded
 - `ghlRescheduleUrl` — booking rescheduled
 
+Loading a snapshot mints **fresh per-account webhook UUIDs**, so these cannot
+be copied from another account and no API reads them — paste each one into its
+`WGHL_*_URL` Custom Value by hand. This is the one genuinely manual step.
+
+### 6a. Seed each webhook with a payload (required, and ordered)
+A GHL Inbound Webhook trigger learns its field schema from the **first payload
+the URL ever receives**. Until one arrives there is nothing to map and the
+workflow cannot be saved against those fields. Two of the four URLs also carry
+structurally different bodies per branch — seed with only one and the other
+branch's fields are never learned, which is how the Payment Confirmed chain
+broke.
+
+```
+GET  .../admin/seed-webhooks?locationId=...            # shows the payloads, sends nothing
+POST .../admin/seed-webhooks?locationId=...&confirm=seed
+```
+
+Each URL receives the **union** of every payload that can reach it, built by
+calling the Worker's own payload builders.
+
+**Order matters.** Seed while the workflows are still **drafts**. A published
+inbound webhook runs the whole workflow on receipt, so seeding a live one sends
+real notifications. The seed carries an empty `contactId` so it can never
+enrol a contact, and every value is visibly fake.
+
+A 200 means GHL accepted the request — not that it captured the schema. Open
+each trigger and confirm its field list before publishing.
+
 ## 7. The KV entry
 
 **Fast path — auto-provision from GHL's Custom Values.** If you've already
@@ -113,7 +141,7 @@ Storage & Databases → KV → **TENANTS** → Add entry, key = the client's
   "brandName": "Client Name",
   "currency": "USD",
   "ownerPct": 0.85,
-  "processingFeePct": 0.06,
+  "processingFeePct": 0.06,       // derived if omitted: 6% with a PayPal client ID, else 0
   "defaultCleaningFee": 69,
   "cleaningFeeRecipient": "manager",
   "gateway": "paypal",
@@ -127,6 +155,23 @@ Storage & Databases → KV → **TENANTS** → Add entry, key = the client's
   "invoiceStrategy": "enrich"
 }
 ```
+
+### `processingFeePct` — leave it out unless you mean to override it
+The Worker's processing-fee line exists to recover what PayPal takes, and
+PayPal charges on the **whole captured amount** — rent, add-ons, cleaning, tax
+and the security deposit. That is why it cannot be a GHL calendar Additional
+Fee: those are a percentage of the service price only, so they under-recover,
+worst on the bookings with the largest deposits.
+
+Omit the field and provisioning derives it: **6% when the account has a
+`WPayPal Client ID` Custom Value, 0 when it does not.** An explicit value is
+never overwritten, so set one only to override the rate. The default when
+nothing is stated and nothing is derived is **0** — an unconfigured account
+charges a guest nothing.
+
+If the account *also* carries a native Additional Fee for processing on its
+calendars, the guest is charged twice and the Worker's fee compounds on top of
+GHL's. Remove the native one; keep this.
 
 Everything else (`checkInHour`/`checkOutHour`/`tzOffsetHours`, `webhookSecret`,
 `locale`, `defaultLanguage`, `invoiceDueHours`, `thankYouUrl`, `properties`,

@@ -29,6 +29,7 @@
 
 import { composeBooking } from "./booking-composer.js";
 import { isFeeLine, isCleaningFee, isPassThrough } from "./ghl-invoice.js";
+import { processingFeePctFor } from "./policy.js";
 
 export const MULTI_PARENT_TYPE = "multi_listing_parent";
 
@@ -392,7 +393,7 @@ function applyFees(children, cleaning, addOns, tenant) {
     }
 
     const deposit = child.securityDeposit?.total ?? 0;
-    const feePct = child.charges.feePct ?? tenant.processingFeePct ?? 0.06;
+    const feePct = processingFeePctFor(tenant, child);
     const charged = round2(child.charges.rentTotal + cleaningAmt + addOnAmt);
     child.charges.processingFee = round2(feePct * (charged + deposit));
     child.charges.grandTotal = round2(charged + child.charges.processingFee + deposit);

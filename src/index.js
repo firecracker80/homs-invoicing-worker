@@ -15,6 +15,7 @@ import { resolveDraftInvoiceId, enrichAndSendInvoice, invoiceHasWorkerLines } fr
 const CLAIM_STALE_MS = 2 * 60 * 1000;
 import { handleOwnerStatement, handleManagerStatement, handleManagerPL, handleReconcile } from "./reports.js";
 import { handleProvisionTenant } from "./provision.js";
+import { handleSeedWebhooks } from "./webhook-seed.js";
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -477,6 +478,8 @@ export default {
         return handleReconcile(request, env);
       if (url.pathname === "/admin/provision-tenant" && (request.method === "GET" || request.method === "POST"))
         return handleProvisionTenant(request, env);
+      if (url.pathname === "/admin/seed-webhooks" && (request.method === "GET" || request.method === "POST"))
+        return handleSeedWebhooks(request, env);
       if (url.pathname === "/paypal/cancel" || url.pathname === "/stripe/cancel")
         return json({ status: "cancelled", note: "guest cancelled checkout" });
       return json({ error: "Not found" }, 404);
