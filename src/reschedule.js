@@ -9,7 +9,7 @@
 // rolls back a completed reschedule; it just flags the manual follow-up.
 
 import { calcSecurityDeposit, round2 } from "./deposit-engine.js";
-import { depositConfigFor } from "./policy.js";
+import { depositConfigFor, processingFeePctFor } from "./policy.js";
 import { createOrder, getAccessToken } from "./paypal.js";
 import { createCheckoutSession } from "./stripe.js";
 import { writeAndSyncRows, bookingTotalOf } from "./ledger.js";
@@ -66,6 +66,65 @@ const addDays = (isoDate, days) =>
   new Date(Date.parse(`${dayOnly(isoDate)}T00:00:00.000Z`) + days * DAY_MS).toISOString().slice(0, 10);
 const daysBetweenDates = (a, b) =>
   Math.round((Date.parse(`${dayOnly(b)}T00:00:00.000Z`) - Date.parse(`${dayOnly(a)}T00:00:00.000Z`)) / DAY_MS);
+
+// Both reschedule paths post here, and until 2026-10-13 they posted DIFFERENT
+// key sets: the unpaid path omitted balanceDue, invoiceNumber,
+// manualRefundRequired, manualRefundTotal and refundFailed. GHL captures a
+// webhook's field schema from the first payload it ever receives, so whichever
+// path fired first decided which fields the workflow could reference at all --
+// and on an account seeded by the unpaid path, a shortened paid stay owing the
+// guest money had nowhere to say so.
+//
+// One builder, one key set, always complete. Additive by construction: a
+// workflow that ignores a field behaves exactly as before, and every field is
+// now there to be mapped. webhook-seed.js calls this to seed the real schema.
+export function rescheduleNotifyPayload({
+  bookingId, contactId, email, guestName,
+  oldCheckIn, oldCheckOut, newCheckIn, newCheckOut, newNights,
+  rentTotal, depositTotal, processingFee, totalDelta,
+  settlementType, approveUrl, balanceDue, invoiceNumber,
+  adminFeeRetained, cancellationTier,
+  manualRefundTotal = 0, refundFailed = false,
+  propertyName, calendarUpdateRequired,
+}) {
+  const manual = Number(manualRefundTotal) || 0;
+  return {
+    event: "booking_rescheduled",
+    bookingId: bookingId || "",
+    contactId: contactId || "",
+    email: email || "",
+    firstName: String(guestName || "").split(" ")[0],
+    oldCheckIn: oldCheckIn || "",
+    oldCheckOut: oldCheckOut || "",
+    newCheckIn: newCheckIn || "",
+    newCheckOut: newCheckOut || "",
+    newNights,
+    rentTotal: Number(rentTotal || 0).toFixed(2),
+    depositTotal: Number(depositTotal || 0).toFixed(2),
+    processingFee: Number(processingFee || 0).toFixed(2),
+    totalDelta: Number(totalDelta || 0).toFixed(2),
+    settlementType: settlementType || "",
+    approveUrl: approveUrl || "",
+    // Balance now owed on the guest's existing invoice, when the difference
+    // went there instead of onto a new payment link.
+    balanceDue: balanceDue != null ? Number(balanceDue).toFixed(2) : "",
+    invoiceNumber: invoiceNumber || "",
+    adminFeeRetained: Number(adminFeeRetained || 0).toFixed(2),
+    cancellationTier: cancellationTier || "",
+    // What somebody has to DO, not just what happened -- the same pair /cancel
+    // grew on 2026-09-26 and for the same reason. On the ghl_invoice gateway
+    // every refund is issued by hand, so a shortened stay left money owed to a
+    // guest with nothing anywhere saying so: the ledger now reverses the income
+    // either way, and this is how a person finds out there is a payment to make.
+    manualRefundRequired: manual > 0 ? "yes" : "no",
+    manualRefundTotal: manual.toFixed(2),
+    // Separate on purpose: a refund the gateway REFUSED is a fault, not a task,
+    // and a manager reading one as the other would either pay twice or not at all.
+    refundFailed: refundFailed ? "yes" : "no",
+    propertyName: propertyName || "",
+    calendarUpdateRequired: calendarUpdateRequired ? "true" : "false",
+  };
+}
 
 // Move a whole bundled reservation.
 //
@@ -257,7 +316,7 @@ export async function handleReschedule(request, env) {
   // for the full new total. The old (unpaid) link is left to expire on its own.
   if (!snapshot.settled) {
     const cur0 = tenant.currency || "USD";
-    const feePct0 = snapshot.charges.feePct ?? tenant.processingFeePct ?? 0.06;
+    const feePct0 = processingFeePctFor(tenant, snapshot);
     const newProcessingFee = round2(feePct0 * (newRent + snapshot.charges.cleaningFee + newDeposit));
     const newGrandTotal = round2(newRent + snapshot.charges.cleaningFee + newProcessingFee + newDeposit);
 
@@ -342,25 +401,26 @@ export async function handleReschedule(request, env) {
 
     const calendar0 = await updateGhlBookingDates(env, tenant, snapshot, newCheckIn, newCheckOut);
 
-    await notifyAndRecord(env, snapshot, tenant.ghlRescheduleUrl, {
-      event: "booking_rescheduled",
+    await notifyAndRecord(env, snapshot, tenant.ghlRescheduleUrl, rescheduleNotifyPayload({
       bookingId: snapshot.bookingId,
-      contactId: snapshot.ghlContactId || "",
-      email: snapshot.guest?.email || "",
-      firstName: (snapshot.guest?.name || "").split(" ")[0],
+      contactId: snapshot.ghlContactId,
+      email: snapshot.guest?.email,
+      guestName: snapshot.guest?.name,
       oldCheckIn: oldStay0.checkIn, oldCheckOut: oldStay0.checkOut,
       newCheckIn, newCheckOut, newNights,
-      rentTotal: newRent.toFixed(2),
-      depositTotal: newDeposit.toFixed(2),
-      processingFee: newProcessingFee.toFixed(2),
-      totalDelta: newGrandTotal.toFixed(2),
+      rentTotal: newRent,
+      depositTotal: newDeposit,
+      processingFee: newProcessingFee,
+      totalDelta: newGrandTotal,
       settlementType: "unpaid_new_link",
       approveUrl,
-      adminFeeRetained: "0.00",
+      // No invoice and no money moved yet, so there is nothing owed either way.
+      balanceDue: null, invoiceNumber: "",
+      adminFeeRetained: 0,
       cancellationTier: "",
       propertyName: snapshot.propertyCode || tenant.brandName,
-      calendarUpdateRequired: calendar0.ok ? "false" : "true"
-    });
+      calendarUpdateRequired: !calendar0.ok
+    }));
 
     return json({
       bookingId: snapshot.bookingId,
@@ -373,7 +433,7 @@ export async function handleReschedule(request, env) {
 
   const rentDelta = round2(newRent - oldRent);
   const depositDelta = round2(newDeposit - oldDeposit);
-  const feePct = snapshot.charges.feePct ?? tenant.processingFeePct ?? 0.06;
+  const feePct = processingFeePctFor(tenant, snapshot);
   const cur = tenant.currency || "USD";
 
   let settlement = { type: "none", amount: 0 };
@@ -755,40 +815,29 @@ export async function handleReschedule(request, env) {
     .filter(p => p.type.endsWith("_needed_manual") || p.type.endsWith("_failed"))
     .reduce((s, p) => s + (Number(p.amount) || 0), 0));
 
-  await notifyAndRecord(env, snapshot, tenant.ghlRescheduleUrl, {
-    event: "booking_rescheduled",
+  await notifyAndRecord(env, snapshot, tenant.ghlRescheduleUrl, rescheduleNotifyPayload({
     bookingId: snapshot.bookingId,
-    contactId: snapshot.ghlContactId || "",
-    email: snapshot.guest?.email || "",
-    firstName: (snapshot.guest?.name || "").split(" ")[0],
+    contactId: snapshot.ghlContactId,
+    email: snapshot.guest?.email,
+    guestName: snapshot.guest?.name,
     oldCheckIn: oldStay.checkIn,
     oldCheckOut: oldStay.checkOut,
     newCheckIn, newCheckOut, newNights,
-    rentTotal: newRent.toFixed(2),
-    depositTotal: newDeposit.toFixed(2),
-    processingFee: deltaFeeForDisplay.toFixed(2),
-    totalDelta: totalDelta.toFixed(2),
+    rentTotal: newRent,
+    depositTotal: newDeposit,
+    processingFee: deltaFeeForDisplay,
+    totalDelta,
     settlementType: settlement.type,
     approveUrl: settlement.approveUrl || "",
-    // Balance now owed on the guest's existing invoice, when the difference
-    // went there instead of onto a new payment link.
-    balanceDue: settlement.amountDue != null ? Number(settlement.amountDue).toFixed(2) : "",
-    invoiceNumber: settlement.invoiceNumber || "",
-    adminFeeRetained: (cancellationInfo?.adminFee ?? 0).toFixed(2),
-    cancellationTier: cancellationInfo?.tier || "",
-    // What somebody has to DO, not just what happened -- the same pair /cancel
-    // grew on 2026-09-26 and for the same reason. On the ghl_invoice gateway
-    // every refund is issued by hand, so a shortened stay left money owed to a
-    // guest with nothing anywhere saying so: the ledger now reverses the income
-    // either way, and this is how a person finds out there is a payment to make.
-    manualRefundRequired: manualRefundTotal > 0 ? "yes" : "no",
-    manualRefundTotal: manualRefundTotal.toFixed(2),
-    // Separate on purpose: a refund the gateway REFUSED is a fault, not a task,
-    // and a manager reading one as the other would either pay twice or not at all.
-    refundFailed: (settlement.parts || []).some(p => p.type.endsWith("_failed")) ? "yes" : "no",
+    balanceDue: settlement.amountDue,
+    invoiceNumber: settlement.invoiceNumber,
+    adminFeeRetained: cancellationInfo?.adminFee ?? 0,
+    cancellationTier: cancellationInfo?.tier,
+    manualRefundTotal,
+    refundFailed: (settlement.parts || []).some(p => p.type.endsWith("_failed")),
     propertyName: snapshot.propertyCode || tenant.brandName,
-    calendarUpdateRequired: calendar.ok ? "false" : "true"
-  });
+    calendarUpdateRequired: !calendar.ok
+  }));
 
   return json({
     bookingId: snapshot.bookingId,

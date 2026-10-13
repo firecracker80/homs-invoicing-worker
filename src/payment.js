@@ -180,6 +180,32 @@ async function verifyStripeWebhook(tenant, env, request, rawBody) {
 //
 // So both routes build their payload here. Adding a field to one now adds it to
 // both, and they cannot drift apart again.
+// A payment that landed on a booking already cancelled. Posted to the SAME
+// url as booking_cancelled and sharing almost none of its fields, which is why
+// the seeder has to send the union of both -- GHL captures its field schema
+// from the first payload a webhook ever receives.
+//
+// Flat strings, same as the cancellation notify: a workflow branches on
+// paymentAfterCancellation being "yes" and tells whoever has to act.
+export function paymentAfterCancellationPayload({
+  bookingId, contactId, email, guestName, amount, invoiceNumber, cancelledAt, checkIn, propertyName,
+}) {
+  return {
+    event: "payment_after_cancellation",
+    bookingId: bookingId || "",
+    contactId: contactId || "",
+    email: email || "",
+    guestName: guestName || "",
+    paymentAfterCancellation: "yes",
+    amountPaid: Number(amount || 0).toFixed(2),
+    refundOwed: Number(amount || 0).toFixed(2),
+    invoiceNumber: invoiceNumber || "",
+    cancelledAt: cancelledAt || "",
+    checkIn: checkIn || "",
+    propertyName: propertyName || "",
+  };
+}
+
 export function paymentConfirmedPayload({
   bookingId, contactId, amountPaid, depositTotal, checkIn, checkOut, propertyName,
 }) {
@@ -518,20 +544,17 @@ export async function handleGhlInvoicePaid(request, env) {
     //
     // Flat strings, same as the cancellation notify: a workflow branches on
     // paymentAfterCancellation being "yes" and tells whoever has to act.
-    await notifyAndRecord(env, snapshot, tenant.ghlCancellationUrl, {
-      event: "payment_after_cancellation",
+    await notifyAndRecord(env, snapshot, tenant.ghlCancellationUrl, paymentAfterCancellationPayload({
       bookingId: snapshot.bookingId,
-      contactId: snapshot.ghlContactId || "",
-      email: snapshot.guest?.email || "",
-      guestName: snapshot.guest?.name || "",
-      paymentAfterCancellation: "yes",
-      amountPaid: amount.toFixed(2),
-      refundOwed: amount.toFixed(2),
-      invoiceNumber: invoice.invoiceNumber || "",
-      cancelledAt: snapshot.cancellation?.at || "",
-      checkIn: snapshot.stay?.checkIn || "",
-      propertyName: snapshot.propertyCode || tenant.brandName || "",
-    });
+      contactId: snapshot.ghlContactId,
+      email: snapshot.guest?.email,
+      guestName: snapshot.guest?.name,
+      amount,
+      invoiceNumber: invoice.invoiceNumber,
+      cancelledAt: snapshot.cancellation?.at,
+      checkIn: snapshot.stay?.checkIn,
+      propertyName: snapshot.propertyCode || tenant.brandName,
+    }));
 
     return json({ ok: true, skipped: "booking_cancelled", refundOwed: amount, invoiceId: invoice._id, ...paymentSkippedPayload("cancelled", bookingId) });
   }

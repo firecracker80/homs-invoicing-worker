@@ -544,6 +544,22 @@ export function cancellationNotifyPayload({
   };
 }
 
+// Extracted so the webhook seeder posts the same key set GHL will later
+// receive for real -- see webhook-seed.js. Values change, keys never should.
+export function depositRefundNotifyPayload({ bookingId, contactId, email, refundAmount, claim, status, propertyName }) {
+  return {
+    event: "deposit_refunded",
+    bookingId: bookingId || "",
+    contactId: contactId || "",
+    email: email || "",
+    refundTotal: Number(refundAmount || 0).toFixed(2),   // same field name as cancellation payloads
+    refundAmount: Number(refundAmount || 0).toFixed(2),  // kept for back-compat
+    claimAmount: Number(claim || 0).toFixed(2),
+    status: status || "",
+    propertyName: propertyName || ""
+  };
+}
+
 export async function handleCancel(request, env, { notify = true, voidInvoice: shouldVoid = true } = {}) {
   const ctx = await loadContext(request, env);
   if (ctx.error) return ctx.error;
@@ -905,15 +921,13 @@ export async function handleDepositRefund(request, env) {
     console.error(`Deposit refund ledger sync failed for ${snapshot.bookingId}:`, err.message);
   }
 
-  await notifyAndRecord(env, snapshot, tenant.ghlDepositRefundUrl, {
-    event: "deposit_refunded", bookingId: snapshot.bookingId,
-    contactId: snapshot.ghlContactId || "",
-    email: snapshot.guest?.email || "",
-    refundTotal: refundAmount.toFixed(2),   // same field name as cancellation payloads
-    refundAmount: refundAmount.toFixed(2),  // kept for back-compat
-    claimAmount: claim.toFixed(2),
-    status, propertyName: snapshot.propertyCode || tenant.brandName
-  });
+  await notifyAndRecord(env, snapshot, tenant.ghlDepositRefundUrl, depositRefundNotifyPayload({
+    bookingId: snapshot.bookingId,
+    contactId: snapshot.ghlContactId,
+    email: snapshot.guest?.email,
+    refundAmount, claim, status,
+    propertyName: snapshot.propertyCode || tenant.brandName
+  }));
 
   return json({ processed: true, status, refundAmount, claimAmount: claim, refundId });
 }

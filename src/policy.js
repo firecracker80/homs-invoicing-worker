@@ -198,3 +198,62 @@ export function isPetFeeName(name, tenant) {
   for (const extra of [].concat(tenant?.petFeeName || [])) names.add(normName(extra));
   return String(name ?? "").split(/\s*[\/|]\s*|\s+-\s+/).some(part => names.has(normName(part)));
 }
+
+// ---- Processing fee ---------------------------------------------------------
+//
+// The Worker's processing-fee line exists for one reason: to recover what
+// PayPal takes. PayPal charges its percentage on the WHOLE captured amount --
+// rent, add-ons, cleaning, taxes and the security deposit -- which is why this
+// cannot be moved to a GHL calendar Additional Fee. Those are a percentage of
+// the service price only, so they under-recover, worst on the bookings with
+// the largest deposits. (Yari, 2026-10-13, removing the native one for exactly
+// this reason.)
+//
+// Stripe is not a case here: the DR entity cannot hold a Stripe account.
+export const PAYPAL_FEE_PCT = 0.06;
+
+// The rate a booking is charged at. Three sources, in order:
+//
+//   1. snapshot.charges.feePct -- the rate pinned when the booking was priced.
+//      Always wins, so repricing an old booking never re-rates it at today's.
+//   2. tenant.processingFeePct -- what the account states.
+//   3. zero.
+//
+// The default is zero, not 6%, and that direction is the whole point: an
+// account nobody has configured must charge a guest nothing. It used to
+// default to 6% in six separate copies, which is how Casa Bonita ended up
+// adding a 6% line on top of GHL's own native 6% fee on INV-000031 -- a
+// compounding double charge that no single file was wrong about.
+export function processingFeePctFor(tenant, snapshot) {
+  const pinned = snapshot?.charges?.feePct;
+  if (pinned != null) return pinned;
+  if (tenant?.processingFeePct != null) return tenant.processingFeePct;
+  return 0;
+}
+
+// Provisioning-time derivation: does this account take PayPal, and therefore
+// need the fee recovered?
+//
+// `wpaypal_client_id` is the signal, and it is the only one that is true for
+// exactly the accounts that take PayPal:
+//
+//   - tenant.gateway is unreliable. Luminara reads "paypal" with no
+//     paypalSecretName, so the clientId+secretName inference in provision.js
+//     does not even reproduce it.
+//   - invoiceStrategy is "enrich" on every live account, PayPal ones included,
+//     so it says nothing about who moves the money.
+//   - wowner_paypal_email / wmgr_paypal_email are PAYOUT addresses -- where
+//     HOMS sends an owner their share -- not evidence a guest pays by PayPal.
+//     Keying on those would put a 6% guest fee on an account that takes none.
+//
+// Returns null when the account already states a rate: a derivation must never
+// overwrite something somebody set on purpose. Same discipline as the blank
+// guard in provision.js, and it is what keeps YV Guest Properties' explicit 0.
+export function deriveProcessingFeePct(provisioned, existing) {
+  if (existing && existing.processingFeePct != null) return null;
+  if (provisioned && provisioned.processingFeePct != null) return null;
+  const clientId = provisioned?.paypalClientId || existing?.paypalClientId;
+  return clientId
+    ? { value: PAYPAL_FEE_PCT, reason: "wpaypal_client_id is set: PayPal takes its cut of the whole captured amount, so the Worker recovers it" }
+    : { value: 0, reason: "no wpaypal_client_id in this account's custom values, so there is no PayPal fee to pass on" };
+}

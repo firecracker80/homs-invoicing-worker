@@ -66,7 +66,7 @@
 // as contactId/locationId already do. Keeps onboarding a new client to
 // zero static per-tenant GHL-user config -- it scales across every user in
 // every account without a KV entry per person.
-import { yesNo, isPetFeeName, depositConfigFor } from "./policy.js";
+import { yesNo, isPetFeeName, depositConfigFor, processingFeePctFor } from "./policy.js";
 import { calcSecurityDeposit } from "./deposit-engine.js";
 
 const GHL_BASE = "https://services.leadconnectorhq.com";
@@ -185,7 +185,7 @@ export function repriceFromInvoice(snapshot, tenant, nativeItems) {
   const nativeSubtotal = round2(nativeItems.reduce((s, i) => s + lineTotal(i), 0));
   const nightlyRate = round2(rent / nights);
   const deposit = calcSecurityDeposit(nights, nightlyRate, depositConfigFor(tenant), 0);
-  const feePct = snapshot.charges.feePct ?? tenant.processingFeePct ?? 0.06;
+  const feePct = processingFeePctFor(tenant, snapshot);
   const processingFee = round2(feePct * (nativeSubtotal + deposit.totalDeposit));
 
   // Everything the guest was charged for that is not the stay itself, not its
@@ -609,7 +609,7 @@ export async function updateInvoiceForReschedule(
   const nativeSubtotal = round2([newStayLine, ...otherNative]
     .reduce((s, i) => s + Number(i.amount || 0) * Number(i.qty || 1), 0));
   const deposit = round2(snapshot.securityDeposit?.total || 0);
-  const feePct = snapshot.charges.feePct ?? tenant.processingFeePct ?? 0.06;
+  const feePct = processingFeePctFor(tenant, snapshot);
   const processingFee = round2(feePct * (nativeSubtotal + deposit));
 
   const ourLines = [];
