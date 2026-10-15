@@ -204,6 +204,10 @@ const UI = {
     statementHeading: { owner: "Owner statement", manager: "Manager statement" },
     directOnly: "Direct bookings only. Reservations made through a booking platform are paid out by that platform and do not appear here.",
     totalEarned: "Total earned",
+    grossRent: "Gross rent",
+    managementCommission: "Management commission",
+    ownerCosts: "Costs charged to you",
+    netToOwner: "Net to you",
     otaNote: (cur, amt) => `A comparable OTA commission on this period&rsquo;s bookings would have been ${cur} ${amt}.`,
     byType: "By type",
     detail: "Detail",
@@ -277,6 +281,10 @@ const UI = {
     statementHeading: { owner: "Estado de cuenta del propietario", manager: "Estado de cuenta del administrador" },
     directOnly: "Solo reservas directas. Las reservas hechas a través de una plataforma las paga esa plataforma y no aparecen aquí.",
     totalEarned: "Total generado",
+    grossRent: "Alquiler bruto",
+    managementCommission: "Comisión de administración",
+    ownerCosts: "Gastos a su cargo",
+    netToOwner: "Neto para usted",
     otaNote: (cur, amt) => `La comisión equivalente de una plataforma sobre las reservas de este período habría sido ${cur} ${amt}.`,
     byType: "Por concepto",
     detail: "Detalle",
@@ -406,6 +414,74 @@ export const describeEntry = (row, locale = "en") =>
     ? row.description || entryLabel(row.entryType, locale)
     : entryLabel(row.entryType, locale);
 
+// Which owners this account actually has ledger rows for, in this window.
+//
+// The caller needs this to offer a picker, and it has to come from here rather
+// than from the property records: recipientName is matched against
+// recipient_name with =, so a name that differs by a letter or by case selects
+// nothing and renders a statement of zeros that looks like a real one. The
+// dashboard's own property list shows "carlos mendoza" where the tenant default
+// says "Carlos Mendoza", and either could be what ledger.js resolved from the
+// contact. Publishing the stored values removes the guess.
+//
+// A row with no recipient_name is normal -- an account with a single owner
+// never needs one -- and is reported as null so the caller can label it rather
+// than drop it.
+async function queryOwnerNames(env, locationId, from, to) {
+  const res = await env.LEDGER_DB.prepare(
+    `SELECT recipient_name, COUNT(*) AS n
+     FROM ledger_entries
+     WHERE location_id = ?1 AND recipient = 'owner' AND created_at >= ?2 AND created_at < ?3
+     GROUP BY recipient_name
+     ORDER BY recipient_name`
+  ).bind(locationId, from, to).all();
+  return (res.results || []).map((r) => ({ name: r.recipient_name ?? null, entryCount: Number(r.n || 0) }));
+}
+
+// The manager's cut of THIS owner's bookings.
+//
+// An owner statement has to answer "why is what I receive less than what guests
+// paid for my property", and the commission is most of that answer. It cannot
+// come from an owner-scoped query: the split is written as two rows per booking
+// and the manager's half carries recipient='manager', so a query scoped to the
+// owner can never see it. The admin dashboard computed this locally instead and
+// got $0.00 on every statement ever rendered -- it summed expense records
+// categorised management_fee, which nothing writes, so Villa Amarilla's owner
+// was shown keeping 100% of gross on a 15% account (Yari, 2026-10-13).
+//
+// Scoped by booking id rather than by name or window alone, so an account with
+// several owners attributes each commission to the owner whose booking produced
+// it.
+//
+// The empty-list early return says what it means rather than changing what
+// happens: the chunk loop below already runs zero times on an empty array, so
+// removing the guard kills no test and cannot. It is kept because "no bookings
+// means no commission" is the rule, and because IN () is a syntax error waiting
+// for whoever rewrites the loop without noticing.
+async function queryOwnerCommission(env, locationId, from, to, bookingIds) {
+  if (!bookingIds.length) return { commission: 0, bookingCount: 0 };
+  // Chunked because SQLite has a bound-parameter ceiling and a busy month can
+  // carry more bookings than it allows.
+  const CHUNK = 80;
+  let totalMinor = 0;
+  let counted = 0;
+  for (let i = 0; i < bookingIds.length; i += CHUNK) {
+    const slice = bookingIds.slice(i, i + CHUNK);
+    const holes = slice.map((_, n) => `?${n + 5}`).join(", ");
+    const res = await env.LEDGER_DB.prepare(
+      `SELECT SUM(amount_minor) AS total_minor, COUNT(*) AS n
+       FROM ledger_entries
+       WHERE location_id = ?1 AND recipient = 'manager' AND entry_type = ?2
+         AND created_at >= ?3 AND created_at < ?4
+         AND booking_id IN (${holes})`
+    ).bind(locationId, "rent_split_manager", from, to, ...slice).all();
+    const row = (res.results || [])[0] || {};
+    totalMinor += Number(row.total_minor || 0);
+    counted += Number(row.n || 0);
+  }
+  return { commission: fromMinor(totalMinor), bookingCount: counted };
+}
+
 async function queryStatement(env, locationId, recipient, from, to, recipientName) {
   // recipientName is optional -- a tenant with one owner and one manager
   // total never needs it (recipient alone already scopes the whole
@@ -445,8 +521,29 @@ async function queryStatement(env, locationId, recipient, from, to, recipientNam
   // (never this recipient's earnings) -- "what did they actually earn".
   const incomeTotal = round2(summary.filter(s => s.category === "income").reduce((s, r) => s + r.total, 0));
   const shadowTotal = round2(summary.filter(s => s.category === "shadow").reduce((s, r) => s + r.total, 0));
+  const expenseTotal = round2(summary.filter(s => s.category === "expense").reduce((s, r) => s + r.total, 0));
 
-  return { summary, detail, incomeTotal, shadowTotal, currency: detail[0]?.currency || summary[0]?.currency || "USD" };
+  const base = { summary, detail, incomeTotal, shadowTotal, expenseTotal,
+    currency: detail[0]?.currency || summary[0]?.currency || "USD" };
+  if (recipient !== "owner") return base;
+
+  // An owner reads one question off this: what reached me, and what came off
+  // the top. The commission lives on the manager's half of the split, so it is
+  // fetched rather than derived -- deriving it from a percentage would invent a
+  // number on any booking priced at a different rate, and repricing does that.
+  const bookingIds = [...new Set(detail.map(d => d.bookingId).filter(Boolean))];
+  const { commission, bookingCount } = await queryOwnerCommission(env, locationId, from, to, bookingIds);
+  // Gross is reconstructed, not read: the ledger stores the two halves, never
+  // the whole. Owner share + manager share IS the rent the guest was charged.
+  const rentOwner = round2(summary
+    .filter(s => s.entryType === "rent_split_owner").reduce((s, r) => s + r.total, 0));
+  return {
+    ...base,
+    managerCommission: commission,
+    commissionBookingCount: bookingCount,
+    grossRent: round2(rentOwner + commission),
+    netIncome: round2(incomeTotal - expenseTotal),
+  };
 }
 
 function statementHtml({ brandName, heading, recipientName, fromLabel, toLabel, allTime = false, stmt, locale = "en" }) {
@@ -493,6 +590,13 @@ function statementHtml({ brandName, heading, recipientName, fromLabel, toLabel, 
   th { text-align:left; font-weight:600; color:var(--muted); font-size:.75rem; text-transform:uppercase; letter-spacing:.03em; padding:8px 10px; border-bottom:1px solid var(--line); }
   td { padding:10px; border-bottom:1px solid var(--line); vertical-align:top; }
   td.amt { text-align:right; font-variant-numeric:tabular-nums; }
+  /* The owner's gross -> commission -> costs -> net block. Deliberately plain:
+     it is the first thing read and should look like an invoice total, not a
+     dashboard tile. */
+  table.reconcile { margin-bottom:14px; }
+  table.reconcile td { padding:7px 10px; }
+  table.reconcile td.neg { color:var(--neg); }
+  table.reconcile tr.net td { font-weight:700; border-top:2px solid var(--line); }
   td.muted { color:var(--muted); }
   .cat { font-size:.72rem; padding:2px 8px; border-radius:999px; display:inline-block; }
   .cat-income { background:#E6F6EF; color:var(--teal); }
@@ -515,6 +619,25 @@ function statementHtml({ brandName, heading, recipientName, fromLabel, toLabel, 
     direct bookings, the more that gap would read as a decline somewhere else.
   -->
   <div class="scope-note">${t.directOnly}</div>
+
+  <!--
+    Gross, commission, costs, net. Owners only: it answers "why is what I
+    received less than what guests paid for my property", which is the question
+    an owner statement exists for. Shown above the ledger listing because the
+    listing answers it only to somebody who already knows the split is two rows.
+
+    Omitted entirely when there is no gross -- a reconciliation of zero against
+    zero is noise, and the total card below already says nothing was earned.
+  -->
+  ${stmt.grossRent > 0 ? `
+  <table class="reconcile">
+    <tbody>
+      <tr><td>${t.grossRent}</td><td class="amt">${stmt.currency} ${stmt.grossRent.toFixed(2)}</td></tr>
+      <tr><td>${t.managementCommission}</td><td class="amt neg">(${stmt.currency} ${stmt.managerCommission.toFixed(2)})</td></tr>
+      ${stmt.expenseTotal > 0 ? `<tr><td>${t.ownerCosts}</td><td class="amt neg">(${stmt.currency} ${stmt.expenseTotal.toFixed(2)})</td></tr>` : ""}
+      <tr class="net"><td>${t.netToOwner}</td><td class="amt">${stmt.currency} ${stmt.netIncome.toFixed(2)}</td></tr>
+    </tbody>
+  </table>` : ""}
 
   <div class="total-card">
     <div class="label">${t.totalEarned}</div>
@@ -550,6 +673,11 @@ async function handleStatement(request, env, recipient, tokenField) {
   const locale = resolveLocale(url, tenant);
   const recipientName = url.searchParams.get("recipientName") || null;
   const stmt = await queryStatement(env, locationId, recipient, from, to, recipientName);
+  // Only for owners, and only on the JSON view: the HTML statement is one
+  // recipient's document and has no picker to fill.
+  const owners = recipient === "owner" && (url.searchParams.get("format") || "html") === "json"
+    ? await queryOwnerNames(env, locationId, from, to)
+    : null;
   const heading = strings(locale).statementHeading[recipient];
 
   // brandName can come from the URL (a GHL merge tag like
@@ -559,7 +687,8 @@ async function handleStatement(request, env, recipient, tokenField) {
   const brandName = url.searchParams.get("brandName") || tenant.brandName || locationId;
 
   if ((url.searchParams.get("format") || "html") === "json") {
-    return json({ locationId, recipient, recipientName, locale, from: fromLabel, to: toLabel, ...stmt });
+    return json({ locationId, recipient, recipientName, locale, from: fromLabel, to: toLabel, ...stmt,
+      ...(owners ? { availableOwners: owners } : {}) });
   }
   return html(statementHtml({ brandName, heading, recipientName, fromLabel, toLabel, allTime, stmt, locale }));
 }
