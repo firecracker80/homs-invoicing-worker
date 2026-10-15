@@ -99,7 +99,7 @@ function makeMockD1() {
 }
 
 // ---- fixtures matching the real snapshot shape ----
-const tenant = { currency: "USD", processingFeePct: 0.06, otaRate: 0.15 };
+const tenant = { currency: "USD", processingFeePct: 0.06 };
 function makeSnapshot(bookingId, overrides = {}) {
   return {
     bookingId, locationId: "L1", ghlInvoice: { invoiceId: "inv_123" },
@@ -118,7 +118,7 @@ const r1 = await writeLedgerEntries(env1, tenant, makeSnapshot("BK-1"), captures
 assert.equal(r1.ok, true);
 // rowsWritten moved under .d1 when writeAndSyncRows began writing D1 AND
 // mirroring to GHL in one call -- the top-level result now reports both legs.
-assert.equal(r1.d1.rowsWritten, 6, "expected 6 rows: owner rent, manager rent, cleaning, deposit, processing fee, shadow OTA");
+assert.equal(r1.d1.rowsWritten, 5, "expected 5 rows: owner rent, manager rent, cleaning, deposit, processing fee");
 
 const byType = Object.fromEntries(db1._rows.map(r => [r.entry_type, r]));
 assert.equal(byType.rent_split_owner.amount_minor, 59500, "owner 85% of $700 = $595.00 -> 59500 minor units");
@@ -133,35 +133,31 @@ assert.equal(byType.deposit_held.amount_minor, 49000);
 assert.equal(byType.processing_fee.recipient, "platform");
 assert.equal(byType.processing_fee.category, "pass_through", "processing fee must never count as income");
 assert.equal(byType.processing_fee.amount_minor, 4614);
-assert.equal(byType.shadow_ota_commission.category, "shadow", "shadow entry must be its own category, excluded from real income");
-assert.equal(byType.shadow_ota_commission.amount_minor, round2(0.15 * 700) * 100, "15% of $700 basis");
-assert.equal(byType.shadow_ota_commission.recipient, "owner");
-console.log("1) writeLedgerEntries: 6 rows, correct recipients/categories/amounts");
+// Every row written is money that actually moved. The shadow OTA commission --
+// an informational "what Airbnb would have charged" line -- was removed on
+// 2026-10-15, unset on every tenant and with zero rows in the live ledger.
+assert.ok(!db1._rows.some(r => r.category === "shadow"),
+  "nothing informational belongs in the ledger beside real money");
+console.log("1) writeLedgerEntries: 5 rows, correct recipients/categories/amounts");
 
 // ---- 2. Idempotency: calling twice for the SAME booking must not double-count ----
 const r2 = await writeLedgerEntries(env1, tenant, makeSnapshot("BK-1"), captures);
 assert.equal(r2.ok, true);
-assert.equal(db1._rows.length, 6, "re-writing the same booking must not create duplicate rows (OR IGNORE + unique index)");
-console.log("2) Idempotent: re-write of BK-1 added 0 new rows, still 6 total");
+assert.equal(db1._rows.length, 5, "re-writing the same booking must not create duplicate rows (OR IGNORE + unique index)");
+console.log("2) Idempotent: re-write of BK-1 added 0 new rows, still 5 total");
 
-// ---- 3. No otaRate configured -> shadow row skipped, never invent a rate ----
-// Briefly reversed on 2026-09-28 to a flat 15.5% default, and reverted the next
-// day: one invented percentage is wrong for an OTA-sourced booking, whose real
-// rate is recorded on its own channel record, and meaningless for a direct
-// booking, which has no commission at all.
+// ---- 3. a settlement writes exactly the five real-money rows ----
+// The shadow OTA commission row was removed on 2026-10-15: no tenant ever set
+// otaRate and the ledger held zero rows in that category. What is left is five
+// rows, all of them money that actually moved, and nothing informational mixed
+// in among them.
 const db3 = makeMockD1();
 const r3 = await writeLedgerEntries({ LEDGER_DB: db3 }, { currency: "USD" }, makeSnapshot("BK-NO-OTA"), captures);
-assert.equal(r3.d1.rowsWritten, 5, "no otaRate on tenant -> 5 rows, no shadow_ota_commission");
+assert.equal(r3.d1.rowsWritten, 5, "owner rent, manager rent, cleaning, deposit, processing fee");
+assert.ok(!db3._rows.some(r => r.category === "shadow"),
+  "nothing informational is written to the ledger any more");
 assert.ok(!db3._rows.some(r => r.entry_type === "shadow_ota_commission"));
-console.log("3) No tenant.otaRate -> shadow entry correctly omitted (never invents a rate)");
-
-// ---- 3a. otaRate: 0 still means none ----
-// The escape hatch, and the reason the default reads ?? rather than ||.
-const db3a = makeMockD1();
-const r3a = await writeLedgerEntries({ LEDGER_DB: db3a }, { currency: "USD", otaRate: 0 }, makeSnapshot("BK-ZERO-OTA"), captures);
-assert.equal(r3a.d1.rowsWritten, 5, "otaRate 0 -> 5 rows, no shadow_ota_commission");
-assert.ok(!db3a._rows.some(r => r.entry_type === "shadow_ota_commission"));
-console.log("3a) tenant.otaRate = 0 -> shadow entry omitted, the opt-out still works");
+console.log("3) A settlement writes five real-money rows and nothing informational");
 
 // ---- 3b. booking-composer.js: owner/manager name resolution order ----
 // Per-property override wins over the tenant-wide default; a tenant with
@@ -182,12 +178,11 @@ console.log("3b) booking-composer name resolution: per-property override > tenan
 
 // ---- 3c. ledger.js writes the resolved name onto every row for that role ----
 const db3c = makeMockD1();
-await writeLedgerEntries({ LEDGER_DB: db3c }, { ...multiOwnerTenant, otaRate: 0.15 }, makeSnapshot("BK-NAMED", { payout: { basis: 700, ownerPct: 0.85, owner: 595, manager: 105, cleaningFeeTo: "manager", ownerName: "Marco", managerName: "Diego" } }), captures);
+await writeLedgerEntries({ LEDGER_DB: db3c }, multiOwnerTenant, makeSnapshot("BK-NAMED", { payout: { basis: 700, ownerPct: 0.85, owner: 595, manager: 105, cleaningFeeTo: "manager", ownerName: "Marco", managerName: "Diego" } }), captures);
 const namedRows = Object.fromEntries(db3c._rows.map(r => [r.entry_type, r]));
 assert.equal(namedRows.rent_split_owner.recipient_name, "Marco");
 assert.equal(namedRows.rent_split_manager.recipient_name, "Diego");
 assert.equal(namedRows.cleaning_fee.recipient_name, "Diego", "cleaningFeeTo=manager -> carries the manager's name, not the owner's");
-assert.equal(namedRows.shadow_ota_commission.recipient_name, "Marco");
 assert.equal(namedRows.deposit_held.recipient_name, null, "guest/platform rows never carry an owner/manager name");
 console.log("3c) ledger.js: recipient_name flows onto every owner/manager row, correctly split by who actually earned it");
 
@@ -285,8 +280,9 @@ console.log("7) /reports/owner-statement without X-Admin-Secret -> 401");
 const ownerRes = await (await worker.fetch({ method: "GET", url: "https://w.dev/reports/owner-statement?locationId=L1&format=json&from=2026-01-01&to=2026-12-31", headers: hdr("admin123") }, env)).json();
 assert.equal(ownerRes.recipient, "owner");
 assert.equal(ownerRes.incomeTotal, 595.00, "owner's income total must be exactly the 85% rent split for this real settled booking");
-assert.ok(ownerRes.shadowTotal > 0, "shadow OTA comparison must appear (tenant has otaRate configured)");
-console.log("8) /reports/owner-statement JSON -> incomeTotal:", ownerRes.incomeTotal, "| shadowTotal:", ownerRes.shadowTotal);
+assert.strictEqual(ownerRes.shadowTotal, undefined,
+  "the statement no longer carries a shadow total -- nothing writes that category");
+console.log("8) /reports/owner-statement JSON -> incomeTotal:", ownerRes.incomeTotal);
 
 // ---- 9. /reports/owner-statement (HTML, default format) renders without throwing ----
 const htmlRes = await worker.fetch({ method: "GET", url: "https://w.dev/reports/owner-statement?locationId=L1", headers: hdr("admin123") }, env);

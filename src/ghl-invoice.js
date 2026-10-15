@@ -683,10 +683,33 @@ export async function enrichAndSendInvoice(
   // them so finishing it doesn't add them twice.
   const ghlItems = (existing.invoiceItems || []).filter(i => !OUR_LINES.has(i?.name));
   const nativeItems = ghlItems.filter((i) =>
-    !(noPets && isPetFeeName(i?.name, tenant)) &&
     !declined.some((name) => matchesAddOnName(i?.name, name))
   );
   const removedItems = ghlItems.length - nativeItems.length;
+
+  // The pet fee is a native optional add-on in GHL as of 2026-10-15, so a guest
+  // who declines pets is never charged one and there is nothing to remove. A
+  // strip lived here until then and did real work -- it fired on 14 of 31
+  // enriched invoices, most recently 2026-10-13, two days before the add-on was
+  // configured.
+  //
+  // So this reports rather than removes. If a pet fee reaches an invoice for a
+  // guest who answered "no pets", the native add-on is not configured on that
+  // calendar and the guest is being overcharged. Silently stripping it would
+  // hide that; charging it silently would be worse. Neither: say so, and let
+  // the invoice show what GHL actually put on it.
+  const petFeeDespiteNoPets = noPets
+    ? nativeItems.filter((i) => isPetFeeName(i?.name, tenant)).map((i) => i?.name)
+    : [];
+  if (petFeeDespiteNoPets.length) {
+    snapshot.petFeeDespiteNoPets = petFeeDespiteNoPets;
+    console.error(
+      `Booking ${snapshot.bookingId}: guest answered NO PETS and the invoice still carries ` +
+      `${petFeeDespiteNoPets.join(", ")} -- the pet fee is not configured as an optional add-on ` +
+      "on this calendar, and the guest is being charged for it."
+    );
+  }
+
   // Legible rather than silent: an add-on the account charges, configured as
   // optional, and never answered is a form that has drifted from the listing.
   if (unanswered.length) {

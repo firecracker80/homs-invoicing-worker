@@ -152,7 +152,6 @@ const ENTRY_LABELS = {
 
     deposit_refund_inspection: "Security deposit returned after inspection",
     deposit_claim_retained: "Security deposit retained for damages",
-    shadow_ota_commission: "Booking platform commission — informational",
     other: "Other",
   },
   // Formal (usted) throughout, and matching the words the Spanish guest-side
@@ -183,12 +182,11 @@ const ENTRY_LABELS = {
 
     deposit_refund_inspection: "Depósito de garantía devuelto tras la inspección",
     deposit_claim_retained: "Depósito de garantía retenido por daños",
-    shadow_ota_commission: "Comisión de plataforma de reservas — informativo",
     other: "Otro",
   },
 };
 
-// "liability" is the guest's own money sitting with the client, and "shadow" is
+// "liability" is the guest's own money sitting with the client, and "shadow" was
 // a number recorded for reference and deliberately excluded from the totals.
 // Neither word means that to anybody outside this codebase.
 const CATEGORY_LABELS = {
@@ -208,7 +206,6 @@ const UI = {
     managementCommission: "Management commission",
     ownerCosts: "Costs charged to you",
     netToOwner: "Net to you",
-    otaNote: (cur, amt) => `A comparable OTA commission on this period&rsquo;s bookings would have been ${cur} ${amt}.`,
     byType: "By type",
     detail: "Detail",
     thEntryType: "Entry type",
@@ -285,7 +282,6 @@ const UI = {
     managementCommission: "Comisión de administración",
     ownerCosts: "Gastos a su cargo",
     netToOwner: "Neto para usted",
-    otaNote: (cur, amt) => `La comisión equivalente de una plataforma sobre las reservas de este período habría sido ${cur} ${amt}.`,
     byType: "Por concepto",
     detail: "Detalle",
     thEntryType: "Concepto",
@@ -517,10 +513,9 @@ async function queryStatement(env, locationId, recipient, from, to, recipientNam
     description: r.description, createdAt: r.created_at
   }));
 
-  // Income total excludes shadow (informational) and pass_through/liability
+  // Income total excludes pass_through/liability
   // (never this recipient's earnings) -- "what did they actually earn".
   const incomeTotal = round2(summary.filter(s => s.category === "income").reduce((s, r) => s + r.total, 0));
-  const shadowTotal = round2(summary.filter(s => s.category === "shadow").reduce((s, r) => s + r.total, 0));
   // Expense rows are stored NEGATIVE -- expenses.js writes -Math.abs(gross), and
   // the detail table renders them as stored, with the minus sign showing. So the
   // sum is negative and the two numbers below are not interchangeable:
@@ -531,7 +526,7 @@ async function queryStatement(env, locationId, recipient, from, to, recipientNam
   const expenseSum = round2(summary.filter(s => s.category === "expense").reduce((s, r) => s + r.total, 0));
   const expenseTotal = round2(-expenseSum);
 
-  const base = { summary, detail, incomeTotal, shadowTotal, expenseTotal, expenseSum,
+  const base = { summary, detail, incomeTotal, expenseTotal, expenseSum,
     currency: detail[0]?.currency || summary[0]?.currency || "USD" };
   if (recipient !== "owner") return base;
 
@@ -599,7 +594,6 @@ function statementHtml({ brandName, heading, recipientName, fromLabel, toLabel, 
   .total-card { background:var(--bg); border:1px solid var(--line); border-radius:12px; padding:18px 20px; margin-bottom:8px; }
   .total-card .label { font-size:.8rem; color:var(--muted); text-transform:uppercase; letter-spacing:.03em; }
   .total-card .value { font-family:'Space Grotesk',sans-serif; font-weight:700; font-size:1.8rem; color:var(--teal); }
-  .shadow-note { font-size:.82rem; color:var(--muted); margin-top:4px; }
   table { width:100%; border-collapse:collapse; font-size:.88rem; }
   th { text-align:left; font-weight:600; color:var(--muted); font-size:.75rem; text-transform:uppercase; letter-spacing:.03em; padding:8px 10px; border-bottom:1px solid var(--line); }
   td { padding:10px; border-bottom:1px solid var(--line); vertical-align:top; }
@@ -656,7 +650,6 @@ function statementHtml({ brandName, heading, recipientName, fromLabel, toLabel, 
   <div class="total-card">
     <div class="label">${t.totalEarned}</div>
     <div class="value">${stmt.currency} ${stmt.incomeTotal.toFixed(2)}</div>
-    ${stmt.shadowTotal > 0 ? `<div class="shadow-note">${t.otaNote(stmt.currency, stmt.shadowTotal.toFixed(2))}</div>` : ""}
   </div>
 
   <h2>${t.byType}</h2>

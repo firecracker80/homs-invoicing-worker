@@ -1,6 +1,7 @@
 // Native-first policies (2026-09-16): guest-friendly defaults, Luminara's
 // graduated model only behind depositPolicy "tiered_legacy", cleaning fee no
-// longer charged by the Worker, Pet Fee dropped when the guest has no pet.
+// longer charged by the Worker, and a Pet Fee reaching a no-pets guest is
+// reported rather than stripped (the add-on is native and optional in GHL now).
 import assert from "node:assert";
 import { composeBooking } from "./src/booking-composer.js";
 import { cancellationTier, calcCancellation } from "./src/cancellation.js";
@@ -87,9 +88,18 @@ async function enrich(hasPets, items, tenant = native) {
     { name: "Cleaning Fee", amount: 45, qty: 1, currency: "USD" },
     { name: "Pet Fee", amount: 25, qty: 1, currency: "USD" }
   ];
+  // The Worker stopped REMOVING the pet fee on 2026-10-15: it is a native
+  // optional add-on in GHL now, so a guest who declines pets never gets the
+  // line in the first place. If one arrives anyway the add-on is not configured
+  // on that calendar, and the guest is being overcharged -- so this reports it
+  // instead of silently stripping it, which would hide the misconfiguration,
+  // and instead of silently charging it, which would be worse.
   const no = await enrich("No", ghlItems);
-  assert.deepEqual(no.names, ["Estadía", "Cleaning Fee", "Cargo por procesamiento"], "No -> Pet Fee dropped; nothing else touched, no cleaning appended");
-  assert.equal(no.out.removedItems, 1);
+  assert.deepEqual(no.names, ["Estadía", "Cleaning Fee", "Pet Fee", "Cargo por procesamiento"],
+    "the invoice shows what GHL actually put on it; the Worker removes nothing");
+  assert.equal(no.out.removedItems, 0, "nothing is stripped any more");
+  assert.deepEqual(no.snapshot.petFeeDespiteNoPets, ["Pet Fee"],
+    "and the overcharge is recorded rather than passed over in silence");
   assert.equal(no.snapshot.charges.cleaningFee, 45, "GHL's own cleaning line is recorded for the owner/manager split");
   assert.equal(no.snapshot.charges.cleaningFeeSource, "ghl_native");
 
@@ -97,12 +107,18 @@ async function enrich(hasPets, items, tenant = native) {
     const r = await enrich(ans, ghlItems);
     assert.ok(r.names.includes("Pet Fee"), `"${ans}" keeps the Pet Fee`);
     assert.equal(r.out.removedItems, 0);
+    // A guest who DID bring pets, or never answered, is not an overcharge --
+    // flagging those would make the signal worthless.
+    assert.strictEqual(r.snapshot.petFeeDespiteNoPets, undefined,
+      `"${ans}" is not a no-pets answer and must not be reported as one`);
   }
   const renamed = await enrich("no", [{ name: "Estadía", amount: 100, qty: 2 }, { name: "Pet cleaning", amount: 25, qty: 1 }]);
   assert.ok(renamed.names.includes("Pet cleaning"), "a different fee that mentions pets is kept");
 
   const spanish = await enrich("No", [{ name: "Estadía", amount: 100, qty: 2 }, { name: "Tarifa por Mascota", amount: 25, qty: 1 }]);
-  assert.deepEqual(spanish.names, ["Estadía", "Cargo por procesamiento"], "Spanish pet fee dropped on No");
+  assert.ok(spanish.names.includes("Tarifa por Mascota"), "the Spanish pet fee is kept, like the English one");
+  assert.deepEqual(spanish.snapshot.petFeeDespiteNoPets, ["Tarifa por Mascota"],
+    "and reported -- the detector has to work in both languages or it only protects English accounts");
 
   for (const n of ["Pet Fee", " PET FEE ", "Tarifa por mascota", "Cargo por Mascotas", "Mascota", "Pet Fee / Tarifa por mascota", "Cargo de mascota - Pet fee", "Tarifa de mascóta"])
     assert.ok(isPetFeeName(n), `"${n}" is the pet fee`);
@@ -116,10 +132,19 @@ async function enrich(hasPets, items, tenant = native) {
     { name: "Arpel 07", amount: 135, qty: 1 }, { name: "Cleaning Fee", amount: 65, qty: 1 }, { name: "Pet Fee", amount: 25, qty: 1 }
   ]);
   assert.equal(inv5.snapshot.charges.rentTotal, 135, "rent comes from GHL's stay line, not stayTotal");
-  assert.equal(inv5.snapshot.charges.processingFee, 12, "6% of the whole invoice after the pet check: 6% of 200");
-  assert.equal(inv5.items.find(i => /procesamiento/i.test(i.name)).amount, 12, "the appended fee line carries the repriced fee");
-  assert.equal(inv5.snapshot.charges.grandTotal, 212);
-  assert.deepEqual([inv5.snapshot.payout.basis, inv5.snapshot.payout.owner, inv5.snapshot.payout.manager], [135, 114.75, 20.25], "split follows the real rent");
+  // 6% of everything GHL put on the invoice: 135 + 65 + 25 = 225. The pet fee
+  // is in the basis now because it is no longer stripped -- if the guest is
+  // charged for it, they are charged the processing fee on it too. It was 6% of
+  // 200 while the Worker removed the line.
+  assert.equal(inv5.snapshot.charges.processingFee, 13.5, "6% of the whole invoice: 6% of 225");
+  assert.equal(inv5.items.find(i => /procesamiento/i.test(i.name)).amount, 13.5, "the appended fee line carries the repriced fee");
+  assert.equal(inv5.snapshot.charges.grandTotal, 238.5);
+  // 135 rent + 25 pet fee. An add-on the guest is charged is part of the rent
+  // price and splits at ownerPct like the rent (Yari, 2026-09-29) -- so once the
+  // Worker stopped removing the pet line, it started earning the owner a share
+  // of it. The basis was 135 while the line was being stripped.
+  assert.deepEqual([inv5.snapshot.payout.basis, inv5.snapshot.payout.owner, inv5.snapshot.payout.manager],
+    [160, 136, 24], "a charged pet fee is split like the rent, not kept whole by the manager");
   assert.equal(inv5.snapshot.stay.nightlyRate, 135);
   const withPet = await enrich("Sí", [
     { name: "Arpel 07", amount: 135, qty: 1 }, { name: "Cleaning Fee", amount: 65, qty: 1 }, { name: "Pet Fee", amount: 25, qty: 1 }
@@ -140,7 +165,7 @@ async function enrich(hasPets, items, tenant = native) {
   assert.equal(yesNo([]), null);
   assert.equal(yesNo("NO."), null, "punctuation makes it unknown -- the fee stays");
   assert.equal(yesNo("maybe"), null);
-  console.log("3) invoice: Pet Fee dropped only on a clear No; native cleaning recorded, never appended");
+  console.log("3) invoice: Pet Fee kept and reported when a no-pets guest is charged one; native cleaning recorded, never appended");
 }
 
 // ---- 4. WCancellation Policy text ----
