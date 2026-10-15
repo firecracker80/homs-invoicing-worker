@@ -142,14 +142,17 @@ export function seedPlan(tenant) {
 }
 
 export async function handleSeedWebhooks(request, env) {
-  if (!(await adminAuthorized(request, env))) return json({ error: "Unauthorized" }, 401);
-
   const url = new URL(request.url);
   const locationId = url.searchParams.get("locationId");
   if (!locationId) return json({ error: "locationId is required" }, 400);
   if (!env.TENANTS) return json({ error: "TENANTS KV binding missing" }, 500);
 
+  // Read first, authorize second, so the tenant's OWN adminSecret can be
+  // accepted -- every tenant has one, and the statements and /cancel already
+  // take it. An unauthorized caller gets the same 401 whether or not the
+  // locationId exists, so this order tells them nothing.
   const tenant = await env.TENANTS.get(locationId, { type: "json" });
+  if (!(await adminAuthorized(request, env, tenant))) return json({ error: "Unauthorized" }, 401);
   if (!tenant) return json({ error: `No tenant at locationId ${locationId}` }, 404);
 
   const plan = seedPlan(tenant);
