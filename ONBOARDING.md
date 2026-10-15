@@ -106,6 +106,29 @@ enrol a contact, and every value is visibly fake.
 A 200 means GHL accepted the request — not that it captured the schema. Open
 each trigger and confirm its field list before publishing.
 
+### 6b. Re-seeding a single regenerated trigger
+When **one** trigger is regenerated later — a URL rotated, or a workflow
+rebuilt — it has a new URL that KV does not know about, and the endpoint above
+seeds all four without updating KV. Use the per-trigger tool instead:
+
+```
+node tools-seed-webhook.mjs <locationId> <tenantField> <url-file>
+```
+
+`tenantField` is one of `ghlPaymentConfirmedUrl`, `ghlCancellationUrl`,
+`ghlRescheduleUrl`, `ghlDepositRefundUrl`. The URL goes in a **file**, not on
+the command line, so it stays out of shell history; the file is deleted once
+the write is verified.
+
+It seeds the trigger, then writes the new URL into KV and reads it back —
+**without that second half the Worker keeps notifying the regenerated-away URL
+and a real event fires nothing at all.** A `wrangler kv put` has reported
+success and silently not stored the value three times (2026-10-15), so the
+write is retried until a read-back confirms it rather than trusted once.
+
+It refuses a URL that is not a GHL inbound webhook, and one belonging to a
+different sub-account, before sending anything.
+
 ## 7. The KV entry
 
 **Fast path — auto-provision from GHL's Custom Values.** If you've already
