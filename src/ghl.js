@@ -1,6 +1,6 @@
-// ghl.js -- direct GHL writes, replacing airtable.js as the per-tenant reporting
+// ghl.js -- direct GHL writes. Replaced airtable.js as the per-tenant reporting
 // layer. Each tenant needs `ghlPitSecretName` (a Worker secret name, same pattern
-// as stripeSecretName) pointing at a Private Integration Token scoped for
+// as paypalSecretName) pointing at a Private Integration Token scoped for
 // objects/record.write, objects/record.readonly, associations.readonly, and
 // associations/relation.write on that tenant's own GHL sub-account.
 //

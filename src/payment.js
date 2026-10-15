@@ -2,8 +2,7 @@
 // Routes handled (wired in index.js):
 //   GET  /paypal/return   — guest returns from PayPal → capture both purchase units
 //   POST /paypal/webhook  — PAYMENT.CAPTURE.COMPLETED (source of truth; verified)
-//   GET  /stripe/return   — guest returns from Stripe → verify session paid
-//   POST /stripe/webhook  — checkout.session.completed (HMAC-verified)
+
 //
 // All paths converge on settle(), which is idempotent: a booking settles once,
 // no matter how many of these fire or in what order.
@@ -114,59 +113,10 @@ async function verifyPayPalWebhook(tenant, env, request, rawBody) {
   return (await res.json()).verification_status === "SUCCESS";
 }
 
-// ---------------------------------------------------------------- Stripe ----
-
-async function fetchStripeSession(tenant, env, sessionId) {
-  const secret = resolveSecret(tenant, env, "stripeSecretName", "stripeSecret");
-  const res = await fetch(
-    `https://api.stripe.com/v1/checkout/sessions/${sessionId}?expand[]=payment_intent.latest_charge.balance_transaction`,
-    { headers: { "Authorization": `Bearer ${secret}` } }
-  );
-  if (!res.ok) throw new Error(`Stripe session fetch failed: ${res.status} ${await res.text()}`);
-  return res.json();
-}
-
-function extractStripeCapture(session, snapshot) {
-  const pi = session.payment_intent;
-  const charge = pi?.latest_charge;
-  const bt = charge?.balance_transaction;
-  const gross = (session.amount_total ?? 0) / 100;
-  const fee = bt ? (bt.fee ?? 0) / 100 : 0;
-  const net = bt ? (bt.net ?? 0) / 100 : round2(gross - fee);
-  const depositTotal = snapshot.securityDeposit.total;
-  const rentGross = round2(gross - depositTotal);
-  // Stripe is one charge: allocate the fee proportionally between units for ledger clarity
-  const depFee = gross > 0 ? round2(fee * (depositTotal / gross)) : 0;
-  const rentFee = round2(fee - depFee);
-  const out = {
-    payerEmail: session.customer_details?.email || "",
-    payerId: session.customer || "",
-    RENT: { captureId: charge?.id || pi?.id || session.id, status: "COMPLETED", gross: rentGross, fee: rentFee, net: round2(rentGross - rentFee) }
-  };
-  if (depositTotal > 0) {
-    out.DEP = { captureId: charge?.id || pi?.id || session.id, status: "COMPLETED", gross: depositTotal, fee: depFee, net: round2(depositTotal - depFee) };
-  }
-  return out;
-}
-
-// Stripe webhook HMAC verification (Stripe-Signature: t=...,v1=...)
-async function verifyStripeWebhook(tenant, env, request, rawBody) {
-  const whSecret = resolveSecret(tenant, env, "stripeWebhookSecretName", "stripeWebhookSecret");
-  if (!whSecret) return false;
-  const sigHeader = request.headers.get("stripe-signature") || "";
-  const parts = Object.fromEntries(sigHeader.split(",").map(p => p.split("=")));
-  if (!parts.t || !parts.v1) return false;
-  const enc = new TextEncoder();
-  const key = await crypto.subtle.importKey("raw", enc.encode(whSecret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-  const sig = await crypto.subtle.sign("HMAC", key, enc.encode(`${parts.t}.${rawBody}`));
-  const expected = [...new Uint8Array(sig)].map(b => b.toString(16).padStart(2, "0")).join("");
-  return expected === parts.v1;
-}
-
 // A payment is confirmed by one of two routes, and GHL has to be able to read
 // both with ONE field mapping:
 //
-//   guest pays a PayPal/Stripe link, or a reschedule delta  -> the Worker POSTs
+//   guest pays a PayPal link, or a reschedule delta       -> the Worker POSTs
 //     to tenant.ghlPaymentConfirmedUrl, because GHL has no other way to know
 //   guest pays a GHL invoice -> GHL already knows; its own workflow calls
 //     /ghl-invoice-paid and reads our RESPONSE. We must not post back to the
@@ -461,7 +411,7 @@ async function tenantFor(env, snapshot) {
 //   { locationId, invoiceId, invoiceNumber, contactId, secret? }
 //   headers X-Location-Id / X-Webhook-Secret work too, as on /booking-created.
 // A booking whose invoice was enriched is paid inside GHL, so no PayPal or
-// Stripe return/webhook ever reaches us. This settles it the same way:
+// PayPal return/webhook ever reaches us. This settles it the same way:
 // ledger rows (D1 + GHL Transaction/Payments), owner/manager split.
 // GHL is the source of truth: the invoice is re-read and must be Paid; the
 // booking is the one GHL's calendar stamped on it (sourceId). Anything else
@@ -560,7 +510,7 @@ export async function handleGhlInvoicePaid(request, env) {
   }
 
   const paid = Number(invoice.amountPaid ?? invoice.total ?? 0);
-  // No captureId: the money sits with GHL's processor, not a PayPal/Stripe
+  // No captureId: the money sits with GHL's processor, not a PayPal
   // capture of ours, so cancellation refunds for it stay manual (in GHL).
   // gatewayTransactionId ties our Revenue rows to GHL's native payment.
   const gatewayTransactionId = await findInvoiceTransactionId({ tenant, env, locationId, invoiceId: invoice._id }).catch(() => null);
@@ -657,52 +607,6 @@ export async function handlePayPalWebhook(request, env) {
     const orderData = await capturePayPalOrder(tenant, env, snapshot.paypal.orderId);
     const captures = extractPayPalCaptures(orderData, bookingId);
     if (captures.RENT) await settle(env, tenant, snapshot, captures);
-  }
-  return json({ ok: true });
-}
-
-export async function handleStripeReturn(request, env) {
-  const url = new URL(request.url);
-  const bookingId = url.searchParams.get("bookingId");
-  const sessionId = url.searchParams.get("session_id");
-  const snapshot = await findSnapshot(env, bookingId);
-  if (!snapshot) return html("<h1>Reserva no encontrada</h1>", 404);
-  const tenant = await tenantFor(env, snapshot);
-  if (!tenant) return html("<h1>Configuración no encontrada</h1>", 500);
-
-  if (!snapshot.settled) {
-    const session = await fetchStripeSession(tenant, env, sessionId || snapshot.stripe?.sessionId);
-    if (session.payment_status !== "paid")
-      return html("<h1>El pago no pudo completarse. Intenta nuevamente desde tu enlace de pago.</h1>", 402);
-    const captures = extractStripeCapture(session, snapshot);
-    await settle(env, tenant, snapshot, captures);
-  }
-  if (tenant.thankYouUrl) return Response.redirect(tenant.thankYouUrl, 302);
-  return html(confirmationPage(tenant, snapshot));
-}
-
-export async function handleStripeWebhook(request, env, locationIdHint) {
-  const rawBody = await request.text();
-  let event;
-  try { event = JSON.parse(rawBody); } catch { return json({ error: "Bad JSON" }, 400); }
-  if (event.type !== "checkout.session.completed") return json({ ignored: event.type });
-
-  const session = event.data?.object || {};
-  const bookingId = session.client_reference_id || session.metadata?.bookingId;
-  const snapshot = await findSnapshot(env, bookingId);
-  if (!snapshot) return json({ error: "Unknown booking" }, 404);
-  const tenant = await tenantFor(env, snapshot);
-  if (!tenant) return json({ error: "Unknown tenant" }, 404);
-
-  const verified = await verifyStripeWebhook(tenant, env, request, rawBody);
-  if (!verified) return json({ error: "Signature verification failed" }, 401);
-
-  if (!snapshot.settled) {
-    const full = await fetchStripeSession(tenant, env, session.id);
-    if (full.payment_status === "paid") {
-      const captures = extractStripeCapture(full, snapshot);
-      await settle(env, tenant, snapshot, captures);
-    }
   }
   return json({ ok: true });
 }

@@ -202,16 +202,16 @@ const reset = async (snap = paidSnapshot(), withSettlement = false) => {
 {
   const withCapture = {
     ...paidSnapshot(),
-    gateway: "stripe",
-    captures: { RENT: { gross: 212, captureId: "ch_live_1", source: "stripe" } },
+    gateway: "paypal",
+    captures: { RENT: { gross: 212, captureId: "3AB12345CD678901E", source: "paypal" } },
   };
   await reset(withCapture);
   // The gateway refuses, the way a real one does: a 4xx, not a thrown socket.
   const realFetch = globalThis.fetch;
   globalThis.fetch = async (url, opts = {}) => {
-    if (String(url).includes("stripe.com")) {
-      const payload = { error: { message: "charge already refunded" } };
-      return { ok: false, status: 402, text: async () => JSON.stringify(payload), json: async () => payload };
+    if (String(url).includes("/refund")) {
+      const payload = { name: "CAPTURE_FULLY_REFUNDED", message: "capture already refunded" };
+      return { ok: false, status: 422, text: async () => JSON.stringify(payload), json: async () => payload };
     }
     return realFetch(url, opts);
   };

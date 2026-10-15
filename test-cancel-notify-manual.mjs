@@ -163,14 +163,14 @@ const cancel = async (snapshot = paidSnapshot(), body = {}) => {
 // attempted a refund, so "no" was right for the wrong reason.
 {
   const withCapture = paidSnapshot({
-    gateway: "stripe",
-    captures: { RENT: { gross: 355.1, captureId: "ch_live_1", source: "stripe" } },
+    gateway: "paypal",
+    captures: { RENT: { gross: 355.1, captureId: "3AB12345CD678901E", source: "paypal" } },
   });
   const realFetch = global.fetch;
   global.fetch = async (url, opts = {}) => {
-    if (String(url).includes("stripe.com")) {
-      const payload = { error: { message: "charge already refunded" } };
-      return { ok: false, status: 402, text: async () => JSON.stringify(payload), json: async () => payload };
+    if (String(url).includes("/refund")) {
+      const payload = { name: "CAPTURE_FULLY_REFUNDED", message: "capture already refunded" };
+      return { ok: false, status: 422, text: async () => JSON.stringify(payload), json: async () => payload };
     }
     return realFetch(url, opts);
   };
