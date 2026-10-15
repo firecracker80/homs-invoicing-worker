@@ -39,18 +39,40 @@ touches. Audited 2026-10-15 across all 130 booking snapshots: **zero** carry a
 Worker-issued Stripe session. It has never run in production.
 
 **Audited 2026-10-15**, all 130 snapshots: 85 carry a Worker-issued PayPal
-order and **40 hold a capture id**. So the refund path is referenced by real
-data and cannot simply be deleted — unlike the Stripe half, which is free.
+order and **40 hold a capture id**.
 
-**Before deleting:** old bookings may still carry a PayPal `captureId`, and
-`refundPayPalPartial()` in `reschedule.js` uses it to issue a real refund. Those
-live on the booking snapshots in the **BOOKINGS KV** namespace
-(`snapshot.captures[*].captureId`, `snapshot.securityDeposit.paypalCaptureId`),
-not in D1 — the ledger records amounts, never gateway references. There are 130
-snapshots in total, so the audit is a minutes-long job, not a migration.
+### "The refund path" is two things, and only one of them is in scope
 
-The order-creation path has no such dependency and can go first; the refund path
-waits on that count being zero.
+This map originally said "the refund path cannot be deleted", which reads as
+though the whole refund capability were at stake. It is not, and the
+distinction is the important one (Yari, 2026-10-15):
+
+**The refund MATHS is not retirable and never was.** `cancellation.js` prices a
+cancellation against the tier ladder and produces `totalRefund`,
+`rentUnitRefund`, `depositRefund` and the retained charge. That is what the
+statements report, what the ledger reverses, and what tells a person the figure
+to pay — and it is needed whatever the gateway is, including when there is no
+gateway involved at all. It belongs in Tier 3 beside the rest of the pricing.
+
+In fact it is already doing the main job: every live account is `enrich`, where
+there is no Worker-held capture to refund against, so **every refund is issued
+by hand** and `MANUAL_REFUND_REF` marks the ledger row. The maths is the whole
+product there; the gateway call never runs.
+
+**The gateway EXECUTION is the narrow piece.** `refundPayPalCapture()` and
+`gatewayRefund()` in `cancellation.js`, plus `refundPayPalPartial()` in
+`reschedule.js`, call PayPal's API against a capture the Worker itself took.
+Only this is constrained by the 40 captures. Delete it and those bookings lose
+their automated route back; the figures, the statements and the manual-refund
+instruction are untouched.
+
+**Before deleting the execution:** the capture ids live on booking snapshots in
+the **BOOKINGS KV** namespace (`snapshot.captures[*].captureId`,
+`snapshot.securityDeposit.paypalCaptureId`), not in D1 — the ledger records
+amounts, never gateway references. 130 snapshots, so the audit is a
+minutes-long job, not a migration.
+
+The order-creation path has no such dependency and can go first.
 
 ### The no-pets fee strip — removed 2026-10-15, replaced by a report
 
@@ -121,10 +143,17 @@ more. No cleaning margin, no owner/manager split, no per-recipient statement.
 The admin dashboard tried to compute an owner statement from GHL's data alone
 and printed `$0.00` commission on every one it ever produced (#139, #140).
 
-**Cancellation and reschedule repricing.** `cancellation.js`, `reschedule.js` —
-1,860 lines. GHL cannot reprice a booking against a tiered policy, work out what
-is owed either way, void or re-issue an invoice, and keep the ledger consistent
-with it. The `/cancel` and `/reschedule` endpoints are the system.
+**Cancellation and reschedule repricing, including the refund maths.**
+`cancellation.js`, `reschedule.js` — 1,860 lines. GHL cannot reprice a booking
+against a tiered policy, work out what is owed either way, void or re-issue an
+invoice, and keep the ledger consistent with it. The `/cancel` and
+`/reschedule` endpoints are the system.
+
+The refund calculation is the part to be explicit about, because the gateway
+code sits next to it and is retirable: working out what a guest is owed is
+needed whatever the gateway, and on every live account it is the only thing
+that happens — refunds there are issued by hand against the figure this
+produces.
 
 **Invoice enrichment.** `ghl-invoice.js` — 856 lines. GHL's rental calendar
 creates a rent-only draft; the deposit line, the processing fee, the property
