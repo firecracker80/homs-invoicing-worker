@@ -131,6 +131,10 @@ const envFor = (tenant = TENANT) => ({
   ADMIN_SECRET: "s3cret",
   TENANTS: { get: async (k) => (k === "LOC1" ? tenant : null) },
 });
+// Every live tenant carries its own adminSecret, and it is the key that already
+// works on the statements and /cancel. A route taking only the global one locks
+// out every account -- which is exactly what shipped on 2026-10-13.
+const TENANT_WITH_OWN_SECRET = { ...TENANT, adminSecret: "tenant-own-key" };
 const req = (qs, { method = "GET", secret = "s3cret" } = {}) =>
   new Request(`https://w.test/admin/seed-webhooks${qs}`, {
     method, headers: secret == null ? {} : { "X-Admin-Secret": secret },
@@ -201,6 +205,69 @@ assert.ok(/only means the request was accepted/i.test(out.verify));
 console.log("18) an unknown locationId is a 404, not an empty success");
 res = await handleSeedWebhooks(req("?locationId=NOPE", { method: "POST" }), envFor());
 assert.strictEqual(res.status, 404);
+
+console.log("19) the tenant's OWN adminSecret is accepted, not just the global one");
+posts = [];
+// The recording stub, restored -- test 16 left one that does not record, and
+// asserting on an empty posts array would have passed for the wrong reason.
+globalThis.fetch = async (url, opts) => {
+  posts.push({ url, body: JSON.parse(opts.body) });
+  return new Response("{}", { status: 200 });
+};
+out = await (await handleSeedWebhooks(
+  req("?locationId=LOC1&confirm=seed", { method: "POST", secret: "tenant-own-key" }),
+  envFor(TENANT_WITH_OWN_SECRET))).json();
+assert.strictEqual(out.dryRun, false, "a tenant's own secret must authorize this route");
+assert.strictEqual(posts.length, 3);
+
+console.log("20) the global secret still works on a tenant that has its own");
+posts = [];
+out = await (await handleSeedWebhooks(
+  req("?locationId=LOC1&confirm=seed", { method: "POST", secret: "s3cret" }),
+  envFor(TENANT_WITH_OWN_SECRET))).json();
+assert.strictEqual(out.dryRun, false, "the tenant's secret must ADD to the global, never replace it");
+assert.strictEqual(posts.length, 3);
+
+console.log("21) a secret that is neither is still refused, and posts nothing");
+posts = [];
+res = await handleSeedWebhooks(
+  req("?locationId=LOC1&confirm=seed", { method: "POST", secret: "neither" }),
+  envFor(TENANT_WITH_OWN_SECRET));
+assert.strictEqual(res.status, 401);
+assert.deepStrictEqual(posts, []);
+
+// The tenant is now read BEFORE the secret is checked, so that the tenant's own
+// secret can be considered. That must not turn the route into a way to find out
+// which locationIds exist.
+console.log("22) an unauthorized caller cannot tell a real locationId from a fake one");
+const bad = (loc) => handleSeedWebhooks(req("?locationId=" + loc, { method: "POST", secret: "wrong" }), envFor());
+const [realRes, fakeRes] = await Promise.all([bad("LOC1"), bad("NOPE")]);
+assert.strictEqual(realRes.status, 401);
+assert.strictEqual(fakeRes.status, 401);
+assert.deepStrictEqual(await realRes.json(), await fakeRes.json(), "the two refusals must be indistinguishable");
+
+console.log("23) no X-Admin-Secret header at all is refused");
+posts = [];
+res = await handleSeedWebhooks(
+  new Request("https://w.test/admin/seed-webhooks?locationId=LOC1&confirm=seed", { method: "POST" }),
+  envFor(TENANT_WITH_OWN_SECRET));
+assert.strictEqual(res.status, 401);
+assert.deepStrictEqual(posts, []);
+
+// An unset secret and an empty one both encode to zero bytes, so with BOTH
+// guards gone in secretMatches they hash identically and an empty
+// X-Admin-Secret authorizes against an account that has no secret configured.
+// Either guard alone closes it -- they are individually redundant and jointly
+// load-bearing, which is why neither is killed on its own.
+console.log("24) an unconfigured secret authorizes nobody");
+const noSecretEnv = { TENANTS: { get: async (k) => (k === "LOC1" ? { ...TENANT } : null) } };
+for (const attempt of ["undefined", "null", "", "s3cret"]) {
+  posts = [];
+  res = await handleSeedWebhooks(
+    req("?locationId=LOC1&confirm=seed", { method: "POST", secret: attempt }), noSecretEnv);
+  assert.strictEqual(res.status, 401, `"${attempt}" must not authorize against an unset secret`);
+  assert.deepStrictEqual(posts, []);
+}
 
 globalThis.fetch = realFetch;
 console.log("\nall webhook-seed handler tests passed");

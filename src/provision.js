@@ -41,18 +41,46 @@ function json(data, status = 200) {
 }
 
 // Constant-time: compare SHA-256 digests so length and early mismatch don't leak.
-export async function adminAuthorized(request, env) {
-  const given = request.headers?.get?.("X-Admin-Secret") || "";
-  if (!env.ADMIN_SECRET) return false;
+//
+// The two emptiness guards here and in adminAuthorized are individually
+// redundant and jointly load-bearing: TextEncoder encodes both undefined and ""
+// as zero bytes, so without BOTH an empty X-Admin-Secret would hash equal to an
+// unset ADMIN_SECRET and authorize. Removing either one alone kills nothing --
+// no test can distinguish it, and that is a property of the pair, not a gap.
+async function secretMatches(given, expected) {
+  if (!expected) return false;
   const enc = new TextEncoder();
   const [a, b] = await Promise.all([
     crypto.subtle.digest("SHA-256", enc.encode(given)),
-    crypto.subtle.digest("SHA-256", enc.encode(env.ADMIN_SECRET))
+    crypto.subtle.digest("SHA-256", enc.encode(expected))
   ]);
   const x = new Uint8Array(a), y = new Uint8Array(b);
   let diff = 0;
   for (let i = 0; i < x.length; i++) diff |= x[i] ^ y[i];
   return diff === 0;
+}
+
+// The operator's global secret, or -- when a tenant is passed -- that tenant's
+// own. Both, never one replacing the other.
+//
+// A tenant-level secret that REPLACES the global is a bug this repo has already
+// paid for: DEMO-HOMS has one, and reports.js records its manager statement
+// 401'ing on 2026-10-01 for exactly that reason. /admin/seed-webhooks then
+// reintroduced it on 2026-10-13 by importing the global-only check, so the key
+// that works on every other endpoint was rejected. Every tenant carries its own
+// adminSecret, so global-only locks all of them out.
+//
+// It grants nothing new: ADMIN_SECRET already provisions and reconfigures any
+// account. Callers that run BEFORE a tenant exists (provisioning) pass no
+// tenant and are global-only, which is not a policy difference -- there is
+// simply no record to carry a secret yet.
+export async function adminAuthorized(request, env, tenant = null) {
+  const given = request.headers?.get?.("X-Admin-Secret") || "";
+  if (!given) return false;
+  for (const expected of [env.ADMIN_SECRET, tenant?.adminSecret]) {
+    if (await secretMatches(given, expected)) return true;
+  }
+  return false;
 }
 
 // "{{ custom_values.wbrand_name }}" -> "wbrand_name". Bare keys pass through.
