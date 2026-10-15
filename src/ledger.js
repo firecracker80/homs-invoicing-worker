@@ -232,7 +232,7 @@ export async function writeLedgerEntries(env, tenant, snapshot, captures) {
 // (booking_id, entry_type) behavior for settlement's one-row-per-type rows.
 // What real payment a Revenue row came from: a refund's own id when the row
 // carries one, otherwise the settlement capture -- GHL's native payment id for
-// an invoice paid in GHL, the PayPal/Stripe capture id for our own links.
+// an invoice paid in GHL, the PayPal capture id for our own links.
 function gatewayRefFor(snapshot, r) {
   if (r.source && r.source !== "payment_confirmed") {
     return r.reference && r.reference !== r.entry_type && !/^(cancellation|reschedule)$/.test(r.reference) ? r.reference : "";
@@ -357,7 +357,7 @@ async function syncRowsToGHL(env, tenant, snapshot, rows, now) {
         });
       }
 
-      // No OTA platform fee applies to a directly-booked, PayPal/Stripe-settled
+      // No OTA platform fee applies to a directly-booked, PayPal-settled
       // reservation -- the guest-paid processing fee covers the gateway's own
       // cut, so net payout to the business is the full rent+cleaning total.
       const bookingTotal = bookingTotalOf(snapshot);

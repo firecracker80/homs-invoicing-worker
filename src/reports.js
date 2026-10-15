@@ -865,7 +865,7 @@ function managerPlHtml({ brandName, fromLabel, toLabel, allTime = false, pl, loc
 
 // --- reconciliation ---------------------------------------------------------
 // Only meaningful for enrich-mode bookings (invoiceStrategy: "enrich") --
-// paypal_url bookings pay PayPal/Stripe directly, never touching GHL's own
+// paypal_url bookings pay PayPal directly, never touching GHL's own
 // transactions ledger, so there's nothing on GHL's side to compare those
 // against. Diffs D1's income-bearing bookings for the period against GHL's
 // list-transactions for the same window; a booking with an income row in D1

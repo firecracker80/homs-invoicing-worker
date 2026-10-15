@@ -200,32 +200,11 @@ async function refundPayPalCapture(tenant, env, captureId, amount, note) {
   return data.id; // refund id
 }
 
-async function refundStripe(tenant, env, captureId, amount, note) {
-  const secret = resolveSecret(tenant, env, "stripeSecretName", "stripeSecret");
-  const params = new URLSearchParams();
-  // captureId for Stripe settlements is the charge id (ch_...) or payment_intent
-  if (captureId.startsWith("pi_")) params.set("payment_intent", captureId);
-  else params.set("charge", captureId);
-  if (amount != null) params.set("amount", String(Math.round(amount * 100)));
-  params.set("metadata[note]", note || "");
-  const res = await fetch("https://api.stripe.com/v1/refunds", {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${secret}`,
-      "Content-Type": "application/x-www-form-urlencoded",
-      "Idempotency-Key": `refund-${captureId}-${amount ?? "full"}`
-    },
-    body: params.toString()
-  });
-  const data = await res.json();
-  if (!res.ok) throw new Error(`Stripe refund failed: ${res.status} ${JSON.stringify(data)}`);
-  return data.id;
-}
-
+// Only PayPal reaches here. A Stripe branch existed until 2026-10-15 and was
+// removed unused: no snapshot has ever carried a Worker-issued Stripe session,
+// so gatewayRefund has only ever taken this path.
 async function gatewayRefund(tenant, env, snapshot, captureId, amount, note) {
-  return snapshot.gateway === "stripe"
-    ? refundStripe(tenant, env, captureId, amount, note)
-    : refundPayPalCapture(tenant, env, captureId, amount, note);
+  return refundPayPalCapture(tenant, env, captureId, amount, note);
 }
 
 // ---- shared helpers ----
@@ -681,7 +660,7 @@ export async function handleCancel(request, env, { notify = true, voidInvoice: s
     } else {
       try {
         refundIds.deposit = await gatewayRefund(tenant, env, snapshot, depCaptureId,
-          snapshot.gateway === "stripe" ? calc.depositRefund : null, note); // PayPal DEP = full refund
+          null, note); // PayPal DEP unit refunds in full; null means "the whole capture"
       } catch (err) {
         console.error(`Cancel deposit refund failed for ${snapshot.bookingId}: ${err.message}`);
         refundFailures.push({ type: "deposit_refund_failed", amount: calc.depositRefund, error: err.message });
@@ -871,7 +850,7 @@ export async function handleDepositRefund(request, env) {
   let refundId = null;
   if (refundAmount > 0) {
     refundId = await gatewayRefund(tenant, env, snapshot, captureId,
-      (snapshot.gateway === "stripe" || claim > 0) ? refundAmount : null, note);
+      claim > 0 ? refundAmount : null, note);
   }
 
   const status = claim === 0 ? "refunded" : (refundAmount > 0 ? "partial" : "claimed");

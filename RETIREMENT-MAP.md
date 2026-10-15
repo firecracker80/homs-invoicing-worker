@@ -52,18 +52,30 @@ snapshots in total, so the audit is a minutes-long job, not a migration.
 The order-creation path has no such dependency and can go first; the refund path
 waits on that count being zero.
 
-### The no-pets fee strip — `ghl-invoice.js:686`
+### ~~The no-pets fee strip~~ — not dead, do not remove
 
 ```js
-!(noPets && isPetFeeName(i?.name, tenant)) &&
+!(noPets && isPetFeeName(i?.name, tenant)) &&   // ghl-invoice.js:686
 ```
 
-Add-ons became optional in GHL (Yari, 2026-10-09), so a guest without pets is
-not charged a pet fee in the first place and there is nothing to strip.
+This was listed here on the reasoning that add-ons became optional in GHL
+(2026-10-09), so a guest without pets is never charged a pet fee and there is
+nothing to strip. **That was wrong**, checked 2026-10-15 before removing it.
 
-**Keep `isPetFeeName` itself.** It is used a second time at `ghl-invoice.js:449`
-inside `isFeeLine()`, where it stops a fee line being mistaken for a property
-name. Deleting the function would break that.
+The generic replacement is `optionalAddOnsToRemove()`, which reads
+`tenant.optionalAddOns` — and **no tenant has that field set**. It returns an
+empty list on every account, so it removes nothing. The pet-specific strip is
+therefore still the only thing standing between a guest who answered "no pets"
+and a pet-fee line on their invoice.
+
+**Prerequisite before it can go:** configure `optionalAddOns` on every account
+that charges a pet fee, with the pet fee among them, and confirm a declined
+answer actually drops the line. Then this is genuinely redundant. Until then it
+is load-bearing.
+
+`isPetFeeName` is used a second time at `ghl-invoice.js:449` inside
+`isFeeLine()`, where it stops a fee line being mistaken for a property name, so
+the function stays regardless.
 
 ### The shadow OTA commission rows
 
@@ -138,14 +150,17 @@ reproducible.
 1. **Delete `stripe.js` and the `/stripe/*` routes.** Zero users, ever —
    confirmed against every booking snapshot, not just the tenant records. No
    migration and nothing to check.
-2. **Remove the no-pets strip** (one line) and refresh the Airtable comments.
+2. ~~Remove the no-pets strip~~ — **blocked**, see above. `optionalAddOns` is
+   unset on every account, so the strip is still the only guard. Refresh the
+   stale Airtable comments; that part stands.
 3. **Decide on `otaRate`** — use it or lose it.
 4. **Audit the BOOKINGS KV for outstanding PayPal captures**, then delete the
    Worker's checkout path.
 5. **Ask Luminara about the deposit model.** Everything else waits on that.
 
-Steps 1–3 are a single afternoon and remove roughly 150 lines with no behaviour
-change on any live account. Step 4 is the big one — a few hundred lines — and
+Step 1 is done (2026-10-15): ~200 lines across five files, no behaviour change
+on any live account. Step 2 turned out to be blocked by missing config rather
+than ready to delete. Step 4 is the big one — a few hundred lines — and
 needs the capture audit first. Step 5 is a client conversation, not a code task.
 
 Nothing here touches the ledger, the statements, the repricing or the

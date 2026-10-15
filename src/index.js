@@ -3,8 +3,7 @@
 import { composeBooking } from "./booking-composer.js";
 import { splitBookedReservation } from "./multi-listing.js";
 import { createOrder } from "./paypal.js";
-import { createCheckoutSession } from "./stripe.js";
-import { handlePayPalReturn, handlePayPalWebhook, handleStripeReturn, handleStripeWebhook, handleGhlInvoicePaid } from "./payment.js";
+import { handlePayPalReturn, handlePayPalWebhook, handleGhlInvoicePaid } from "./payment.js";
 import { handleExpenseApproved } from "./expenses.js";
 import { handleCancel, handleDepositRefund } from "./cancellation.js";
 import { handleReschedule } from "./reschedule.js";
@@ -219,9 +218,9 @@ async function handleBookingCreated(request, env) {
   // idempotency: existing snapshot → return existing link/invoice, no re-fire.
   // Re-sending a GHL invoice on a webhook retry would double-notify the
   // guest -- ghlInvoice.invoiceId counts as "already handled" exactly like
-  // an existing PayPal/Stripe link does.
+  // an existing PayPal link does.
   const existing = await env.BOOKINGS.get(payload.bookingId, { type: "json" });
-  const existingUrl = existing?.paypal?.approveUrl || existing?.stripe?.checkoutUrl;
+  const existingUrl = existing?.paypal?.approveUrl;
   const existingInvoiceId = existing?.ghlInvoice?.invoiceId;
 
   // A claim left at "sending" by a run that died part-way is finished now.
@@ -255,7 +254,7 @@ async function handleBookingCreated(request, env) {
       nights: existing.stay.nights,
       nightlyRate: existing.stay.nightlyRate.toFixed(2),
       gateway: existing.gateway || "paypal",
-      gatewayRef: existing.paypal?.orderId || existing.stripe?.sessionId || existingInvoiceId || "",
+      gatewayRef: existing.paypal?.orderId || existingInvoiceId || "",
       idempotent: true
     });
   }
@@ -265,7 +264,7 @@ async function handleBookingCreated(request, env) {
   // Invoice strategy — additive path, tenant KV overrides env, default is
   // today's behavior. INVOICE_STRATEGY "enrich" targets the draft invoice
   // GHL's rental calendar already auto-created instead of generating a
-  // PayPal/Stripe checkout link. Any failure here falls through to the
+  // PayPal checkout link. Any failure here falls through to the
   // existing PayPal-URL flow below unmodified — nothing lost.
   // "enrich", not "paypal_url". The legacy default meant an account nobody had
   // configured took the path GHL never sees -- no native payment record and
@@ -371,16 +370,16 @@ async function handleBookingCreated(request, env) {
     }
   }
 
-  // PayPal/Stripe link flow -- only for a tenant whose invoiceStrategy is not
+  // PayPal link flow -- only for a tenant whose invoiceStrategy is not
   // "enrich". It is no longer a fallback for a failed enrich.
+  //
+  // The Stripe branch was removed 2026-10-15: no tenant has ever had
+  // gateway:"stripe" and no booking snapshot has ever carried a Worker-issued
+  // Stripe session. YV's Stripe runs through GHL's own connection, which this
+  // path never touched.
   if (!gateway) {
-    gateway = (tenant.gateway || "paypal").toLowerCase();
-    if (gateway === "stripe") {
-      const { sessionId, checkoutUrl } = await createCheckoutSession(tenant, env, snapshot, env.WORKER_URL);
-      snapshot.stripe = { sessionId, checkoutUrl };
-      approveUrl = checkoutUrl;
-      gatewayRef = sessionId;
-    } else {
+    gateway = "paypal";
+    {
       const { orderId, approveUrl: ppUrl } = await createOrder(tenant, env, snapshot.bookingId, purchaseUnits, env.WORKER_URL);
       snapshot.paypal = { orderId, approveUrl: ppUrl };
       approveUrl = ppUrl;
@@ -461,10 +460,6 @@ export default {
         return handlePayPalReturn(request, env);
       if (request.method === "POST" && url.pathname === "/paypal/webhook")
         return handlePayPalWebhook(request, env);
-      if (url.pathname === "/stripe/return")
-        return handleStripeReturn(request, env);
-      if (request.method === "POST" && url.pathname === "/stripe/webhook")
-        return handleStripeWebhook(request, env);
       if (request.method === "POST" && url.pathname === "/reschedule")
         return handleReschedule(request, env);
       if (request.method === "POST" && url.pathname === "/cancel")
@@ -483,7 +478,7 @@ export default {
         return handleProvisionTenant(request, env);
       if (url.pathname === "/admin/seed-webhooks" && (request.method === "GET" || request.method === "POST"))
         return handleSeedWebhooks(request, env);
-      if (url.pathname === "/paypal/cancel" || url.pathname === "/stripe/cancel")
+      if (url.pathname === "/paypal/cancel")
         return json({ status: "cancelled", note: "guest cancelled checkout" });
       return json({ error: "Not found" }, 404);
     } catch (err) {

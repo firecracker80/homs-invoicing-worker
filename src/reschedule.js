@@ -11,7 +11,6 @@
 import { calcSecurityDeposit, round2 } from "./deposit-engine.js";
 import { depositConfigFor, processingFeePctFor } from "./policy.js";
 import { createOrder, getAccessToken } from "./paypal.js";
-import { createCheckoutSession } from "./stripe.js";
 import { writeAndSyncRows, bookingTotalOf } from "./ledger.js";
 import { updateObjectRecord } from "./ghl.js";
 import { adminAuthorized, notifyAndRecord, cancellationTier, MANUAL_REFUND_REF, MANUAL_SUFFIX } from "./cancellation.js";
@@ -356,20 +355,10 @@ export async function handleReschedule(request, env) {
     // either return stale pricing or get rejected outright for a body
     // mismatch under the same key.
     const repriceKey = `${snapshot.bookingId}-RESCHED-${Date.now()}`;
-    let approveUrl, gatewayRef;
-    if ((tenant.gateway || "paypal") === "stripe") {
-      const fakeSnap = {
-        bookingId: snapshot.bookingId, locationId: snapshot.locationId, gateway: "stripe",
-        stay: { nights: newNights, nightlyRate: rate },
-        charges: { rentTotal: newRent, cleaningFee: snapshot.charges.cleaningFee, processingFee: newProcessingFee, grandTotal: newGrandTotal },
-        securityDeposit: { blocks: newDepositCalc.blocks, total: newDeposit }
-      };
-      const { sessionId, checkoutUrl } = await createCheckoutSession(tenant, env, fakeSnap, env.WORKER_URL, repriceKey);
-      approveUrl = checkoutUrl; gatewayRef = sessionId;
-    } else {
-      const { orderId, approveUrl: url } = await createOrder(tenant, env, snapshot.bookingId, purchaseUnits, env.WORKER_URL, repriceKey);
-      approveUrl = url; gatewayRef = orderId;
-    }
+    // PayPal only since 2026-10-15; the Stripe branch was removed unused.
+    const { orderId: repriceOrderId, approveUrl } =
+      await createOrder(tenant, env, snapshot.bookingId, purchaseUnits, env.WORKER_URL, repriceKey);
+    const gatewayRef = repriceOrderId;
 
     const oldStay0 = { ...snapshot.stay };
     snapshot.stay = { ...snapshot.stay, checkIn: newCheckIn, checkOut: newCheckOut, nights: newNights };
@@ -378,8 +367,7 @@ export async function handleReschedule(request, env) {
     snapshot.charges.grandTotal = newGrandTotal;
     snapshot.securityDeposit.total = newDeposit;
     snapshot.securityDeposit.blocks = newDepositCalc.blocks;
-    if ((tenant.gateway || "paypal") === "stripe") snapshot.stripe = { sessionId: gatewayRef, checkoutUrl: approveUrl };
-    else snapshot.paypal = { orderId: gatewayRef, approveUrl };
+    snapshot.paypal = { orderId: gatewayRef, approveUrl };
     snapshot.reschedules = [...(snapshot.reschedules || []), {
       at: new Date().toISOString(), from: oldStay0,
       to: { checkIn: newCheckIn, checkOut: newCheckOut, nights: newNights },
@@ -531,16 +519,6 @@ export async function handleReschedule(request, env) {
       // further down, once the snapshot carries the new totals, and GHL turns
       // the difference into a balance due on the link they already hold.
       settlement = { type: "invoice_balance_due", amount: chargeAmount, invoiceId: rescheduleInvoiceId };
-    } else if ((tenant.gateway || "paypal") === "stripe") {
-      const fakeSnap = {
-        bookingId: childId, locationId: snapshot.locationId, gateway: "stripe",
-        stay: { nights: newNights, nightlyRate: rate },
-        charges: { rentTotal: 0, cleaningFee: 0, processingFee: deltaFee, grandTotal: chargeAmount },
-        securityDeposit: { blocks: [], total: 0 }
-      };
-      const { sessionId, checkoutUrl } = await createCheckoutSession(tenant, env, fakeSnap, env.WORKER_URL);
-      approveUrl = checkoutUrl;
-      gatewayRef = sessionId;
     } else {
       const { orderId, approveUrl: url } = await createOrder(tenant, env, childId, purchaseUnits, env.WORKER_URL);
       approveUrl = url;
@@ -561,9 +539,8 @@ export async function handleReschedule(request, env) {
       bookingId: childId,
       parentBookingId: snapshot.bookingId,
       locationId: snapshot.locationId,
-      gateway: tenant.gateway || "paypal",
-      paypal: (tenant.gateway || "paypal") !== "stripe" ? { orderId: gatewayRef, approveUrl } : undefined,
-      stripe: (tenant.gateway || "paypal") === "stripe" ? { sessionId: gatewayRef, checkoutUrl: approveUrl } : undefined,
+      gateway: "paypal",
+      paypal: { orderId: gatewayRef, approveUrl },
       amount: chargeAmount,
       rentDelta: netRentDelta, depositDelta, deltaFee,
       guest: snapshot.guest,
@@ -868,7 +845,7 @@ export async function settleRescheduleAdjustment(env, tenant, snapshot, capture)
 
   // This function runs against the CHILD delta-charge booking (a synthetic
   // snapshot with no .stay/.ghl of its own) -- every ledger/GHL write below
-  // uses `parent`, the real reservation, same as the original Airtable code
+  // uses `parent`, the real reservation
   // always updated the PARENT's Order record, never the child's.
   try {
     if (parent) {

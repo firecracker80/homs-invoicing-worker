@@ -75,7 +75,7 @@ function composeBooking(payload, tenantProfile) {
     locationId: payload.locationId,
     parentBookingId: payload.parentBookingId || null,
     createdAt: new Date().toISOString(),
-    // pass-throughs for Airtable mapping
+    // pass-throughs for the ledger's own mapping
     propertyCode: payload.propertyCode || null,
     // Set only when the guard rejected a propertyCode for being the guest name.
     ...(payload.propertyCodeRejected ? { propertyCodeRejected: payload.propertyCodeRejected } : {}),

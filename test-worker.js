@@ -22,9 +22,6 @@ global.fetch = async (url, opts = {}) => {
     return { ok: true, json: async () => ({ access_token: "MOCK_TOKEN" }) };
   if (url.includes("/v2/checkout/orders"))
     return { ok: true, json: async () => ({ id: "PP-ORDER-TEST01", links: [{ rel: "payer-action", href: "https://www.sandbox.paypal.com/checkoutnow?token=MOCK123" }] }) };
-  if (url.includes("api.stripe.com/v1/checkout/sessions")) {
-    return { ok: true, json: async () => ({ id: "cs_test_MOCK789", url: "https://checkout.stripe.com/c/pay/cs_test_MOCK789" }) };
-  }
   if (url.includes("api.airtable.com"))
     return { ok: true, json: async () => ({ records: body.records.map(r => ({ id: "rec" + Math.random().toString(36).slice(2, 10), fields: r.fields })) }) };
   throw new Error("Unmocked fetch: " + url);
@@ -62,17 +59,8 @@ const env = {
     }
   }),
   BOOKINGS: mockKV(),
-  STRIPE_SECRET_YV: "sk_test_mock"
+  // Stripe removed 2026-10-15: never used by any tenant or booking.
 };
-// second tenant: Stripe gateway (e.g. YV-managed or US-entity client)
-await env.TENANTS.put("stripeLocation001", JSON.stringify({
-  brandName: "YV Direct", locale: "es-ES", currency: "USD", defaultLanguage: "es",
-  ownerPct: 0.85, processingFeePct: 0.06, defaultCleaningFee: 60,
-  cleaningFeeRecipient: "manager", invoiceDueHours: 24, bookingWorkerEnabled: true,
-  gateway: "stripe", stripeSecretName: "STRIPE_SECRET_YV", invoiceStrategy: "paypal_url",
-  airtableBaseId: "appSTRIPEBASE", airtableToken: "patMOCK2",
-  defaultPropertyRecId: "recSTRIPEPROP"
-}));
 
 const booking = {
   bookingId: "RES-2026-0042",
@@ -101,14 +89,3 @@ for (const c of calls.filter(c => c.url.includes("airtable"))) {
 }
 console.log("--- Response GHL receives (PayPal tenant) ---");
 console.log(JSON.stringify(ghlResponse, null, 2));
-
-// ---- Stripe tenant booking ----
-calls.length = 0;
-const stripeBooking = { ...booking, bookingId: "RES-2026-0043", locationId: "stripeLocation001" };
-const res2 = await worker.fetch({ method: "POST", url: env.WORKER_URL + "/booking-created", json: async () => stripeBooking }, env);
-const stripeResponse = await res2.json();
-console.log("\n--- Stripe call (decoded form params) ---");
-const sc = calls.find(c => c.url.includes("stripe.com"));
-console.log(decodeURIComponent(sc.body).split("&").filter(p => p.includes("line_items") || p.includes("mode") || p.includes("Idempotency") || p.includes("metadata")).join("\n"));
-console.log("\n--- Response GHL receives (Stripe tenant) ---");
-console.log(JSON.stringify(stripeResponse, null, 2));
