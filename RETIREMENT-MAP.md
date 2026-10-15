@@ -35,7 +35,12 @@ default is `enrich` and **no tenant states `paypal_url`**.
 
 `stripe.js` is the cleaner case — **no tenant has ever had `gateway: "stripe"`**.
 YV takes Stripe payments through GHL's own connection, which this code never
-touches.
+touches. Audited 2026-10-15 across all 130 booking snapshots: **zero** carry a
+Worker-issued Stripe session. It has never run in production.
+
+**Audited 2026-10-15**, all 130 snapshots: 85 carry a Worker-issued PayPal
+order and **40 hold a capture id**. So the refund path is referenced by real
+data and cannot simply be deleted — unlike the Stripe half, which is free.
 
 **Before deleting:** old bookings may still carry a PayPal `captureId`, and
 `refundPayPalPartial()` in `reschedule.js` uses it to issue a real refund. Those
@@ -130,8 +135,9 @@ reproducible.
 
 ## Recommended order
 
-1. **Delete `stripe.js` and the `/stripe/*` routes.** Zero users, ever. No
-   migration, no data to check.
+1. **Delete `stripe.js` and the `/stripe/*` routes.** Zero users, ever —
+   confirmed against every booking snapshot, not just the tenant records. No
+   migration and nothing to check.
 2. **Remove the no-pets strip** (one line) and refresh the Airtable comments.
 3. **Decide on `otaRate`** — use it or lose it.
 4. **Audit the BOOKINGS KV for outstanding PayPal captures**, then delete the
