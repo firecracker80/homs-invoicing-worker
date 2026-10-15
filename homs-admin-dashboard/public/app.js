@@ -232,8 +232,70 @@ const I18N = {
       "Número de línea dentro de su archivo — pase el cursor sobre una fila para ver el nombre",
     "It will have to be set on the account by hand.":
       "Habrá que configurarlo manualmente en la cuenta.",
+
+    // Filter labels that had no Spanish, so neither they nor their "All"
+    // option could be translated.
+    "Cleaner": "Limpiador",
+    "Condition": "Condición",
+    "Review Status": "Estado de Revisión",
+    "Sync Status": "Estado de Sincronización",
+    "Changed": "Modificada",
+
+    // Property table headers. The uppercase on screen is CSS, which is why
+    // "Name" and "Owner" translate and these four did not -- they were simply
+    // absent, not a casing problem.
+    "Address": "Dirección",
+    "Bed/Bath": "Hab./Baños",
+    "Nightly Rate": "Tarifa por Noche",
+    "Bookings": "Reservas",
+
+    // Status values as GHL stores them, lowercase and unnormalised. The
+    // capitalised reservation statuses were already here, which is why
+    // "Nueva" and "Pasada" sat in the same table as "active" and "refunded".
+    "active": "activa",
+    "inactive": "inactiva",
+    "paid": "pagado",
+    "refunded": "reembolsado",
+    "Refunded": "Reembolsado",
+
+    // The record counter, split out of its own sentence -- see table().
+    "record": "registro",
+    "records": "registros",
+
+    // Kept on one source line where it is rendered, so this key is the whole
+    // text node. Wrapped, the node carries its own indentation and no key can
+    // match it.
+    "The HOMS Portfolio Intake the client filled in (.xlsx). Properties are created from it; rental listings still have to be created by hand, and you get a checklist for those. Nothing is written until you review the rows and press Import.":
+      "El Formulario de Portafolio HOMS que llenó el cliente (.xlsx). Las propiedades se crean a partir de él; los anuncios de alquiler todavía hay que crearlos a mano, y se genera una lista de verificación para esos. No se guarda nada hasta que revise las filas y presione Importar.",
   },
 };
+
+// Every filter's "All" option renders as `${label}: All` -- one text node, built
+// by interpolation -- and localize() matches whole text nodes against this
+// dictionary, so no fixed key can ever match it. "Year: All" and "Month: All"
+// are written out literally in the markup, which is the only reason those two
+// were ever translated while every other filter sat in English (Yari,
+// 2026-10-13).
+//
+// Generated from the labels rather than listed, so a filter added later is
+// translated the moment its label is. The alternative is fifteen hand-written
+// keys and a sixteenth filter nobody remembers to add, found by a client.
+//
+// Spanish agrees in gender, so the word is not always "Todos" -- the feminine
+// ones take "Todas". Getting that wrong is what makes a page read as machine
+// translation to the people it was translated for.
+const ALL_FEMININE = new Set(["Property", "Category", "Condition", "Rescheduled", "Changed"]);
+for (const label of [
+  "Status", "Type", "Owner", "Property", "OTA Channel", "Payment", "Category",
+  "Cleaner", "Condition", "Paid By", "Review Status", "Sync Status",
+  "Turnover Type", "Rescheduled", "Changed",
+]) {
+  const es = I18N.es[label];
+  // An untranslated label would give "Review Status: Todos", which reads worse
+  // than leaving the option in English until somebody translates the label.
+  if (es) I18N.es[`${label}: All`] = `${es}: ${ALL_FEMININE.has(label) ? "Todas" : "Todos"}`;
+}
+
 
 let LOCALE = "en";
 
@@ -1714,9 +1776,7 @@ const portfolioIssue = (i) => PORTFOLIO_ISSUES[i] || i.replace(/^bad_/, "could n
 function portfolioSection() {
   return `
     <h3>Import the portfolio workbook</h3>
-    <p class="note">The HOMS Portfolio Intake the client filled in (.xlsx). Properties are created from it;
-      rental listings still have to be created by hand, and you get a checklist for those.
-      Nothing is written until you review the rows and press Import.</p>
+    <p class="note">The HOMS Portfolio Intake the client filled in (.xlsx). Properties are created from it; rental listings still have to be created by hand, and you get a checklist for those. Nothing is written until you review the rows and press Import.</p>
     <div class="toolbar">
       <input type="file" id="portfolioFile" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" />
       <span id="portfolioStatus" class="count"></span>
@@ -2740,7 +2800,7 @@ const labelCells = (rowsHtml, headers) =>
 
 function table(headers, rowsHtml, count) {
   return `
-    ${count !== null && count !== undefined ? `<div class="toolbar"><div class="count">${count} record${count === 1 ? "" : "s"}</div></div>` : ""}
+    ${count !== null && count !== undefined ? `<div class="toolbar"><div class="count"><span>${count}</span> ${count === 1 ? "record" : "records"}</div></div>` : ""}
     <table>
       <thead><tr>${headers.map((h) => `<th>${h}</th>`).join("")}</tr></thead>
       <tbody>${labelCells(rowsHtml, headers)}</tbody>
