@@ -267,7 +267,10 @@ async function handleBookingCreated(request, env) {
   // GHL's rental calendar already auto-created instead of generating a
   // PayPal/Stripe checkout link. Any failure here falls through to the
   // existing PayPal-URL flow below unmodified — nothing lost.
-  const invoiceStrategy = tenant.invoiceStrategy ?? env.INVOICE_STRATEGY ?? "paypal_url";
+  // "enrich", not "paypal_url". The legacy default meant an account nobody had
+  // configured took the path GHL never sees -- no native payment record and
+  // nothing to reconcile. Inert for the live tenants, which all state it.
+  const invoiceStrategy = tenant.invoiceStrategy ?? env.INVOICE_STRATEGY ?? "enrich";
   let approveUrl, gatewayRef, gateway;
 
   if (invoiceStrategy === "enrich") {
