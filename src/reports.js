@@ -521,9 +521,17 @@ async function queryStatement(env, locationId, recipient, from, to, recipientNam
   // (never this recipient's earnings) -- "what did they actually earn".
   const incomeTotal = round2(summary.filter(s => s.category === "income").reduce((s, r) => s + r.total, 0));
   const shadowTotal = round2(summary.filter(s => s.category === "shadow").reduce((s, r) => s + r.total, 0));
-  const expenseTotal = round2(summary.filter(s => s.category === "expense").reduce((s, r) => s + r.total, 0));
+  // Expense rows are stored NEGATIVE -- expenses.js writes -Math.abs(gross), and
+  // the detail table renders them as stored, with the minus sign showing. So the
+  // sum is negative and the two numbers below are not interchangeable:
+  //   expenseSum   stays signed, and is what net income adds
+  //   expenseTotal is the positive magnitude, for a line that already says "(...)"
+  // Negating the sum rather than taking its absolute value, so a credit posted
+  // against a cost correctly REDUCES the total instead of inflating it.
+  const expenseSum = round2(summary.filter(s => s.category === "expense").reduce((s, r) => s + r.total, 0));
+  const expenseTotal = round2(-expenseSum);
 
-  const base = { summary, detail, incomeTotal, shadowTotal, expenseTotal,
+  const base = { summary, detail, incomeTotal, shadowTotal, expenseTotal, expenseSum,
     currency: detail[0]?.currency || summary[0]?.currency || "USD" };
   if (recipient !== "owner") return base;
 
@@ -531,7 +539,13 @@ async function queryStatement(env, locationId, recipient, from, to, recipientNam
   // the top. The commission lives on the manager's half of the split, so it is
   // fetched rather than derived -- deriving it from a percentage would invent a
   // number on any booking priced at a different rate, and repricing does that.
-  const bookingIds = [...new Set(detail.map(d => d.bookingId).filter(Boolean))];
+  // Only the bookings that actually produced a rent split. An owner-borne
+  // expense is a ledger row too, carrying a synthetic bookingId of
+  // "expense:<recordId>" (expenses.js), and those can never have a manager half
+  // -- including them just pads the IN list with ids that match nothing.
+  const bookingIds = [...new Set(detail
+    .filter(d => d.entryType === "rent_split_owner")
+    .map(d => d.bookingId).filter(Boolean))];
   const { commission, bookingCount } = await queryOwnerCommission(env, locationId, from, to, bookingIds);
   // Gross is reconstructed, not read: the ledger stores the two halves, never
   // the whole. Owner share + manager share IS the rent the guest was charged.
@@ -542,7 +556,7 @@ async function queryStatement(env, locationId, recipient, from, to, recipientNam
     managerCommission: commission,
     commissionBookingCount: bookingCount,
     grossRent: round2(rentOwner + commission),
-    netIncome: round2(incomeTotal - expenseTotal),
+    netIncome: round2(incomeTotal + expenseSum),
   };
 }
 
@@ -634,7 +648,7 @@ function statementHtml({ brandName, heading, recipientName, fromLabel, toLabel, 
     <tbody>
       <tr><td>${t.grossRent}</td><td class="amt">${stmt.currency} ${stmt.grossRent.toFixed(2)}</td></tr>
       <tr><td>${t.managementCommission}</td><td class="amt neg">(${stmt.currency} ${stmt.managerCommission.toFixed(2)})</td></tr>
-      ${stmt.expenseTotal > 0 ? `<tr><td>${t.ownerCosts}</td><td class="amt neg">(${stmt.currency} ${stmt.expenseTotal.toFixed(2)})</td></tr>` : ""}
+      ${stmt.expenseTotal !== 0 ? `<tr><td>${t.ownerCosts}</td><td class="amt neg">(${stmt.currency} ${stmt.expenseTotal.toFixed(2)})</td></tr>` : ""}
       <tr class="net"><td>${t.netToOwner}</td><td class="amt">${stmt.currency} ${stmt.netIncome.toFixed(2)}</td></tr>
     </tbody>
   </table>` : ""}

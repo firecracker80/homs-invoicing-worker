@@ -1020,6 +1020,7 @@ function renderAll({ refetch = true } = {}) {
   renderInventory();
   renderReports();
   renderStatement();
+  if (refetch) loadOwnerStatement();
   renderManagerStatement();
   // Fetched rather than computed, so it arrives after the first paint. Not
   // awaited: the rest of the dashboard must not wait on the invoicing Worker.
@@ -2466,6 +2467,10 @@ const STATEMENT_I18N = {
   en: {
     selectProperty: "Select property", selectMonth: "Select month",
     statementFor: "Statement for", owner: "Owner", noOwnerOnFile: "(no owner on file)",
+    allOwners: "All owners", allOwnersHeading: "All owners", unnamedOwner: "(owner not named on the entries)",
+    allOwnersNote: "Every owner on this account combined. Choose an owner above to produce a statement to send.",
+    allTime: "All time", ownerShare: "Your share", loading: "Loading…",
+    directOnly: "Direct bookings only. Reservations made through a booking platform are paid out by that platform and do not appear here.",
     grossIncome: "Gross Income", managementCommission: "Management Commission",
     otherExpenses: "Other Owner Expenses", netIncome: "Net Income",
     notNetted: "Paid in another currency, not included in the totals above",
@@ -2479,6 +2484,10 @@ const STATEMENT_I18N = {
   es: {
     selectProperty: "Seleccionar propiedad", selectMonth: "Seleccionar mes",
     statementFor: "Estado de cuenta de", owner: "Propietario", noOwnerOnFile: "(sin propietario registrado)",
+    allOwners: "Todos los propietarios", allOwnersHeading: "Todos los propietarios", unnamedOwner: "(propietario sin nombre en los registros)",
+    allOwnersNote: "Todos los propietarios de esta cuenta combinados. Elija un propietario arriba para generar un estado de cuenta para enviar.",
+    allTime: "Todo el periodo", ownerShare: "Su parte", loading: "Cargando…",
+    directOnly: "Solo reservas directas. Las reservas hechas por una plataforma las paga esa plataforma y no aparecen aquí.",
     grossIncome: "Ingreso Bruto", managementCommission: "Comisión de Administración",
     otherExpenses: "Otros Gastos del Propietario", netIncome: "Ingreso Neto",
     notNetted: "Pagado en otra moneda, no incluido en los totales anteriores",
@@ -2504,7 +2513,7 @@ const EXPENSE_CATEGORY_ES = {
   other: "Otro",
 };
 
-let statementState = { propertyId: null, month: null, lang: "en" };
+let statementState = { ownerName: null, month: null, lang: "en", data: null, loading: false, error: null };
 
 function t(key) {
   return STATEMENT_I18N[statementState.lang][key] || STATEMENT_I18N.en[key] || key;
@@ -2523,71 +2532,97 @@ function monthLabel(ym) {
   return d.toLocaleDateString(statementState.lang === "es" ? "es-ES" : "en-US", { month: "long", year: "numeric" });
 }
 
+// --- owner statement --------------------------------------------------------
+//
+// Rendered from the invoicing Worker's figures, never recomputed here -- the
+// same move the manager panel made on 2026-10-01, and for the same reason.
+//
+// What was here before computed the commission as the sum of expense records
+// categorised management_fee, which nothing in the system writes, so it printed
+// $0.00 on every statement it ever produced. Villa Amarilla's October 2026
+// statement showed its owner keeping $4,303 of $4,430 gross on an account that
+// takes 15%. The split is two ledger rows per booking and the manager's half
+// carries recipient='manager', so no owner-scoped view of THIS Worker's data
+// could have contained it however it were written.
+//
+// Scoped by OWNER, not by property. The ledger has no property_id -- its rows
+// are per booking -- so the money cannot be grouped by property at all, and a
+// property picker over Worker figures would have shown one property's name
+// above another number entirely.
+// Pure, and separate from the fetch so it can be run in a test. The window
+// maths is the part worth proving: a month has to become a half-open range the
+// Worker agrees with, and "no month" has to become an explicit period=all.
+// Sending neither gets the Worker's 30-day default -- the manager panel claimed
+// "All time" over 30 days of data that way for a week (2026-10-05).
+function ownerStatementParams(state, locationId) {
+  const params = new URLSearchParams({ locationId });
+  if (!state.month) params.set("period", "all");
+  else {
+    const [y, m] = state.month.split("-").map(Number);
+    params.set("from", `${state.month}-01`);
+    // Date.UTC(y, m, 0) is the last day of month m, because month is 1-based
+    // here and 0-based there. Built in UTC on purpose: new Date(y, m, 0) is
+    // local midnight, and toISOString() then moves it EAST of Greenwich into
+    // the previous day -- Madrid and Tokyo both lose the last day of the month,
+    // while the DR, being west, happens not to. A statement that is correct in
+    // Santo Domingo and a day short in Madrid is worse than one that is wrong
+    // everywhere, because nobody finds it.
+    params.set("to", new Date(Date.UTC(y, m, 0)).toISOString().slice(0, 10));
+  }
+  if (state.ownerName) params.set("recipientName", state.ownerName);
+  return params;
+}
+
+async function loadOwnerStatement() {
+  const locationId = getLocationId();
+  if (!locationId) return;
+  statementState.loading = true;
+  statementState.error = null;
+  renderStatement();
+
+  const params = ownerStatementParams(statementState, locationId);
+
+  try {
+    const res = await apiFetch("/api/owner-statement?" + params.toString());
+    const json = await res.json();
+    if (!res.ok) throw new Error(json.detail || json.error || `HTTP ${res.status}`);
+    statementState.data = json;
+  } catch (err) {
+    statementState.data = null;
+    statementState.error = err.message || String(err);
+  }
+  statementState.loading = false;
+  renderStatement();
+}
+
 function renderStatement() {
   const panel = $("#panel-statement");
-  const { properties } = DATA;
+  const d = statementState.data;
 
-  if (!properties.length) {
-    panel.innerHTML = `<div class="state-msg">${t("noData")}</div>`;
-    return;
-  }
-
-  if (!statementState.propertyId || !properties.some((p) => p.id === statementState.propertyId)) {
-    statementState.propertyId = properties[0].id;
-  }
-  const property = properties.find((p) => p.id === statementState.propertyId);
-
-  const propTx = DATA.transactions.filter((x) => x.propertyId === property.id);
-  const propEx = DATA.expenses.filter((x) => x.propertyId === property.id);
-
+  // Months come from this Worker's own transactions, which is only the picker's
+  // range -- every figure below comes from the Worker.
   const months = new Set();
-  propTx.forEach((x) => x.checkinDate && months.add(x.checkinDate.slice(0, 7)));
-  propEx.forEach((x) => x.paidOn && months.add(x.paidOn.slice(0, 7)));
+  DATA.transactions.forEach((x) => x.checkinDate && months.add(x.checkinDate.slice(0, 7)));
+  DATA.expenses.forEach((x) => x.paidOn && months.add(x.paidOn.slice(0, 7)));
   const sortedMonths = [...months].sort().reverse();
-  if (!statementState.month || !sortedMonths.includes(statementState.month)) {
-    statementState.month = sortedMonths[0] || null;
-  }
 
-  const monthTx = statementState.month
-    ? propTx.filter((x) => (x.checkinDate || "").slice(0, 7) === statementState.month)
-    : [];
-  const monthEx = statementState.month
-    ? propEx.filter((x) => (x.paidOn || "").slice(0, 7) === statementState.month)
-    : [];
+  const owners = (d && d.availableOwners) || [];
+  const cur = (d && d.currency) || DATA.accountCurrency || "USD";
+  const m = (n) => moneyIn(Number(n || 0), cur);
 
-  const grossIncome = monthTx.reduce((sum, x) => sum + (Number(x.bookingTotal) || 0), 0);
-  const managementEx = monthEx.filter((x) => x.categoryKey === "management_fee");
-  const otherEx = monthEx.filter((x) => x.categoryKey !== "management_fee");
-  const managementCommission = managementEx.reduce((sum, x) => sum + (inAccountCurrency(x) || 0), 0);
-  const otherExpensesTotal = otherEx.reduce((sum, x) => sum + (inAccountCurrency(x) || 0), 0);
-  // Per-currency subtotals of what could not be netted (e.g. RD$ costs, no conversion).
-  const notNetted = {};
-  for (const x of monthEx) {
-    if (inAccountCurrency(x) === null) notNetted[x.currency] = (notNetted[x.currency] || 0) + (Number(x.amount) || 0);
-  }
-  const netIncome = grossIncome - managementCommission - otherExpensesTotal;
-
-  const nightsBetween = (a, b) => {
-    if (!a || !b) return "—";
-    const n = Math.round((new Date(b) - new Date(a)) / 86400000);
-    return Number.isFinite(n) ? n : "—";
-  };
-
-  const ownerName = (() => {
-    if (property.ownerContactName) return property.ownerContactName;
-    const withOwner = monthEx.find((x) => x.ownerContactName) || propEx.find((x) => x.ownerContactName);
-    return withOwner ? withOwner.ownerContactName : null;
-  })();
-
-  panel.innerHTML = `
+  const controls = `
     <div class="statement-controls">
-      <select id="stmtProperty">
-        ${properties.map((p) => `<option value="${p.id}" ${p.id === property.id ? "selected" : ""}>${esc(p.name)}</option>`).join("")}
+      <select id="stmtOwner">
+        <option value="">${esc(t("allOwners"))}</option>
+        ${owners.map((o) => {
+          const name = o.name == null ? "" : o.name;
+          const label = o.name == null ? t("unnamedOwner") : o.name;
+          return `<option value="${esc(name)}" ${name === (statementState.ownerName || "") && statementState.ownerName ? "selected" : ""}>${esc(label)}</option>`;
+        }).join("")}
       </select>
-      <select id="stmtMonth" ${sortedMonths.length ? "" : "disabled"}>
-        ${sortedMonths.length
-          ? sortedMonths.map((m) => `<option value="${m}" ${m === statementState.month ? "selected" : ""}>${esc(monthLabel(m))}</option>`).join("")
-          : `<option>${esc(t("selectMonth"))}</option>`}
+      <select id="stmtMonth">
+        <option value="">${esc(t("allTime"))}</option>
+        ${sortedMonths.map((mo) => `<option value="${mo}" ${mo === statementState.month ? "selected" : ""}>${esc(monthLabel(mo))}</option>`).join("")}
       </select>
       <span class="lang-toggle">
         <button class="btn lang-btn ${statementState.lang === "en" ? "active" : ""}" data-lang="en">EN</button>
@@ -2595,46 +2630,91 @@ function renderStatement() {
       </span>
       <button class="btn" id="stmtPrint">${t("print")}</button>
       <button class="btn" id="stmtExport">${t("exportCsv")}</button>
-    </div>
+    </div>`;
 
+  if (statementState.loading) {
+    panel.innerHTML = controls + `<div class="state-msg">${esc(t("loading"))}</div>`;
+    return;
+  }
+  if (statementState.error) {
+    panel.innerHTML = controls + `<div class="state-msg error">${esc(statementState.error)}</div>`;
+    return;
+  }
+  if (!d) {
+    panel.innerHTML = controls + `<div class="state-msg">${esc(t("noData"))}</div>`;
+    return;
+  }
+
+  const detail = d.detail || [];
+  const rentRows = detail.filter((x) => x.entryType === "rent_split_owner");
+  const costRows = detail.filter((x) => x.category === "expense");
+
+  // The reservation's own details are not in the ledger, which stores money and
+  // a booking id. ledger.js writes booking_reference: snapshot.bookingId onto
+  // the Transaction record, so the two join on exactly that -- and a booking
+  // with no Transaction record still lists, carrying what the ledger knows,
+  // rather than vanishing out of a total it is part of.
+  const txByRef = new Map(DATA.transactions.filter((x) => x.bookingReference).map((x) => [x.bookingReference, x]));
+  // An owner-borne expense's ledger row carries a synthetic id of
+  // "expense:<recordId>", which is how a cost finds its own record back.
+  const expById = new Map(DATA.expenses.map((x) => [x.id, x]));
+
+  const nightsBetween = (a, b) => {
+    if (!a || !b) return "—";
+    const n = Math.round((new Date(b) - new Date(a)) / 86400000);
+    return Number.isFinite(n) ? n : "—";
+  };
+
+  const heading = statementState.ownerName
+    ? `${t("statementFor")} ${statementState.ownerName}`
+    : t("allOwnersHeading");
+
+  panel.innerHTML = controls + `
     <div class="statement-sheet" id="statementSheet">
-      <h2>${esc(t("statementFor"))} ${esc(property.name)}</h2>
-      <p class="statement-period">${statementState.month ? esc(monthLabel(statementState.month)) : "—"}</p>
-      <p class="statement-owner">${esc(t("owner"))}: ${ownerName ? esc(ownerName) : t("noOwnerOnFile")}</p>
+      <h2>${esc(heading)}</h2>
+      <p class="statement-period">${statementState.month ? esc(monthLabel(statementState.month)) : esc(t("allTime"))}</p>
+      ${statementState.ownerName ? "" : `<p class="note">${esc(t("allOwnersNote"))}</p>`}
 
       <table class="statement-summary">
         <tbody>
-          <tr><td>${esc(t("grossIncome"))}</td><td>${money(grossIncome)}</td></tr>
-          <tr><td>${esc(t("managementCommission"))}</td><td>(${money(managementCommission)})</td></tr>
-          <tr><td>${esc(t("otherExpenses"))}</td><td>(${money(otherExpensesTotal)})</td></tr>
-          <tr class="statement-net"><td>${esc(t("netIncome"))}</td><td>${money(netIncome)}</td></tr>
+          <tr><td>${esc(t("grossIncome"))}</td><td>${m(d.grossRent)}</td></tr>
+          <tr><td>${esc(t("managementCommission"))}</td><td>(${m(d.managerCommission)})</td></tr>
+          <tr><td>${esc(t("otherExpenses"))}</td><td>(${m(d.expenseTotal)})</td></tr>
+          <tr class="statement-net"><td>${esc(t("netIncome"))}</td><td>${m(d.netIncome)}</td></tr>
         </tbody>
       </table>
-      ${Object.keys(notNetted).length
-        ? `<p class="note">${esc(t("notNetted"))}: ${Object.entries(notNetted).map(([c, v]) => esc(moneyIn(v, c))).join(" · ")}</p>`
-        : ""}
+      <p class="note">${esc(t("directOnly"))}</p>
 
       <h3>${esc(t("reservations"))}</h3>
       ${table(
-        [t("resName"), t("guest"), t("checkIn"), t("checkOut"), t("nights"), t("grossRent")],
-        monthTx.map((x) => `<tr><td>${dash(x.name)}</td><td>${dash(x.guestName)}</td><td>${dateFmt(x.checkinDate)}</td><td>${dateFmt(x.checkoutDate)}</td><td>${nightsBetween(x.checkinDate, x.checkoutDate)}</td><td>${money(x.bookingTotal)}</td></tr>`).join("")
-          || emptyRow(6, t("noReservations")),
+        [t("resName"), t("guest"), t("checkIn"), t("checkOut"), t("nights"), t("ownerShare")],
+        rentRows.map((r) => {
+          const tx = txByRef.get(r.bookingId);
+          return `<tr><td>${dash(tx ? tx.name : r.bookingId)}</td><td>${dash(tx && tx.guestName)}</td><td>${dateFmt(tx && tx.checkinDate)}</td><td>${dateFmt(tx && tx.checkoutDate)}</td><td>${tx ? nightsBetween(tx.checkinDate, tx.checkoutDate) : "—"}</td><td>${moneyIn(r.amount, r.currency)}</td></tr>`;
+        }).join("") || emptyRow(6, t("noReservations")),
         null
       )}
 
       <h3>${esc(t("expensesTitle"))}</h3>
       ${table(
         [t("paidOn"), t("category"), t("description"), t("amount")],
-        monthEx.map((x) => `<tr><td>${dateFmt(x.paidOn)}</td><td>${dash(categoryLabel(x.categoryKey, x.category))}</td><td>${dash(x.lineItemDescription)}</td><td>(${moneyIn(x.amount, x.currency)}${x.convertedAmount && x.currency !== DATA.accountCurrency ? ` = ${money(x.convertedAmount)}` : ""})</td></tr>`).join("")
-          || emptyRow(4, t("noExpenses")),
+        costRows.map((r) => {
+          const rec = expById.get(String(r.bookingId || "").replace(/^expense:/, ""));
+          return `<tr><td>${dateFmt(rec ? rec.paidOn : r.createdAt && r.createdAt.slice(0, 10))}</td><td>${dash(rec && categoryLabel(rec.categoryKey, rec.category))}</td><td>${dash(r.description)}</td><td>(${moneyIn(Math.abs(r.amount), r.currency)})</td></tr>`;
+        }).join("") || emptyRow(4, t("noExpenses")),
         null
       )}
     </div>
   `;
 
   panel.dataset.exportRows = JSON.stringify(
-    monthTx.map((x) => ({ type: "reservation", name: x.name, guest: x.guestName, checkIn: x.checkinDate, checkOut: x.checkoutDate, grossRent: x.bookingTotal }))
-      .concat(monthEx.map((x) => ({ type: "expense", paidOn: x.paidOn, category: categoryLabel(x.categoryKey, x.category), description: x.lineItemDescription, amount: x.amount, currency: x.currency || DATA.accountCurrency || "", convertedAmount: x.convertedAmount ?? "", exchangeRate: x.exchangeRate ?? "", rateDate: x.rateDate ?? "" })))
+    rentRows.map((r) => {
+      const tx = txByRef.get(r.bookingId);
+      return { type: "reservation", bookingId: r.bookingId, name: (tx && tx.name) || "", guest: (tx && tx.guestName) || "",
+        checkIn: (tx && tx.checkinDate) || "", checkOut: (tx && tx.checkoutDate) || "",
+        ownerShare: r.amount, currency: r.currency };
+    }).concat(costRows.map((r) => ({ type: "expense", date: r.createdAt ? r.createdAt.slice(0, 10) : "",
+      description: r.description || "", amount: Math.abs(r.amount), currency: r.currency })))
   );
 }
 
@@ -2983,10 +3063,10 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   document.addEventListener("change", (e) => {
-    if (e.target.id === "stmtProperty") {
-      statementState.propertyId = e.target.value;
-      statementState.month = null;
-      renderStatement();
+    if (e.target.id === "stmtOwner") {
+      statementState.ownerName = e.target.value || null;
+      loadOwnerStatement();
+      return;
     }
     if (e.target.id === "mgrMonth") {
       managerPl.month = e.target.value || null;
@@ -2994,8 +3074,9 @@ document.addEventListener("DOMContentLoaded", () => {
       return;
     }
     if (e.target.id === "stmtMonth") {
-      statementState.month = e.target.value;
-      renderStatement();
+      statementState.month = e.target.value || null;
+      loadOwnerStatement();
+      return;
     }
 
     const filterSelect = e.target.closest(".filter-select");

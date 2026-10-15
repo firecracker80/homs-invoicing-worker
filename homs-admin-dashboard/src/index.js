@@ -1028,6 +1028,69 @@ async function handleProvision(request, env) {
   }
 }
 
+// A statement that comes from the invoicing Worker rather than from here.
+//
+// Neither the manager's nor the owner's economics can be computed from this
+// Worker's data: the transactions object carries booking_total, platform_fee
+// and net_payout and nothing else -- no cleaning fee, no commission split. Both
+// live only in the Worker's ledger. The manager panel was moved here on
+// 2026-10-01; the owner statement was not, and went on computing its commission
+// locally as the sum of expense records categorised management_fee -- which
+// nothing writes -- so it printed $0.00 on every statement it ever produced.
+//
+// One helper rather than one route each, because the error handling below is
+// the part worth not having two copies of.
+//
+// Authenticated with the admin secret the dashboard already holds for
+// provisioning, so no per-tenant report token has to be copied into this
+// Worker's KV and kept in step.
+async function proxyStatement(env, url, { path, params, unavailableLabel }) {
+  const locationId = url.searchParams.get("locationId");
+  if (!locationId) return Response.json({ error: "locationId is required" }, { status: 400 });
+
+  // An allow-list, and every name the page can send has to be in it. It dropped
+  // `period` silently once (2026-10-05): the page asked for all time, the Worker
+  // understood all time, and this route in between threw the word away, so the
+  // panel kept showing 30 days under an All time label. Nothing failed -- a
+  // dropped param just reverts to a default. test-manager-statement.mjs reads
+  // the page's own code and fails if it sends a name missing from this list.
+  const query = { locationId, format: "json" };
+  for (const k of params) {
+    const v = url.searchParams.get(k);
+    if (v) query[k] = v;
+  }
+
+  try {
+    const res = await invoicingFetch(env, path, { query });
+    const text = await res.text();
+
+    // Never pass an upstream 401 through as a 401. apiFetch() in the page treats
+    // ANY 401 as "this person's session expired" and opens the admin key prompt
+    // -- so the reader is asked to re-enter a key that cannot help, and told
+    // they are unauthorized when their session is fine. What actually failed is
+    // this Worker's own credential against the invoicing Worker, which is a
+    // configuration problem and nothing the reader holds.
+    if (res.status === 401 || res.status === 403) {
+      return Response.json({
+        error: "The invoicing Worker rejected this dashboard's credential",
+        detail: "Your session is fine -- this is not your login. INVOICING_ADMIN_SECRET on the dashboard must match the invoicing Worker's ADMIN_SECRET, or that tenant's own adminSecret.",
+      }, { status: 502 });
+    }
+    // Pass the Worker's own status and body through. A 404 for an unknown
+    // locationId or a 500 for a missing PIT says more than anything this route
+    // could invent on its behalf.
+    return new Response(text, { status: res.status, headers: { "Content-Type": "application/json" } });
+  } catch (err) {
+    // A configuration gap is the dashboard's fault and fixable; an unreachable
+    // Worker is not. They are different problems and get different statuses.
+    const misconfigured = err.reason === "no_admin_secret" || err.reason === "no_invoicing_worker_url";
+    return Response.json({
+      error: misconfigured ? `${unavailableLabel} unavailable` : "Could not reach the invoicing Worker",
+      detail: err.message || String(err),
+    }, { status: misconfigured ? 503 : 502 });
+  }
+}
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -1140,54 +1203,23 @@ export default {
     // Already behind the default-deny gate above; a second requireAdmin here
     // would imply that gate is not trusted, which is worse than terse.
     if (url.pathname === "/api/manager-pl") {
-      const locationId = url.searchParams.get("locationId");
-      if (!locationId) return Response.json({ error: "locationId is required" }, { status: 400 });
-      const query = { locationId, format: "json" };
-      // An allow-list, and every name the page can send has to be in it. It
-      // dropped `period` silently once (2026-10-05): the page asked for all
-      // time, the Worker understood all time, and this route in between threw
-      // the word away, so the panel kept showing 30 days under an All time
-      // label. Nothing failed -- a dropped param just reverts to a default.
-      // test-manager-statement.mjs now reads the page's own code and fails if
-      // it sends a name missing from this list.
-      for (const k of ["from", "to", "period", "recipientName", "currency", "lang"]) {
-        const v = url.searchParams.get(k);
-        if (v) query[k] = v;
-      }
+      return proxyStatement(env, url, {
+        path: "/reports/manager-pl",
+        params: ["from", "to", "period", "recipientName", "currency", "lang"],
+        unavailableLabel: "Manager statement",
+      });
+    }
 
-      try {
-        const res = await invoicingFetch(env, "/reports/manager-pl", { query });
-        const text = await res.text();
-
-        // Never pass an upstream 401 through as a 401. apiFetch() in the page
-        // treats ANY 401 as "this person's session expired" and opens the admin
-        // key prompt -- so the reader is asked to re-enter a key that cannot
-        // help, and told they are unauthorized when their session is fine. What
-        // actually failed is this Worker's own credential against the invoicing
-        // Worker, which is a configuration problem and nothing the reader holds.
-        if (res.status === 401 || res.status === 403) {
-          return Response.json({
-            error: "The invoicing Worker rejected this dashboard's credential",
-            detail: "Your session is fine -- this is not your login. INVOICING_ADMIN_SECRET on the dashboard must match the invoicing Worker's ADMIN_SECRET, or that tenant's own adminSecret.",
-          }, { status: 502 });
-        }
-        // Pass the Worker's own status and body through. A 404 for an unknown
-        // locationId or a 500 for a missing PIT says more than anything this
-        // route could invent on its behalf.
-        return new Response(text, {
-          status: res.status,
-          headers: { "Content-Type": "application/json" },
-        });
-      } catch (err) {
-        // A configuration gap is the dashboard's fault and fixable; an
-        // unreachable Worker is not. They are different problems and get
-        // different statuses.
-        const misconfigured = err.reason === "no_admin_secret" || err.reason === "no_invoicing_worker_url";
-        return Response.json({
-          error: misconfigured ? "Manager statement unavailable" : "Could not reach the invoicing Worker",
-          detail: err.message || String(err),
-        }, { status: misconfigured ? 503 : 502 });
-      }
+    // The owner statement, for the same reason and from the same ledger. The
+    // commission an owner is charged is the manager's half of the rent split,
+    // which carries recipient='manager' -- so no owner-scoped view of this
+    // Worker's data could ever contain it, however it were written.
+    if (url.pathname === "/api/owner-statement") {
+      return proxyStatement(env, url, {
+        path: "/reports/owner-statement",
+        params: ["from", "to", "period", "recipientName", "currency", "lang"],
+        unavailableLabel: "Owner statement",
+      });
     }
 
     if (url.pathname === "/api/data") {

@@ -69,7 +69,10 @@ const call = async (db, qs = "") => {
 // owner-borne costs.
 const AMARILLA = ownerRows([
   { booking: "BK-1", type: "rent_split_owner", category: "income", amount: 3765.50 },
-  { booking: "BK-2", type: "expense_owner", category: "expense", amount: 127 },
+  // NEGATIVE, as expenses.js actually stores it: -Math.abs(gross). This fixture
+  // was positive when the test was written, which made assertions about the net
+  // pass against a sign the ledger never produces.
+  { booking: "expense:REC-9", type: "expense_owner", category: "expense", amount: -127 },
 ]);
 
 console.log("1) the commission is reported, and it is not zero");
@@ -101,8 +104,9 @@ console.log("4) the commission is fetched for the owner's own bookings, not the 
   let seen = null;
   await call(makeDb({ owner: AMARILLA, commissionMinor: 66450, onCommissionQuery: (sql, p) => { seen = p; } }));
   assert.ok(seen, "the manager rows must actually be queried");
-  assert.ok(seen.includes("BK-1") && seen.includes("BK-2"),
-    "every booking id on the owner's statement has to be in the commission query");
+  assert.ok(seen.includes("BK-1"), "the owner's booking has to be in the commission query");
+  assert.ok(!seen.some(p => String(p).startsWith("expense:")),
+    "an expense row's synthetic bookingId can never have a manager half -- it must not pad the query");
 }
 
 console.log("5) an owner with no bookings gets zero, and the database is never asked");
@@ -152,6 +156,59 @@ console.log("10) the HTML statement is unchanged and carries no picker data");
     { TENANTS: { get: async () => TENANT },
       LEDGER_DB: makeDb({ owner: AMARILLA, commissionMinor: 66450, ownerNames: [{ recipient_name: "x", n: 1 }] }) });
   assert.ok(String(res.headers.get("Content-Type")).includes("html"), "default format is still HTML");
+}
+
+// Expenses are stored negative. Every number derived from them has a sign that
+// can be got backwards, and getting it backwards ADDS a cost to an owner's
+// income instead of deducting it -- a 254-dollar error on a 127-dollar expense,
+// in the owner's favour, in a document HOMS sends to a client.
+console.log("12) a negative stored expense becomes a positive magnitude, and net goes DOWN");
+{
+  const { body } = await call(makeDb({ owner: AMARILLA, commissionMinor: 66450 }));
+  assert.strictEqual(body.expenseSum, -127, "the signed sum stays as the ledger stores it");
+  assert.strictEqual(body.expenseTotal, 127, "the displayed magnitude is positive -- the line already reads (...)");
+  assert.ok(body.netIncome < body.incomeTotal, "costs must reduce the net, never raise it");
+  assert.strictEqual(body.netIncome, 3638.50);
+  assert.notStrictEqual(body.netIncome, 3892.50, "3892.50 is income PLUS the expense -- the sign flipped");
+}
+
+// Negating the sum rather than taking its absolute value, so a credit posted
+// against a cost reduces what the owner is charged instead of inflating it.
+console.log("13) a credit against a cost reduces the total rather than adding to it");
+{
+  const withCredit = ownerRows([
+    { booking: "BK-1", type: "rent_split_owner", category: "income", amount: 1000 },
+    { booking: "expense:A", type: "expense_owner", category: "expense", amount: -200 },
+    { booking: "expense:B", type: "expense_owner", category: "expense", amount: 50 },
+  ]);
+  const { body } = await call(makeDb({ owner: withCredit, commissionMinor: 0 }));
+  assert.strictEqual(body.expenseTotal, 150, "200 charged less a 50 credit is 150");
+  assert.strictEqual(body.netIncome, 850);
+}
+
+// The case that separates -sum from Math.abs(sum): credits exceeding charges,
+// which happens when a cost booked in an earlier period is refunded in this one.
+// abs() would deduct that refund from the owner as though it were another cost.
+console.log("13b) a period that is net a credit RAISES the owner's net income");
+{
+  const netCredit = ownerRows([
+    { booking: "BK-1", type: "rent_split_owner", category: "income", amount: 1000 },
+    { booking: "expense:A", type: "expense_owner", category: "expense", amount: -50 },
+    { booking: "expense:B", type: "expense_owner", category: "expense", amount: 200 },
+  ]);
+  const { body } = await call(makeDb({ owner: netCredit, commissionMinor: 0 }));
+  assert.strictEqual(body.expenseSum, 150);
+  assert.strictEqual(body.expenseTotal, -150, "a net credit is a negative cost, not a positive one");
+  assert.strictEqual(body.netIncome, 1150, "the owner is owed MORE, not less");
+}
+
+console.log("14) an owner with no costs still reconciles");
+{
+  const noCosts = ownerRows([{ booking: "BK-1", type: "rent_split_owner", category: "income", amount: 1000 }]);
+  const { body } = await call(makeDb({ owner: noCosts, commissionMinor: 17647 }));
+  assert.strictEqual(body.expenseTotal, 0);
+  assert.strictEqual(body.netIncome, 1000);
+  assert.strictEqual(body.grossRent, 1176.47);
 }
 
 console.log("11) a manager statement is unchanged -- no commission fields on it");
