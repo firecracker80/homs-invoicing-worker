@@ -64,6 +64,28 @@ function makeMockD1() {
       }
       return { results: out };
     }
+    // The manager's half of the split, for the owner statement's commission
+    // line. Scoped by booking id, so the mock has to honour the IN list rather
+    // than sum every manager row -- an owner on a multi-owner account would
+    // otherwise be charged the whole account's commission and the test would
+    // still pass.
+    if (sql.includes("recipient = 'manager'") && sql.includes("SUM(amount_minor)")) {
+      const [locationId, entryType, from, to, ...bookingIds] = params;
+      const matched = rows.filter(r => r.location_id === locationId && r.recipient === "manager"
+        && r.entry_type === entryType && r.created_at >= from && r.created_at < to
+        && bookingIds.includes(r.booking_id));
+      return { results: [{ total_minor: matched.reduce((s, r) => s + r.amount_minor, 0), n: matched.length }] };
+    }
+    if (sql.includes("GROUP BY recipient_name")) {
+      const [locationId, from, to] = params;
+      const counts = new Map();
+      for (const r of rows) {
+        if (r.location_id !== locationId || r.recipient !== "owner" || r.created_at < from || r.created_at >= to) continue;
+        const k = r.recipient_name ?? null;
+        counts.set(k, (counts.get(k) || 0) + 1);
+      }
+      return { results: [...counts].map(([recipient_name, n]) => ({ recipient_name, n })) };
+    }
     throw new Error("mock D1: unrecognized query shape: " + sql.slice(0, 100));
   }
 
@@ -282,6 +304,20 @@ console.log("9) /reports/owner-statement HTML renders and contains the real tota
 const mgrRes = await (await worker.fetch({ method: "GET", url: "https://w.dev/reports/manager-statement?locationId=L1&format=json&from=2026-01-01&to=2026-12-31", headers: hdr("admin123") }, env)).json();
 assert.equal(mgrRes.incomeTotal, 105, "manager income = 15% rent split; cleaning is native and arrives via the invoice path");
 console.log("10) /reports/manager-statement JSON -> incomeTotal:", mgrRes.incomeTotal, "(15% rent split)");
+
+// ---- 10a. the owner's commission IS the manager's income ----
+// A seam test, not a repeat of the unit one: both sides are queried separately,
+// from opposite ends of the same split, and nothing in the code makes them
+// agree. If they ever disagree, one of the two statements is lying to somebody
+// about their own money -- and the dashboard's locally-computed version did
+// exactly that, reporting $0.00 commission against a real 15% manager income.
+const ownRes = await (await worker.fetch({ method: "GET", url: "https://w.dev/reports/owner-statement?locationId=L1&format=json&from=2026-01-01&to=2026-12-31", headers: hdr("admin123") }, env)).json();
+assert.equal(ownRes.managerCommission, mgrRes.incomeTotal,
+  "the commission deducted from the owner must equal what the manager is shown earning");
+assert.equal(ownRes.grossRent, ownRes.incomeTotal + ownRes.managerCommission,
+  "gross is the two halves added back together");
+assert.ok(ownRes.managerCommission > 0, "a 15% account cannot have a zero commission -- the bug this replaces");
+console.log("10a) owner commission", ownRes.managerCommission, "= manager income", mgrRes.incomeTotal, "| gross", ownRes.grossRent);
 
 // ---- 10b. Iframe-friendly ?token= auth: scoped per recipient, can't cross over ----
 await kv.put("L2", JSON.stringify({
