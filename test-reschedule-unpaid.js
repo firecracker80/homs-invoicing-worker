@@ -50,7 +50,7 @@ const env = { WORKER_URL: "https://w.dev", TENANTS: kv, BOOKINGS: kv, ADMIN_SECR
 await kv.put("L1", JSON.stringify({
   brandName: "JT1", currency: "USD", ownerPct: 0.85, processingFeePct: 0.06,
   defaultCleaningFee: 69, cleaningFeeRecipient: "manager", bookingWorkerEnabled: true,
-  gateway: "paypal", deposit: { rule: "tiered" },
+  gateway: "paypal", invoiceStrategy: "paypal_url", deposit: { rule: "tiered" },
   paypalApi: "https://p", paypalClientId: "C", paypalSecret: "S",
   airtableBaseId: "a", airtableToken: "pat", defaultPropertyRecId: "rP",
   ghlPit: "test-pit"

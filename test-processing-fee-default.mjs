@@ -5,7 +5,7 @@
 // native 6% Additional Fee on INV-000031 -- compounding, because the Worker's
 // basis includes the native fee. No single file was wrong about it.
 import assert from "node:assert/strict";
-import { processingFeePctFor, deriveProcessingFeePct, PAYPAL_FEE_PCT } from "./src/policy.js";
+import { processingFeePctFor, deriveProcessingFeePct, deriveInvoiceStrategy, PAYPAL_FEE_PCT } from "./src/policy.js";
 
 console.log("1) no PayPal, nothing stated -> zero, not 6%");
 assert.strictEqual(processingFeePctFor({}), 0);
@@ -72,6 +72,51 @@ for (const [p, e] of [[{ paypalClientId: "AX..." }, null], [{}, null]]) {
 
 // Reproduces the three live records as of 2026-10-13. If the rule cannot
 // reproduce the accounts it is about to govern, it is the wrong rule.
+// Writing an account's PayPal Custom Values is the moment it becomes a paying
+// account. Both settings it needs are derived then, so neither is a step
+// somebody has to remember (Yari, 2026-10-15).
+console.log("11) a provisioned account gets enrich, not the legacy paypal_url");
+{
+  const d = deriveInvoiceStrategy({}, null);
+  assert.strictEqual(d.value, "enrich");
+  assert.ok(d.reason && d.reason.length > 20, "a derived money setting must explain itself");
+}
+
+console.log("12) PayPal values give enrich AND the fee, in the same run");
+{
+  const provisioned = { paypalClientId: "AX...", paypalWebhookId: "WH..." };
+  assert.strictEqual(deriveInvoiceStrategy(provisioned, null).value, "enrich");
+  assert.strictEqual(deriveProcessingFeePct(provisioned, null).value, PAYPAL_FEE_PCT);
+}
+
+// Stripe accounts pass fees to the guest through GHL's own toggle, so the
+// Worker must add nothing -- but they still take payment through a GHL invoice.
+console.log("13) an account with no PayPal is still enrich, just without the fee");
+{
+  assert.strictEqual(deriveInvoiceStrategy({}, null).value, "enrich");
+  assert.strictEqual(deriveProcessingFeePct({}, null).value, 0);
+}
+
+console.log("14) a stated strategy is never overwritten, including a deliberate paypal_url");
+{
+  assert.strictEqual(deriveInvoiceStrategy({}, { invoiceStrategy: "paypal_url" }), null,
+    "an account deliberately on the legacy path must survive a re-provision");
+  assert.strictEqual(deriveInvoiceStrategy({}, { invoiceStrategy: "enrich" }), null);
+  assert.strictEqual(deriveInvoiceStrategy({ invoiceStrategy: "paypal_url" }, null), null,
+    "a strategy arriving with this run is also somebody's decision");
+}
+
+// All three live tenants state "enrich", so flipping the runtime default moves
+// none of them -- the same property that made the fee default safe to flip.
+console.log("15) the derivation reproduces all three live tenants");
+for (const existing of [
+  { invoiceStrategy: "enrich", paypalClientId: "AX..." },              // Casa Bonita
+  { invoiceStrategy: "enrich", paypalClientId: "AX...", processingFeePct: 0.06 }, // Luminara
+  { invoiceStrategy: "enrich", processingFeePct: 0 },                  // YV, Stripe
+]) {
+  assert.strictEqual(deriveInvoiceStrategy({}, existing), null, "nothing to derive: each states its own");
+}
+
 console.log("10) the rule reproduces all three live tenants");
 const live = [
   { name: "Casa Bonita", existing: { paypalClientId: "AX..." }, want: PAYPAL_FEE_PCT },

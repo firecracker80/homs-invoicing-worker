@@ -49,6 +49,9 @@ const env = {
       cleaningFeeRecipient: "manager",
       invoiceDueHours: 24,
       bookingWorkerEnabled: true,
+      // Stated rather than defaulted: these cases are ABOUT the gateway
+      // checkout path, and the runtime default became "enrich" on 2026-10-15.
+      invoiceStrategy: "paypal_url",
       paypalApi: "https://api-m.sandbox.paypal.com",
       paypalClientId: "MOCK_CLIENT",
       paypalSecretName: "PAYPAL_SECRET_JT1",     // ← Accounts."PayPal Secret Name"
@@ -66,7 +69,7 @@ await env.TENANTS.put("stripeLocation001", JSON.stringify({
   brandName: "YV Direct", locale: "es-ES", currency: "USD", defaultLanguage: "es",
   ownerPct: 0.85, processingFeePct: 0.06, defaultCleaningFee: 60,
   cleaningFeeRecipient: "manager", invoiceDueHours: 24, bookingWorkerEnabled: true,
-  gateway: "stripe", stripeSecretName: "STRIPE_SECRET_YV",
+  gateway: "stripe", stripeSecretName: "STRIPE_SECRET_YV", invoiceStrategy: "paypal_url",
   airtableBaseId: "appSTRIPEBASE", airtableToken: "patMOCK2",
   defaultPropertyRecId: "recSTRIPEPROP"
 }));

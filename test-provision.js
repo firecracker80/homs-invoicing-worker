@@ -179,4 +179,43 @@ console.log("10) GHL rejects the PIT/location -> that status code propagates, no
 }
 
 
+
+// ---- 13. the derivations reach the written record ----------------------
+// The pure functions have their own tests. This is the seam: provision.js has
+// to APPLY what it derives, and a derivation computed into a variable nobody
+// assigns is invisible to every test of policy.js.
+{
+  // Its own mock: an earlier case replaces global.fetch, and inheriting that
+  // one silently tested a three-field account with no PayPal in it.
+  global.fetch = async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ customValues: REAL_CUSTOM_VALUES }) });
+  const envT = { TENANTS: makeKv(), ADMIN_SECRET: "admin123" };
+  const out = await (await call(envT, "GET", "locationId=L13&ghlPit=pit13")).json();
+
+  assert.strictEqual(out.wouldWrite.invoiceStrategy, "enrich",
+    "a provisioned account must be written as enrich, not left to the legacy default");
+  assert.strictEqual(out.invoiceStrategyDerived?.value, "enrich", "and it has to be reported");
+
+  // PayPal is in REAL_CUSTOM_VALUES, so this account also gets the fee -- the
+  // pair Yari asked for on 2026-10-15: writing the PayPal values turns both on.
+  assert.strictEqual(out.wouldWrite.processingFeePct, 0.06,
+    "a PayPal account gets the fee in the same run");
+  console.log("13) Provisioning writes both derived settings, not just computes them");
+}
+
+// ---- 14. a stated strategy survives a re-provision ---------------------
+{
+  const envT = {
+    TENANTS: makeKv({ L14: { invoiceStrategy: "paypal_url", processingFeePct: 0.03, brandName: "Legacy" } }),
+    ADMIN_SECRET: "admin123",
+  };
+  global.fetch = async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ customValues: REAL_CUSTOM_VALUES }) });
+  const out = await (await call(envT, "GET", "locationId=L14&ghlPit=pit14")).json();
+  assert.strictEqual(out.wouldWrite.invoiceStrategy, "paypal_url",
+    "an account deliberately on the legacy path must not be converted by a re-run");
+  assert.strictEqual(out.wouldWrite.processingFeePct, 0.03, "nor its own rate replaced");
+  assert.strictEqual(out.invoiceStrategyDerived, undefined, "nothing derived, so nothing reported");
+  console.log("14) A re-provision leaves a deliberately-set strategy and rate alone");
+}
+
+
 console.log("\nPASS — provision.js maps GHL's real fieldKey format, never copies the PayPal secret, never writes on GET, guards against clobbering, merges cleanly under &force=true.");

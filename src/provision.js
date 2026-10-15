@@ -31,7 +31,7 @@
 // extracts the slug; matching the raw string misses every value. Still run a
 // GET first and check "unmappedCustomValues" before trusting a POST.
 
-import { parseCancellationPolicy, deriveProcessingFeePct } from "./policy.js";
+import { parseCancellationPolicy, deriveProcessingFeePct, deriveInvoiceStrategy } from "./policy.js";
 
 const GHL_BASE = "https://services.leadconnectorhq.com";
 const GHL_VERSION = "2021-07-28";
@@ -288,6 +288,13 @@ export async function handleProvisionTenant(request, env) {
   // Applied here and not in buildTenantFromCustomValues because it has to see
   // the EXISTING entry: a rate somebody set on purpose must survive a re-run,
   // and provisioned fields overwrite existing ones in the merge below.
+  // Derived together on purpose: writing an account's PayPal Custom Values is
+  // the moment it becomes a paying account, and it needs the strategy and the
+  // fee set in the same breath (Yari, 2026-10-15). Neither overwrites a value
+  // somebody set deliberately.
+  const strategyDerived = deriveInvoiceStrategy(provisioned, existing);
+  if (strategyDerived) provisioned.invoiceStrategy = strategyDerived.value;
+
   const feeDerived = deriveProcessingFeePct(provisioned, existing);
   if (feeDerived) {
     provisioned.processingFeePct = feeDerived.value;
@@ -304,9 +311,9 @@ export async function handleProvisionTenant(request, env) {
   const finalTenant = existing ? { ...existing, ...provisioned } : provisioned;
 
   if (!isWrite) {
-    return json({ dryRun: true, locationId, wouldWrite: finalTenant, mappedFromCustomValues: mapped, unmappedCustomValues: unmapped, blankCustomValues: blank, skippedSensitive, warnings, ...(feeDerived ? { processingFeeDerived: feeDerived } : {}), tenantAlreadyExists: Boolean(existing) });
+    return json({ dryRun: true, locationId, wouldWrite: finalTenant, mappedFromCustomValues: mapped, unmappedCustomValues: unmapped, blankCustomValues: blank, skippedSensitive, warnings, ...(feeDerived ? { processingFeeDerived: feeDerived } : {}), ...(strategyDerived ? { invoiceStrategyDerived: strategyDerived } : {}), tenantAlreadyExists: Boolean(existing) });
   }
 
   await env.TENANTS.put(locationId, JSON.stringify(finalTenant));
-  return json({ dryRun: false, locationId, written: finalTenant, mappedFromCustomValues: mapped, unmappedCustomValues: unmapped, blankCustomValues: blank, skippedSensitive, warnings, ...(feeDerived ? { processingFeeDerived: feeDerived } : {}), mergedWithExisting: Boolean(existing) });
+  return json({ dryRun: false, locationId, written: finalTenant, mappedFromCustomValues: mapped, unmappedCustomValues: unmapped, blankCustomValues: blank, skippedSensitive, warnings, ...(feeDerived ? { processingFeeDerived: feeDerived } : {}), ...(strategyDerived ? { invoiceStrategyDerived: strategyDerived } : {}), mergedWithExisting: Boolean(existing) });
 }

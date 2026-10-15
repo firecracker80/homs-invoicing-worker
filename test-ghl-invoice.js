@@ -201,14 +201,34 @@ const bookingBody = (bookingId, extra = {}) => ({
   ...extra
 });
 
-// 5. Default behavior UNCHANGED: no invoiceStrategy set -> still paypal_url
+// 5. Default: no invoiceStrategy set -> enrich.
+//
+// This asserted paypal_url until 2026-10-15, which was right when enrich was
+// the new additive path and the point was that nothing changed for existing
+// accounts. It is backwards now: every live account is enrich and carries an
+// explicit override to escape this default, so the only thing it still governs
+// is an account nobody configured -- which would silently take the legacy path,
+// where GHL never sees an invoice, no native payment record exists, and
+// /reports/reconcile has nothing to match against.
 await kv.put("wLGDbGcQ4QSG3nlT3Sis", JSON.stringify(baseTenantKV));
-paypalOrderCalls = 0; ghlInvoiceCalls = 0;
+paypalOrderCalls = 0; ghlInvoiceCalls = 0; forceGhlFailure = false;
 const r5 = await (await worker.fetch({ method: "POST", url: "https://w.dev/booking-created", json: async () => bookingBody("E2E-DEFAULT"), headers: { get: () => null } }, workerEnv)).json();
-assert.equal(r5.mode, "paypal_url", "with no invoiceStrategy set, default must remain paypal_url");
-assert.equal(paypalOrderCalls, 1, "default path must still call PayPal exactly once");
-assert.equal(ghlInvoiceCalls, 0, "default path must never touch the GHL invoices API");
+assert.equal(r5.mode, "enrich", "an unconfigured account must enrich GHL's invoice, not build its own PayPal order");
+// Several calls: resolve the draft, read it, update it, send it. The count is
+// an implementation detail; that it went through GHL at all is the assertion.
+assert.ok(ghlInvoiceCalls > 0, "default path goes through the GHL invoices API");
+assert.equal(paypalOrderCalls, 0, "and must not call PayPal at all");
 console.log("5) Default (no flag) -> mode:", r5.mode, "| PayPal calls:", paypalOrderCalls, "| GHL invoice calls:", ghlInvoiceCalls);
+
+// 5b. The legacy path still works when an account asks for it by name. Changing
+// a default must not remove the behaviour it used to select.
+await kv.put("wLGDbGcQ4QSG3nlT3Sis", JSON.stringify({ ...baseTenantKV, invoiceStrategy: "paypal_url" }));
+paypalOrderCalls = 0; ghlInvoiceCalls = 0;
+const r5b = await (await worker.fetch({ method: "POST", url: "https://w.dev/booking-created", json: async () => bookingBody("E2E-LEGACY"), headers: { get: () => null } }, workerEnv)).json();
+assert.equal(r5b.mode, "paypal_url", "an account that states paypal_url still gets it");
+assert.equal(paypalOrderCalls, 1, "and PayPal is called exactly once");
+assert.equal(ghlInvoiceCalls, 0, "and the GHL invoices API is never touched");
+console.log("5b) Explicit paypal_url still honoured -> mode:", r5b.mode);
 
 // 6. invoiceStrategy: "enrich" -> routes through GHL, PayPal never called
 await kv.put("wLGDbGcQ4QSG3nlT3Sis", JSON.stringify({ ...baseTenantKV, invoiceStrategy: "enrich" }));

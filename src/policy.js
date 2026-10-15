@@ -231,6 +231,31 @@ export function processingFeePctFor(tenant, snapshot) {
   return 0;
 }
 
+// The invoice strategy a provisioned account gets.
+//
+// "enrich" means the guest pays a GHL invoice that the Worker adds its lines
+// to. "paypal_url" is the legacy path where the Worker builds its own PayPal
+// order and GHL never sees an invoice -- no native payment record, nothing for
+// /reports/reconcile to match against, and none of GHL's own fee handling.
+//
+// Every live account is enrich and none has been on paypal_url since the GHL
+// invoice path was built, yet the runtime default was paypal_url: all three
+// tenants carry an explicit override to escape it, and a newly provisioned
+// account that nobody thought about would quietly get the legacy path. Same
+// shape as the 6% processing fee defaulting on in six copies -- the default
+// was the old behaviour rather than the current one.
+//
+// Returns null when the account already states a strategy, so a deliberate
+// paypal_url survives provisioning.
+export function deriveInvoiceStrategy(provisioned, existing) {
+  if (existing && existing.invoiceStrategy != null) return null;
+  if (provisioned && provisioned.invoiceStrategy != null) return null;
+  return {
+    value: "enrich",
+    reason: "guests pay a GHL invoice: the Worker enriches it rather than building its own PayPal order",
+  };
+}
+
 // Provisioning-time derivation: does this account take PayPal, and therefore
 // need the fee recovered?
 //
