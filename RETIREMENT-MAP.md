@@ -52,30 +52,32 @@ snapshots in total, so the audit is a minutes-long job, not a migration.
 The order-creation path has no such dependency and can go first; the refund path
 waits on that count being zero.
 
-### ~~The no-pets fee strip~~ — not dead, do not remove
+### The no-pets fee strip — removed 2026-10-15, replaced by a report
 
-```js
-!(noPets && isPetFeeName(i?.name, tenant)) &&   // ghl-invoice.js:686
-```
+The pet fee is a native optional add-on in GHL as of 2026-10-15, so a guest who
+declines pets never gets the line and there is nothing to strip.
 
-This was listed here on the reasoning that add-ons became optional in GHL
-(2026-10-09), so a guest without pets is never charged a pet fee and there is
-nothing to strip. **That was wrong**, checked 2026-10-15 before removing it.
+It was **not** dead when this map first claimed it was. Audited before removing:
+the strip fired on **14 of 31 enriched invoices**, most recently 2026-10-13 —
+two days before the add-on was configured. Every one of those was a real pet-fee
+line pulled off a real invoice. The generic replacement,
+`optionalAddOnsToRemove()`, reads `tenant.optionalAddOns`, which is unset on
+every account and removes nothing, so the pet strip was the only guard.
 
-The generic replacement is `optionalAddOnsToRemove()`, which reads
-`tenant.optionalAddOns` — and **no tenant has that field set**. It returns an
-empty list on every account, so it removes nothing. The pet-specific strip is
-therefore still the only thing standing between a guest who answered "no pets"
-and a pet-fee line on their invoice.
+So it does not simply go. `ghl-invoice.js` now **reports** the case instead of
+removing it: if a pet fee reaches an invoice for a guest who answered "no pets",
+the add-on is not configured on that calendar and the guest is being
+overcharged. That lands on `snapshot.petFeeDespiteNoPets` and in the log.
+Stripping it silently would hide the misconfiguration; charging it silently
+would be worse.
 
-**Prerequisite before it can go:** configure `optionalAddOns` on every account
-that charges a pet fee, with the pet fee among them, and confirm a declined
-answer actually drops the line. Then this is genuinely redundant. Until then it
-is load-bearing.
+Two consequences of charging a line the Worker used to remove, both correct and
+both now asserted: the processing fee is computed on a basis that includes it,
+and it splits at `ownerPct` like any other add-on (Yari, 2026-09-29).
 
-`isPetFeeName` is used a second time at `ghl-invoice.js:449` inside
-`isFeeLine()`, where it stops a fee line being mistaken for a property name, so
-the function stays regardless.
+`isPetFeeName` stays — the report uses it, and so does `isFeeLine()` at
+`ghl-invoice.js:449`, where it stops a fee line being mistaken for a property
+name.
 
 ### The shadow OTA commission rows
 
@@ -150,10 +152,11 @@ reproducible.
 1. **Delete `stripe.js` and the `/stripe/*` routes.** Zero users, ever —
    confirmed against every booking snapshot, not just the tenant records. No
    migration and nothing to check.
-2. ~~Remove the no-pets strip~~ — **blocked**, see above. `optionalAddOns` is
-   unset on every account, so the strip is still the only guard. Refresh the
-   stale Airtable comments; that part stands.
-3. **Decide on `otaRate`** — use it or lose it.
+2. ~~Remove the no-pets strip~~ — **done 2026-10-15**, replaced by a report
+   rather than deleted outright, because it was still firing. Stale Airtable
+   comments refreshed.
+3. ~~Decide on `otaRate`~~ — **removed 2026-10-15**. Zero rows in the shadow
+   category across the whole ledger; it had never run.
 4. **Audit the BOOKINGS KV for outstanding PayPal captures**, then delete the
    Worker's checkout path.
 5. **Ask Luminara about the deposit model.** Everything else waits on that.
