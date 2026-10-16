@@ -140,7 +140,21 @@ export function bookingIdOf(invoice) {
 // Cleaning is GHL-native now and never appended; the deposit is only here for
 // a "tiered_legacy" tenant (the composer leaves it at 0 for everyone else).
 const DEPOSIT_LINE = "Depósito de seguridad / Security deposit";
-const FEE_LINE = "Cargo por procesamiento";
+// The guest reads this line, so it is written in the guest's language.
+//
+// It was bilingual until 2026-09-29, then Spanish-only, on the reasoning that
+// the accounts which show it at all are Dominican (Yari, 2026-09-30). That
+// stopped being true: Casa Bonita runs at locale en-US and charges 6%, so the
+// demo invoice shown to English-speaking prospects carried a Spanish line
+// nobody could read. One account, and the most visible one there is.
+//
+// Keyed on tenant.locale, which leaves Luminara (es-ES) exactly where it was.
+const FEE_LINE_ES = "Cargo por procesamiento";
+const FEE_LINE_EN = "Processing fee";
+export function feeLineFor(tenant) {
+  const locale = String(tenant?.locale || tenant?.language || "").toLowerCase();
+  return locale.startsWith("es") ? FEE_LINE_ES : FEE_LINE_EN;
+}
 
 // Every name this Worker has ever written, not just the current one.
 //
@@ -154,7 +168,11 @@ const FEE_LINE = "Cargo por procesamiento";
 // Kept until no unpaid invoice carries the old name, which is not a thing any
 // API can tell us, so in practice: kept.
 const LEGACY_LINES = ["Cargo por procesamiento / Processing fee"];
-const OUR_LINES = new Set([DEPOSIT_LINE, FEE_LINE, ...LEGACY_LINES]);
+// EVERY name in every language, not just this tenant's. An account whose locale
+// changes, or an invoice enriched before this one did, still has to be
+// recognised as ours -- otherwise its old line survives the strip, a new one is
+// appended beside it, and the guest pays the processing fee twice.
+const OUR_LINES = new Set([DEPOSIT_LINE, FEE_LINE_ES, FEE_LINE_EN, ...LEGACY_LINES]);
 
 export function buildAppendItems(snapshot, tenant) {
   const cur = tenant.currency || "USD";
@@ -162,7 +180,7 @@ export function buildAppendItems(snapshot, tenant) {
   if (snapshot.securityDeposit.total > 0)
     items.push({ name: DEPOSIT_LINE, currency: cur, amount: round2(snapshot.securityDeposit.total), qty: 1 });
   if (snapshot.charges.processingFee > 0)
-    items.push({ name: FEE_LINE, currency: cur, amount: round2(snapshot.charges.processingFee), qty: 1 });
+    items.push({ name: feeLineFor(tenant), currency: cur, amount: round2(snapshot.charges.processingFee), qty: 1 });
   return items;
 }
 
@@ -614,7 +632,7 @@ export async function updateInvoiceForReschedule(
 
   const ourLines = [];
   if (deposit > 0) ourLines.push({ name: DEPOSIT_LINE, currency: cur, amount: deposit, qty: 1 });
-  if (processingFee > 0) ourLines.push({ name: FEE_LINE, currency: cur, amount: processingFee, qty: 1 });
+  if (processingFee > 0) ourLines.push({ name: feeLineFor(tenant), currency: cur, amount: processingFee, qty: 1 });
 
   const invoiceItems = [newStayLine, ...otherNative, ...ourLines];
 

@@ -95,7 +95,7 @@ async function enrich(hasPets, items, tenant = native) {
   // instead of silently stripping it, which would hide the misconfiguration,
   // and instead of silently charging it, which would be worse.
   const no = await enrich("No", ghlItems);
-  assert.deepEqual(no.names, ["Estadía", "Cleaning Fee", "Pet Fee", "Cargo por procesamiento"],
+  assert.deepEqual(no.names, ["Estadía", "Cleaning Fee", "Pet Fee", "Processing fee"],
     "the invoice shows what GHL actually put on it; the Worker removes nothing");
   assert.equal(no.out.removedItems, 0, "nothing is stripped any more");
   assert.deepEqual(no.snapshot.petFeeDespiteNoPets, ["Pet Fee"],
@@ -137,7 +137,7 @@ async function enrich(hasPets, items, tenant = native) {
   // charged for it, they are charged the processing fee on it too. It was 6% of
   // 200 while the Worker removed the line.
   assert.equal(inv5.snapshot.charges.processingFee, 13.5, "6% of the whole invoice: 6% of 225");
-  assert.equal(inv5.items.find(i => /procesamiento/i.test(i.name)).amount, 13.5, "the appended fee line carries the repriced fee");
+  assert.equal(inv5.items.find(i => /process|procesamiento/i.test(i.name)).amount, 13.5, "the appended fee line carries the repriced fee");
   assert.equal(inv5.snapshot.charges.grandTotal, 238.5);
   // 135 rent + 25 pet fee. An add-on the guest is charged is part of the rent
   // price and splits at ownerPct like the rent (Yari, 2026-09-29) -- so once the

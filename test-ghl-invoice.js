@@ -323,7 +323,8 @@ assert.equal(r10a.mode, "enrich", JSON.stringify(r10a));
 assert.ok(!r10a.idempotent, "a dead run's draft is finished, not skipped");
 assert.equal(lastSendUserId, "u_from_ghl_workflow", "the invoice is sent");
 const finishedPut = calls.slice(putsBefore).filter(c => c.method === "PUT").pop();
-assert.equal(finishedPut.body.invoiceItems.filter(i => /procesamiento/i.test(i.name)).length, 1, "our lines are not added twice");
+// Either language -- see the note in ghl-invoice.js on OUR_LINES.
+assert.equal(finishedPut.body.invoiceItems.filter(i => /process|procesamiento/i.test(i.name)).length, 1, "our lines are not added twice");
 assert.equal(JSON.parse(store.get("E2E-STALE-DRAFT")).ghlInvoice.status, "sent");
 
 // 10b. Our lines are already on it (or it's paid) -> done, never resent.
@@ -511,11 +512,16 @@ console.log("10) Stale 'sending' claim: no Worker lines on the invoice -> finish
   };
   await enrichAndSendInvoice({
     env: {}, locationId: "loc1", invoiceId: "inv3", snapshot,
-    tenant: { ghlPit: "p", invoiceSenderUserId: "u", processingFeePct: 0.06, ownerPct: 0.85 },
+    // Spanish tenant: this case is about the LEGACY name being recognised
+    // and replaced, so it states the language rather than leaning on a default.
+    tenant: { ghlPit: "p", invoiceSenderUserId: "u", processingFeePct: 0.06, ownerPct: 0.85, locale: "es-ES" },
     userId: "u", contact: { id: "c1", name: "G", email: "g@x.com" },
   }, withLegacyLine);
 
-  const fees = putBody.invoiceItems.filter((i) => /procesamiento/i.test(i.name));
+  // Matches the legacy bilingual name AND either current one, so a legacy line
+  // surviving beside a freshly written one is caught whichever language the
+  // tenant writes in. A Spanish-only pattern saw neither.
+  const fees = putBody.invoiceItems.filter((i) => /process|procesamiento/i.test(i.name));
   assert.equal(fees.length, 1, "one processing fee, not the old one plus a new one");
   assert.equal(fees[0].name, "Cargo por procesamiento", "and it carries the current name");
   assert.equal(fees[0].amount, 23.7, "6% of 330 + 65, recomputed rather than carried over");
@@ -523,6 +529,56 @@ console.log("10) Stale 'sending' claim: no Worker lines on the invoice -> finish
     "the English half is gone, which is the point of the rename");
   console.log("13) An invoice written before the rename is not charged the processing fee twice");
 }
+
+// 13b. An invoice carrying the OTHER language's fee line is still ours.
+//
+// The fee line is written in the tenant's language as of 2026-10-16. That
+// creates a case the legacy test above does not cover: an invoice enriched
+// while the account was Spanish, re-enriched after its locale changed to
+// English -- or the reverse. If OUR_LINES does not hold BOTH current names,
+// the existing line survives the strip, a new one is appended beside it, and
+// the guest pays the processing fee twice.
+//
+// This is the same failure the legacy name was kept to prevent, in a second
+// dimension. Mutation testing found it: dropping either name from OUR_LINES
+// killed nothing until this existed.
+for (const [had, tenantLocale, expected] of [
+  ["Cargo por procesamiento", "en-US", "Processing fee"],
+  ["Processing fee", "es-ES", "Cargo por procesamiento"],
+]) {
+  let crossPut = null;
+  const withOtherLanguage = async (url, opts = {}) => {
+    if (opts.method === "PUT") { crossPut = JSON.parse(opts.body); return { ok: true, status: 200, text: async () => "{}" }; }
+    if (String(url).includes("/invoices/inv4")) {
+      return { ok: true, status: 200, text: async () => JSON.stringify({
+        invoiceItems: [
+          { name: "Test Villa 3", amount: 330, qty: 1 },
+          { name: had, amount: 23.7, qty: 1 },
+        ],
+        invoiceNumber: "000032", name: "n", currency: "USD", issueDate: "2026-09-30", dueDate: "2026-10-05",
+      }) };
+    }
+    return { ok: true, status: 200, text: async () => "{}" };
+  };
+
+  await enrichAndSendInvoice({
+    env: {}, locationId: "loc1", invoiceId: "inv4",
+    snapshot: {
+      bookingId: "b4", stay: { nights: 3, nightlyRate: 110, checkIn: "2026-10-01", checkOut: "2026-10-04" },
+      charges: { rentTotal: 330, cleaningFee: 0, processingFee: 0, feePct: 0.06, grandTotal: 330 },
+      securityDeposit: { total: 0, blocks: [] }, payout: { ownerPct: 0.85 },
+    },
+    tenant: { ghlPit: "p", invoiceSenderUserId: "u", processingFeePct: 0.06, ownerPct: 0.85, locale: tenantLocale },
+    userId: "u", contact: { id: "c1", name: "G", email: "g@x.com" },
+  }, withOtherLanguage);
+
+  const fees = crossPut.invoiceItems.filter((i) => /process|procesamiento/i.test(i.name));
+  assert.equal(fees.length, 1,
+    `an invoice holding "${had}" under a ${tenantLocale} tenant must end with ONE fee line, got ${JSON.stringify(fees.map((f) => f.name))}`);
+  assert.equal(fees[0].name, expected, "and it is written in the tenant's language");
+}
+console.log("13b) A fee line in either language is recognised as ours, so a locale change cannot double-charge");
+
 
 // ---- 14. the per-property owner, once the property is known -------
 // composeBooking resolves propertyOwnerNames[propertyCode] at BOOKING time,
