@@ -173,8 +173,15 @@ export async function createRelation(pit, locationId, associationId, firstRecord
 // resolved live, never hardcoded, so this works for any tenant's own association
 // ids. Never throws: a missing association or a link failure is reported back,
 // not raised, since this must never block real money movement.
-export async function linkIfPossible(pit, locationId, associations, objectKeyA, recordIdA, objectKeyB, recordIdB) {
-  const assoc = findAssociationId(associations, objectKeyA, objectKeyB);
+//
+// `key` names WHICH association, for a pair of objects joined by more than
+// one. Without it findAssociationId refuses to guess and returns null, so the
+// link silently does not happen -- which is what had been happening to every
+// Transaction's guest since a second contact-to-Transaction association
+// ("assigned_cleaner") was added alongside "transaction_guest". The caller
+// must now say which one it means.
+export async function linkIfPossible(pit, locationId, associations, objectKeyA, recordIdA, objectKeyB, recordIdB, key = null) {
+  const assoc = findAssociationId(associations, objectKeyA, objectKeyB, key);
   if (!assoc) return { linked: false, reason: `No association between ${objectKeyA} and ${objectKeyB}` };
   const firstRecordId = assoc.firstObjectKey === objectKeyA ? recordIdA : recordIdB;
   const secondRecordId = assoc.firstObjectKey === objectKeyA ? recordIdB : recordIdA;

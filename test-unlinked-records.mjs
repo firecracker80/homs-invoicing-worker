@@ -25,17 +25,39 @@ function makeD1() {
   };
 }
 
+// DEMO-HOMS's real association set, read live 2026-10-16.
+//
+// The two that matter are both contact-to-Transaction: "transaction_guest"
+// and "assigned_cleaner". That pair is why findAssociationId refuses to guess,
+// and why the guest link had been failing on every booking. A mock with no
+// associations at all -- which is what this file used to pass -- cannot
+// express the difference between "no association" and "two, so which one".
+const ASSOCIATIONS = [
+  { id: "a-booked-at", key: "booked_at", firstObjectKey: "custom_objects.properties", secondObjectKey: "custom_objects.transactions" },
+  { id: "a-booked-via", key: "booked_via", firstObjectKey: "custom_objects.ota_channels", secondObjectKey: "custom_objects.transactions" },
+  { id: "a-job", key: "booking", firstObjectKey: "custom_objects.jobs_tmpl", secondObjectKey: "custom_objects.transactions" },
+  { id: "a-cleaner", key: "assigned_cleaner", firstObjectKey: "contact", secondObjectKey: "custom_objects.transactions" },
+  { id: "a-guest", key: "transaction_guest", firstObjectKey: "contact", secondObjectKey: "custom_objects.transactions" },
+  { id: "a-payment", key: "payment_transaction", firstObjectKey: "custom_objects.payments", secondObjectKey: "custom_objects.transactions" },
+];
+
 // GHL with one property record, named exactly as the workbook names it.
-function mockGhl(calls, { properties = ["Test Villa 2"] } = {}) {
+// `relations` collects what actually got linked -- the whole bug was that
+// nothing looked.
+function mockGhl(calls, { properties = ["Test Villa 2"], associations = ASSOCIATIONS, relations = [] } = {}) {
   return async (url, init = {}) => {
     const u = String(url);
     calls.push(u);
     const body = (o) => ({ ok: true, status: 200, text: async () => JSON.stringify(o) });
+    if (u.includes("/associations/relations")) {
+      relations.push(JSON.parse(init.body || "{}"));
+      return body({ id: "rel-" + relations.length });
+    }
     if (u.includes("custom_objects.properties/records/search")) {
-      return body({ records: properties.map((name, i) => ({ id: `prop-${i}`, properties: { property_name: name } })) });
+      return body({ records: properties.map((name, i) => ({ id: "prop-" + i, properties: { property_name: name } })) });
     }
     if (u.includes("custom_objects.ota_channels/records/search")) return body({ records: [] });
-    if (u.includes("/associations")) return body({ associations: [] });
+    if (u.includes("/associations")) return body({ associations });
     if (u.includes("/records/search")) return body({ records: [] });
     if (u.includes("/records")) return body({ record: { id: "rec-" + calls.length } });
     return body({});
@@ -143,6 +165,87 @@ const snapshotFor = (propertyCode) => ({
   assert.deepStrictEqual(created.props.booking_total, { value: 335, currency: "default" },
     "booking_total stays, and is real: 270 rent + 65 cleaning, no fee and no deposit");
   console.log("5) The Transaction is created without platform_fee or net_payout, and booking_total is still real");
+}
+
+// ---- 6. the guest IS linked, and by name ---------------------------------
+// The bug this file now exists for as much as for the property miss.
+//
+// Two associations join contact to Transaction -- "transaction_guest" and
+// "assigned_cleaner" -- so findAssociationId found two, refused to guess, and
+// returned null. linkIfPossible reported that refusal and the caller threw the
+// report away, so every Transaction was created with no guest relation and
+// nothing said so. The live Villa Azul record of 2026-10-16 had eleven
+// relations and not one of them was its guest.
+//
+// It matters because that relation is the ONLY route to a booking. Search
+// Object Records matches a custom object's primary field only, so a
+// Transaction cannot be found by booking_reference -- verified live, 0 results.
+// An assistant told to read the contact's relations had nothing to follow.
+{
+  const relations = [];
+  globalThis.fetch = mockGhl([], { relations });
+  const snapshot = { ...snapshotFor("Test Villa 2"), ghlContactId: "contact-99" };
+  const res = await writeLedgerEntries({ LEDGER_DB: makeD1() }, tenant, snapshot, captures);
+
+  const guest = relations.find((r) => r.associationId === "a-guest");
+  assert.ok(guest, "the Transaction must be linked to its guest -- it is the only way to find the booking");
+  assert.strictEqual(guest.firstRecordId, "contact-99", "contact is the first side of transaction_guest");
+  assert.strictEqual(guest.secondRecordId, res.ghl.transactionId, "and the Transaction the second");
+  assert.ok(!relations.some((r) => r.associationId === "a-cleaner"),
+    "and never through assigned_cleaner, which would file the guest as the cleaner");
+  assert.deepStrictEqual(res.ghl.unlinked, [], "a booking that links cleanly still reports nothing");
+  console.log("6) The guest is linked through transaction_guest, not left to an ambiguity");
+}
+
+// ---- 7. a link that is refused is reported -------------------------------
+// The other half, and the part that would have caught case 6 on the day.
+// unlinked could only say "no record of that name existed"; it could not say
+// "the record existed and the link was refused", which is what happened.
+//
+// Modelled by taking transaction_guest away: the remaining assigned_cleaner is
+// not a guest association, and naming a key that no association carries is a
+// miss rather than a thing to fall back on.
+{
+  const relations = [];
+  globalThis.fetch = mockGhl([], {
+    relations,
+    associations: ASSOCIATIONS.filter((a) => a.key !== "transaction_guest"),
+  });
+  const snapshot = { ...snapshotFor("Test Villa 2"), ghlContactId: "contact-99" };
+  const res = await writeLedgerEntries({ LEDGER_DB: makeD1() }, tenant, snapshot, captures);
+
+  assert.strictEqual(res.ghl.ok, true, "a refused link still never fails the settlement");
+  const miss = (res.ghl.unlinked || []).find((u) => u.object === "contact");
+  assert.ok(miss, "the refused guest link has to be reported, got " + JSON.stringify(res.ghl.unlinked));
+  assert.strictEqual(miss.association, "transaction_guest", "naming the association it wanted");
+  assert.match(miss.consequence, /guest/i, "and what it costs -- the booking cannot be reached from the guest");
+  assert.ok(!relations.some((r) => r.associationId === "a-cleaner"),
+    "and it does not fall back to the wrong association rather than report");
+  console.log("7) A link that is refused lands in unlinked instead of disappearing");
+}
+
+// ---- 8. and so is a payment row that cannot reach its booking ----------
+// Same discarded-result bug, on the loop that runs once per ledger row. A
+// Payment with no relation is a Revenue entry that belongs to no booking: it
+// still sums into the P&L, it just cannot be traced to anything. Reported per
+// row rather than once, because which rows were orphaned is the useful part.
+{
+  const relations = [];
+  globalThis.fetch = mockGhl([], {
+    relations,
+    associations: ASSOCIATIONS.filter((a) => a.key !== "payment_transaction"),
+  });
+  const res = await writeLedgerEntries({ LEDGER_DB: makeD1() }, tenant, snapshotFor("Test Villa 2"), captures);
+
+  assert.strictEqual(res.ghl.ok, true, "still never fails the settlement");
+  const misses = (res.ghl.unlinked || []).filter((u) => u.object === "custom_objects.payments");
+  assert.strictEqual(misses.length, res.ghl.paymentIds.length,
+    "every Payment that could not be joined to its booking is reported, got "
+      + misses.length + " for " + res.ghl.paymentIds.length + " payments");
+  assert.ok(misses.every((m) => m.association === "payment_transaction"), "naming the association");
+  assert.ok(misses.some((m) => /rent_split_owner/.test(m.consequence)),
+    "and saying WHICH row is orphaned, which is the part worth reading");
+  console.log("8) Each Payment row that cannot reach its booking is reported, by entry type");
 }
 
 console.log("\nPASS — a Transaction that could not find its Property says so, instead of showing a blank name.");
