@@ -157,31 +157,29 @@ const cancel = async (snapshot = paidSnapshot(), body = {}) => {
   console.log("6) Cancelling an unpaid booking raises no manual refund");
 }
 
-// ---- 7. a refund the gateway refused reports as a fault ---------------
-// The other half of test 2, and the half that matters. Without this, hardcoding
-// refundFailed to "no" passes everything above -- nothing here had ever
-// attempted a refund, so "no" was right for the wrong reason.
+// ---- 7. a booking that still holds a capture is a manual refund too -------
+// This used to assert the opposite half of test 2: a refund the GATEWAY
+// REFUSED reports as a fault (refundFailed "yes") rather than as a task.
+//
+// That distinction died with the gateway on 2026-10-16. The Worker issues no
+// refunds, so nothing can refuse one, and refundFailed can no longer be "yes".
+// What matters now is that a booking carrying a leftover capture id from the
+// retired checkout is treated like every other: the money owed is worked out
+// and handed to a person, not quietly skipped because a capture is present.
 {
   const withCapture = paidSnapshot({
     gateway: "paypal",
     captures: { RENT: { gross: 355.1, captureId: "3AB12345CD678901E", source: "paypal" } },
   });
-  const realFetch = global.fetch;
-  global.fetch = async (url, opts = {}) => {
-    if (String(url).includes("/refund")) {
-      const payload = { name: "CAPTURE_FULLY_REFUNDED", message: "capture already refunded" };
-      return { ok: false, status: 422, text: async () => JSON.stringify(payload), json: async () => payload };
-    }
-    return realFetch(url, opts);
-  };
   const out = await cancel(withCapture);
-  global.fetch = realFetch;
 
-  assert.strictEqual(out.sent.refundFailed, "yes", "the gateway refused, and the notification says so");
-  assert.strictEqual(out.sent.manualRefundRequired, "no",
-    "and does NOT also ask the manager to pay it -- a refund that failed is a fault to look at, not a task to complete");
-  assert.strictEqual(out.sent.manualRefundTotal, "0.00");
-  console.log("7) A refund the gateway refused reports as a fault, and never as money to go and pay");
+  assert.strictEqual(out.sent.refundFailed, "no",
+    "nothing is attempted, so nothing can be refused");
+  assert.strictEqual(out.sent.manualRefundRequired, "yes",
+    "a capture id on an old booking must not make the refund invisible -- somebody still owes it");
+  assert.notStrictEqual(out.sent.manualRefundTotal, "0.00",
+    "and the amount owed is stated, not zero");
+  console.log("7) A legacy capture does not exempt a booking from the manual refund it is owed");
 }
 
 // ---- 8..10 one payload shape, whichever route sent it ---------------

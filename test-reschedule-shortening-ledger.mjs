@@ -158,15 +158,22 @@ const minorOf = (t) => rowsOfType(t).reduce((s, r) => s + r.amountMinor, 0);
   console.log("3) The admin fee and the rent reversal are both written, so the change nets to what was kept");
 }
 
-// ---- 4. a gateway that can refund is unchanged ----------------------
-// The fix must not turn a real refund into a manual-looking one.
+// ---- 4. a capture on the booking changes nothing about the money ----------
+// This asserted that a bookings WITH a usable capture got a real gateway refund,
+// referenced by the gateway's own refund id and not described as owed. The
+// Worker issues no refunds since 2026-10-16, so that reference can no longer
+// exist -- but the amounts must not move because of it. Same money, same
+// reversal, now owed to the guest by a person instead of by PayPal.
 {
   await shorten({ gateway: "paypal", captureId: "cap-1", startsIn: 60 });
   const row = rowsOfType("reschedule_refund_owner")[0];
-  assert.strictEqual(row.reference, "REF-1", "referenced by the refund the gateway actually issued");
-  assert.doesNotMatch(row.description, /issued manually/, "and not described as owing anything");
-  assert.strictEqual(minorOf("reschedule_refund_owner"), -34425, "the same money, reversed the same way");
-  console.log("4) A gateway refund is still referenced by its own id, and reads as settled");
+  assert.strictEqual(minorOf("reschedule_refund_owner"), -34425,
+    "the same money, reversed the same way, whoever ends up paying it");
+  assert.strictEqual(row.reference, MANUAL_REFUND_REF,
+    "a leftover capture id does not make this settled -- somebody still owes it");
+  assert.match(row.description, /manually/,
+    "and the row says so, or it reads as money that already went back");
+  console.log("4) A leftover capture changes the payer, never the amount");
 }
 
 // ---- 5. somebody is told the guest is owed money --------------------
@@ -180,9 +187,14 @@ const minorOf = (t) => rowsOfType(t).reduce((s, r) => s + r.amountMinor, 0);
   assert.strictEqual(n.refundFailed, "no",
     "and kept apart from a refund the gateway REFUSED, which is a fault rather than a task");
 
+  // Asserted "no" while a gateway could settle it for you. Nothing settles
+  // anything now, so a capture on the booking changes neither the amount owed
+  // nor the fact that a person has to pay it.
   await shorten({ gateway: "paypal", captureId: "cap-1", startsIn: 60 });
-  assert.strictEqual(notifies.at(-1).manualRefundRequired, "no",
-    "a booking whose refund went through asks nobody to do anything");
+  assert.strictEqual(notifies.at(-1).manualRefundRequired, "yes",
+    "a leftover capture does not settle anything -- somebody is still owed this");
+  assert.strictEqual(notifies.at(-1).refundFailed, "no",
+    "and nothing was attempted, so nothing failed");
   console.log("5) A refund the gateway cannot issue is announced, with its amount");
 }
 

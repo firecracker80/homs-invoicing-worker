@@ -220,15 +220,24 @@ assert.ok(ghlInvoiceCalls > 0, "default path goes through the GHL invoices API")
 assert.equal(paypalOrderCalls, 0, "and must not call PayPal at all");
 console.log("5) Default (no flag) -> mode:", r5.mode, "| PayPal calls:", paypalOrderCalls, "| GHL invoice calls:", ghlInvoiceCalls);
 
-// 5b. The legacy path still works when an account asks for it by name. Changing
-// a default must not remove the behaviour it used to select.
+// 5b. A tenant record that still says "paypal_url" gets enrich anyway.
+//
+// Yesterday this asserted the opposite -- that the legacy path still worked
+// when an account asked for it by name, because changing a default must not
+// remove the behaviour it used to select. Today the behaviour is deliberately
+// gone: the Worker's own checkout was retired on 2026-10-16 and
+// tenant.invoiceStrategy is no longer read at all.
+//
+// The field is left on the records rather than migrated out, so what matters is
+// that a stale value cannot route a booking anywhere: it is a description now,
+// not a switch, and a tenant nobody has tidied still bills correctly.
 await kv.put("wLGDbGcQ4QSG3nlT3Sis", JSON.stringify({ ...baseTenantKV, invoiceStrategy: "paypal_url" }));
-paypalOrderCalls = 0; ghlInvoiceCalls = 0;
+paypalOrderCalls = 0; ghlInvoiceCalls = 0; forceGhlFailure = false;
 const r5b = await (await worker.fetch({ method: "POST", url: "https://w.dev/booking-created", json: async () => bookingBody("E2E-LEGACY"), headers: { get: () => null } }, workerEnv)).json();
-assert.equal(r5b.mode, "paypal_url", "an account that states paypal_url still gets it");
-assert.equal(paypalOrderCalls, 1, "and PayPal is called exactly once");
-assert.equal(ghlInvoiceCalls, 0, "and the GHL invoices API is never touched");
-console.log("5b) Explicit paypal_url still honoured -> mode:", r5b.mode);
+assert.equal(r5b.mode, "enrich", "a stale strategy must not route a booking away from the invoice");
+assert.equal(paypalOrderCalls, 0, "there is no checkout left to call");
+assert.ok(ghlInvoiceCalls > 0, "and the invoice is priced and sent as for any other booking");
+console.log("5b) A stale paypal_url on the record is ignored -> mode:", r5b.mode);
 
 // 6. invoiceStrategy: "enrich" -> routes through GHL, PayPal never called
 await kv.put("wLGDbGcQ4QSG3nlT3Sis", JSON.stringify({ ...baseTenantKV, invoiceStrategy: "enrich" }));
@@ -585,4 +594,4 @@ console.log("10) Stale 'sending' claim: no Worker lines on the invoice -> finish
   console.log("14) The per-property owner and manager are resolved once the property is known");
 }
 
-console.log("\nPASS — all end-to-end assertions held. Existing PayPal-URL flow is provably untouched by this change.");
+console.log("\nPASS — all end-to-end assertions held. Every booking is priced onto the invoice GHL already sent.");

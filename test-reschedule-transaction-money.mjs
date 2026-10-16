@@ -26,6 +26,9 @@ const kv = {
   async put(k, v) { store.set(k, v); },
 };
 const hdr = (s) => ({ get: (n) => (n === "X-Admin-Secret" ? s : null) });
+// Same-length move: shift the start and keep the night count.
+const addDaysUtc = (iso, days) =>
+  new Date(Date.parse(iso + "T00:00:00.000Z") + days * 86400000).toISOString().slice(0, 10);
 
 const tenant = {
   brandName: "Casa Bonita", currency: "USD", ownerPct: 0.85, processingFeePct: 0.06,
@@ -163,8 +166,11 @@ const reschedule = async (body) => {
 // resolveTransactionId returns null before settlement, so the whole block is
 // skipped. Writing to a record id of undefined would 404 against a real GHL.
 {
+  // Shifted by the same length, so no money moves and no invoice is needed --
+  // the case is about Transaction records, not about repricing.
   const unpaid = { ...paidSnapshot(), settled: false, captures: undefined, ghl: undefined };
-  const out = await reschedule({ newCheckIn: "2026-10-17", newCheckOut: "2026-10-22", snapshot: unpaid });
+  const nights = unpaid.stay.nights;
+  const out = await reschedule({ newCheckIn: "2026-10-17", newCheckOut: addDaysUtc("2026-10-17", nights), snapshot: unpaid });
   assert.strictEqual(out.status, 200, JSON.stringify(out.body));
   assert.deepStrictEqual(txUpdates, [], "nothing is written for a booking that never settled");
   console.log("6) An unsettled booking writes no Transaction update at all");

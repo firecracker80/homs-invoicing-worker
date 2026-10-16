@@ -2,8 +2,7 @@
 // POST /booking-created ← GHL Webhook action (after Calcular Reserva)
 import { composeBooking } from "./booking-composer.js";
 import { splitBookedReservation } from "./multi-listing.js";
-import { createOrder } from "./paypal.js";
-import { handlePayPalReturn, handlePayPalWebhook, handleGhlInvoicePaid } from "./payment.js";
+import { handleGhlInvoicePaid } from "./payment.js";
 import { handleExpenseApproved } from "./expenses.js";
 import { handleCancel, handleDepositRefund } from "./cancellation.js";
 import { handleReschedule } from "./reschedule.js";
@@ -159,8 +158,11 @@ async function handleBookingCreated(request, env) {
   if (isEditorTest(raw)) {
     return json({
       bookingId: "SAMPLE-EDITOR-TEST",
-      approveUrl: "https://www.sandbox.paypal.com/checkoutnow?token=SAMPLE",
-      mode: "paypal_url",
+      // null, as every booking now returns: the guest pays the GHL invoice,
+      // not a link the Worker generates. Kept in the sample so GHL still
+      // registers the field for any mapping already built on it.
+      approveUrl: null,
+      mode: "enrich",
       invoiceId: "SAMPLE-INVOICE-ID",
       grandTotal: "1037.74",
       rentTotal: "420.00",
@@ -169,8 +171,8 @@ async function handleBookingCreated(request, env) {
       depositTotal: "490.00",
       nights: 6,
       nightlyRate: "70.00",
-      gateway: "paypal",
-      gatewayRef: "SAMPLE",
+      gateway: "ghl_invoice",
+      gatewayRef: "SAMPLE-INVOICE-ID",
       testMode: true
     });
   }
@@ -259,20 +261,16 @@ async function handleBookingCreated(request, env) {
     });
   }
 
-  const { snapshot, purchaseUnits } = composeBooking(payload, tenant);
+  const { snapshot } = composeBooking(payload, tenant);
 
-  // Invoice strategy — additive path, tenant KV overrides env, default is
-  // today's behavior. INVOICE_STRATEGY "enrich" targets the draft invoice
-  // GHL's rental calendar already auto-created instead of generating a
-  // PayPal checkout link. Any failure here falls through to the
-  // existing PayPal-URL flow below unmodified — nothing lost.
-  // "enrich", not "paypal_url". The legacy default meant an account nobody had
-  // configured took the path GHL never sees -- no native payment record and
-  // nothing to reconcile. Inert for the live tenants, which all state it.
-  const invoiceStrategy = tenant.invoiceStrategy ?? env.INVOICE_STRATEGY ?? "enrich";
+  // The guest pays the draft invoice GHL's rental calendar already created,
+  // which the Worker prices and sends. There is no other path: the Worker's own
+  // checkout was retired on 2026-10-16, unreachable since every account moved
+  // to enrich. tenant.invoiceStrategy is no longer read -- the records still
+  // carry "enrich" and it is a description now, not a switch.
   let approveUrl, gatewayRef, gateway;
 
-  if (invoiceStrategy === "enrich") {
+  {
     try {
       const invoiceId = await resolveDraftInvoiceId({
         tenant, env,
@@ -370,22 +368,6 @@ async function handleBookingCreated(request, env) {
     }
   }
 
-  // PayPal link flow -- only for a tenant whose invoiceStrategy is not
-  // "enrich". It is no longer a fallback for a failed enrich.
-  //
-  // The Stripe branch was removed 2026-10-15: no tenant has ever had
-  // gateway:"stripe" and no booking snapshot has ever carried a Worker-issued
-  // Stripe session. YV's Stripe runs through GHL's own connection, which this
-  // path never touched.
-  if (!gateway) {
-    gateway = "paypal";
-    {
-      const { orderId, approveUrl: ppUrl } = await createOrder(tenant, env, snapshot.bookingId, purchaseUnits, env.WORKER_URL);
-      snapshot.paypal = { orderId, approveUrl: ppUrl };
-      approveUrl = ppUrl;
-      gatewayRef = orderId;
-    }
-  }
   snapshot.gateway = gateway;
 
   await env.BOOKINGS.put(snapshot.bookingId, JSON.stringify(snapshot));
@@ -432,7 +414,7 @@ async function handleBookingCreated(request, env) {
   return json({
     bookingId: snapshot.bookingId,
     approveUrl,
-    mode: gateway === "ghl_invoice" ? "enrich" : "paypal_url",
+    mode: "enrich",
     invoiceId: snapshot.ghlInvoice?.invoiceId,
     grandTotal: snapshot.charges.grandTotal.toFixed(2),
     rentTotal: snapshot.charges.rentTotal.toFixed(2),
@@ -456,10 +438,6 @@ export default {
         return handleGhlInvoicePaid(request, env);
       if (request.method === "POST" && url.pathname === "/ghl-expense-approved")
         return handleExpenseApproved(request, env);
-      if (url.pathname === "/paypal/return")
-        return handlePayPalReturn(request, env);
-      if (request.method === "POST" && url.pathname === "/paypal/webhook")
-        return handlePayPalWebhook(request, env);
       if (request.method === "POST" && url.pathname === "/reschedule")
         return handleReschedule(request, env);
       if (request.method === "POST" && url.pathname === "/cancel")
@@ -478,8 +456,6 @@ export default {
         return handleProvisionTenant(request, env);
       if (url.pathname === "/admin/seed-webhooks" && (request.method === "GET" || request.method === "POST"))
         return handleSeedWebhooks(request, env);
-      if (url.pathname === "/paypal/cancel")
-        return json({ status: "cancelled", note: "guest cancelled checkout" });
       return json({ error: "Not found" }, 404);
     } catch (err) {
       console.error(err);
