@@ -319,6 +319,102 @@ export async function handleReschedule(request, env) {
     const newProcessingFee = round2(feePct0 * (newRent + snapshot.charges.cleaningFee + newDeposit));
     const newGrandTotal = round2(newRent + snapshot.charges.cleaningFee + newProcessingFee + newDeposit);
 
+    // An unpaid booking on the GHL-invoice path already has an invoice the
+    // guest is looking at. Reprice THAT, rather than issuing a second way to
+    // pay for the same stay.
+    //
+    // Until 2026-10-15 this branch did not exist: the unpaid path called
+    // createOrder unconditionally while only the settled path below checked
+    // for an invoice. On an account with PayPal credentials that produced a
+    // real PayPal order beside the guest's existing GHL invoice -- two live
+    // payment routes for one booking -- and on an account without them it
+    // threw. Every live account is on the invoice path, so every unpaid
+    // reschedule took it.
+    const unpaidInvoiceId = snapshot.ghlInvoice?.invoiceId;
+    if (unpaidInvoiceId) {
+      // Captured here rather than reusing oldStay0, which the PayPal branch
+      // below declares after this point.
+      const oldStayU = { ...snapshot.stay };
+      let repriced;
+      try {
+        repriced = await updateInvoiceForReschedule({
+          tenant, env, locationId: snapshot.locationId,
+          invoiceId: unpaidInvoiceId, snapshot: {
+            ...snapshot,
+            stay: { ...snapshot.stay, checkIn: newCheckIn, checkOut: newCheckOut, nights: newNights },
+            charges: { ...snapshot.charges, rentTotal: newRent },
+            securityDeposit: { ...snapshot.securityDeposit, total: newDeposit },
+          },
+          previousNights: oldStayU.nights,
+        });
+      } catch (err) {
+        // The dates are not moved if the money could not be. A snapshot that
+        // says one thing while the guest's invoice says another is the drift
+        // this file spends most of its length preventing.
+        console.error(`Reschedule reprice failed for ${snapshot.bookingId}: ${err.message}`);
+        return json({ error: "Could not reprice the invoice for the new dates", detail: err.message }, 502);
+      }
+      if (!repriced.ok) {
+        console.error(`Reschedule reprice refused for ${snapshot.bookingId}: ${repriced.reason}`);
+        return json({ error: "Could not reprice the invoice for the new dates", ...repriced }, 502);
+      }
+
+      // The invoice's own recomputed fee wins over the one derived above: it is
+      // what the guest will actually be asked for.
+      const feeCharged = repriced.processingFee != null ? repriced.processingFee : newProcessingFee;
+      const grandTotal = round2(newRent + snapshot.charges.cleaningFee + feeCharged + newDeposit);
+
+      snapshot.stay = { ...snapshot.stay, checkIn: newCheckIn, checkOut: newCheckOut, nights: newNights };
+      snapshot.charges.rentTotal = newRent;
+      snapshot.charges.processingFee = feeCharged;
+      snapshot.charges.grandTotal = grandTotal;
+      snapshot.securityDeposit.total = newDeposit;
+      snapshot.securityDeposit.blocks = newDepositCalc.blocks;
+      snapshot.reschedules = [...(snapshot.reschedules || []), {
+        at: new Date().toISOString(), from: oldStayU,
+        to: { checkIn: newCheckIn, checkOut: newCheckOut, nights: newNights },
+        unpaid: true, invoiceId: unpaidInvoiceId, reason: body.reason || ""
+      }];
+      await env.BOOKINGS.put(snapshot.bookingId, JSON.stringify(snapshot));
+
+      if (snapshot.parentBookingId) {
+        const parentU = await env.BOOKINGS.get(snapshot.parentBookingId, { type: "json" });
+        if (parentU && parentU.childBookingIds) await refreshParentFromChildren(env, parentU);
+      }
+
+      const calendarU = await updateGhlBookingDates(env, tenant, snapshot, newCheckIn, newCheckOut);
+
+      await notifyAndRecord(env, snapshot, tenant.ghlRescheduleUrl, rescheduleNotifyPayload({
+        bookingId: snapshot.bookingId,
+        contactId: snapshot.ghlContactId,
+        email: snapshot.guest?.email,
+        guestName: snapshot.guest?.name,
+        oldCheckIn: oldStayU.checkIn, oldCheckOut: oldStayU.checkOut,
+        newCheckIn, newCheckOut, newNights,
+        rentTotal: newRent,
+        depositTotal: newDeposit,
+        processingFee: feeCharged,
+        totalDelta: grandTotal,
+        settlementType: "unpaid_invoice_repriced",
+        // No new link: the guest pays the invoice they already hold.
+        approveUrl: "",
+        balanceDue: repriced.amountDue != null ? repriced.amountDue : grandTotal,
+        invoiceNumber: repriced.invoiceNumber || "",
+        adminFeeRetained: 0,
+        cancellationTier: "",
+        propertyName: snapshot.propertyCode || tenant.brandName,
+        calendarUpdateRequired: !calendarU.ok
+      }));
+
+      return json({
+        bookingId: snapshot.bookingId,
+        oldDates: oldStayU,
+        newDates: { checkIn: newCheckIn, checkOut: newCheckOut, nights: newNights },
+        settlement: { type: "unpaid_invoice_repriced", invoiceId: unpaidInvoiceId, grandTotal },
+        calendarUpdateRequired: !calendarU.ok, calendar: calendarU
+      });
+    }
+
     const purchaseUnits = [{
       reference_id: `${snapshot.bookingId}-RENT`,
       invoice_id: `${snapshot.bookingId}-RENT`,

@@ -525,12 +525,18 @@ export function cancellationNotifyPayload({
 
 // Extracted so the webhook seeder posts the same key set GHL will later
 // receive for real -- see webhook-seed.js. Values change, keys never should.
-export function depositRefundNotifyPayload({ bookingId, contactId, email, refundAmount, claim, status, propertyName }) {
+export function depositRefundNotifyPayload({ bookingId, contactId, email, refundAmount, claim, status, propertyName, manualRefund = false }) {
   return {
     event: "deposit_refunded",
     bookingId: bookingId || "",
     contactId: contactId || "",
     email: email || "",
+    // Whether a person still has to pay this. On a GHL-invoice booking there is
+    // no capture of ours to refund against, so it is always yes -- and until
+    // this field existed the notification said a deposit had been "refunded"
+    // when nothing had moved. Added 2026-10-15: the deposit trigger needs
+    // re-seeding before a workflow can branch on it.
+    manualRefundRequired: manualRefund ? "yes" : "no",
     refundTotal: Number(refundAmount || 0).toFixed(2),   // same field name as cancellation payloads
     refundAmount: Number(refundAmount || 0).toFixed(2),  // kept for back-compat
     claimAmount: Number(claim || 0).toFixed(2),
@@ -842,15 +848,28 @@ export async function handleDepositRefund(request, env) {
 
   const claim = round2(Math.max(0, Math.min(Number(body.claimAmount) || 0, dep.total)));
   const refundAmount = round2(dep.total - claim);
+  // No capture is the normal case, not an error. A GHL-invoice booking records
+  // captures.DEP with no captureId -- the money sits with GHL's processor, not
+  // a capture of ours -- so this returned a 500 on every enrich account, which
+  // is all of them. Luminara is the one that feels it: Worker-sized deposits,
+  // on enrich, and an account holder submitting this form to find out what is
+  // owed back.
+  //
+  // So the refund is computed and recorded either way. Where there IS a capture
+  // (legacy checkout bookings) it is still issued automatically; where there is
+  // not, it is marked for a person to pay, exactly as a cancellation does.
   const captureId = snapshot.captures?.DEP?.captureId || dep.paypalCaptureId;
-  if (!captureId) return json({ error: "No deposit capture ID on record" }, 500);
-
   const note = `Devolución de depósito ${snapshot.bookingId}` + (claim > 0 ? ` (menos $${claim.toFixed(2)} por daños)` : "");
 
   let refundId = null;
+  let manualRefund = false;
   if (refundAmount > 0) {
-    refundId = await gatewayRefund(tenant, env, snapshot, captureId,
-      claim > 0 ? refundAmount : null, note);
+    if (!captureId) {
+      manualRefund = true;
+    } else {
+      refundId = await gatewayRefund(tenant, env, snapshot, captureId,
+        claim > 0 ? refundAmount : null, note);
+    }
   }
 
   const status = claim === 0 ? "refunded" : (refundAmount > 0 ? "partial" : "claimed");
@@ -867,10 +886,11 @@ export async function handleDepositRefund(request, env) {
   // ever needs the manager to receive damage claims instead.
   try {
     const rows = [];
-    if (refundId) rows.push({
+    if (refundId || manualRefund) rows.push({
       recipient: "guest", category: "liability", entry_type: "deposit_refund_inspection",
-      amount: refundAmount, reference: refundId, source: "deposit_refund",
+      amount: refundAmount, reference: refundId || MANUAL_REFUND_REF, source: "deposit_refund",
       description: "Security deposit returned after inspection"
+        + (manualRefund ? MANUAL_SUFFIX : "")
     });
     if (claim > 0) rows.push({
       recipient: "owner", category: "income", entry_type: "deposit_claim_retained",
@@ -905,8 +925,9 @@ export async function handleDepositRefund(request, env) {
     contactId: snapshot.ghlContactId,
     email: snapshot.guest?.email,
     refundAmount, claim, status,
+    manualRefund,
     propertyName: snapshot.propertyCode || tenant.brandName
   }));
 
-  return json({ processed: true, status, refundAmount, claimAmount: claim, refundId });
+  return json({ processed: true, status, refundAmount, claimAmount: claim, refundId, manualRefund });
 }
