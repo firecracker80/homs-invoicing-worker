@@ -365,9 +365,42 @@ async function syncRowsToGHL(env, tenant, snapshot, rows, now) {
       });
       transactionId = transaction.id;
 
-      if (property) await linkIfPossible(pit, locationId, associations, "custom_objects.transactions", transactionId, "custom_objects.properties", property.id);
-      if (otaChannel) await linkIfPossible(pit, locationId, associations, "custom_objects.transactions", transactionId, "custom_objects.ota_channels", otaChannel.id);
-      if (snapshot.ghlContactId) await linkIfPossible(pit, locationId, associations, "custom_objects.transactions", transactionId, "contact", snapshot.ghlContactId);
+      // Every link is now CHECKED, and a refused one is reported.
+      //
+      // All four of these threw their return value away, so a link that did
+      // not happen looked exactly like one that did. The guest link had been
+      // failing on every booking since a second contact-to-Transaction
+      // association ("assigned_cleaner") was created beside "transaction_guest":
+      // findAssociationId found two, refused to guess, and returned null. The
+      // Villa Azul Transaction of 2026-10-16 carried eleven relations and not
+      // one of them was its guest.
+      //
+      // What that cost: Sofia is instructed to find a booking by reading the
+      // contact's relations, which is the only route there is -- Search Object
+      // Records matches a custom object's PRIMARY field only, so a Transaction
+      // cannot be found by booking_reference (verified live, 0 results). With no
+      // guest relation she had nothing to follow, improvised with the booking id
+      // from a contact field as though it were a record id, and reported a 404
+      // to the manager on a record that was sitting right there.
+      //
+      // unlinked already reported a property NAME that matched nothing. It could
+      // not report a link that was attempted and refused, which is the failure
+      // that actually happened and the one nothing would have surfaced.
+      const link = async (objectKey, recordId, assocKey, consequence) => {
+        const res = await linkIfPossible(
+          pit, locationId, associations,
+          "custom_objects.transactions", transactionId, objectKey, recordId, assocKey,
+        );
+        if (!res.linked) unlinked.push({ object: objectKey, association: assocKey, reason: res.reason, consequence });
+        return res;
+      };
+
+      if (property) await link("custom_objects.properties", property.id, "booked_at",
+        "dashboard shows no property for this booking");
+      if (otaChannel) await link("custom_objects.ota_channels", otaChannel.id, "booked_via",
+        "booking is not attributed to a channel");
+      if (snapshot.ghlContactId) await link("contact", snapshot.ghlContactId, "transaction_guest",
+        "the booking cannot be reached from the guest, which is the only way an assistant can find it");
     } else {
       associations = await fetchAssociations(pit, locationId);
     }
@@ -394,7 +427,15 @@ async function syncRowsToGHL(env, tenant, snapshot, rows, now) {
         gateway_transaction_id: gatewayRefFor(snapshot, r),
       });
       paymentIds.push(payment.id);
-      await linkIfPossible(pit, locationId, associations, "custom_objects.payments", payment.id, "custom_objects.transactions", transactionId);
+      const paymentLink = await linkIfPossible(
+        pit, locationId, associations,
+        "custom_objects.payments", payment.id, "custom_objects.transactions", transactionId,
+        "payment_transaction",
+      );
+      if (!paymentLink.linked) unlinked.push({
+        object: "custom_objects.payments", association: "payment_transaction", reason: paymentLink.reason,
+        consequence: `the ${r.entry_type} row is not joined to the booking it belongs to`,
+      });
     }
 
     // Reported alongside a successful sync, not instead of one: the rows were
