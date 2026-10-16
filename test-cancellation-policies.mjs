@@ -151,6 +151,75 @@ for (const [name, text] of Object.entries(AIRBNB_POLICIES)) {
   if (p.tiers.length) pass++; else failures.push(`${name} produced no tiers`);
 }
 
+// --------------------------------------------------------- tier boundaries --
+// Added 2026-10-16. Every case above brackets a boundary without landing on
+// one -- "moderate 6d out" and "moderate 3d out" sit either side of the 5-day
+// edge and never test it -- so changing the tier predicate from
+//
+//   hoursUntil < t.underHours      to      hoursUntil <= t.underHours
+//
+// passed all 308 assertions, plus test-native-policies and
+// test-cancel-backfill. Verified by mutation, not assumed.
+//
+// It decides real money. A guest cancelling at exactly 5 days out gets a full
+// refund under "<" and is charged a night plus half the rest under "<=" --
+// $550 of a $1,000 stay, on a one-character difference nothing was watching.
+//
+// The rule these pin: a tier applies STRICTLY INSIDE its window. At exactly
+// the boundary the guest gets the gentler treatment, which is the reading
+// Airbnb's own wording supports ("free cancellation up to 5 days before").
+is("moderate exactly 5d out is still free", charge("Moderate", 120 * HOUR).amount, 0);
+is("moderate a minute inside 5d charges", charge("Moderate", 120 * HOUR - 60000).amount, 550);
+
+is("flexible exactly 24h out is still free", charge("Flexible", 24 * HOUR).amount, 0);
+is("flexible a minute inside 24h charges", charge("Flexible", 24 * HOUR - 60000).amount, 100);
+
+// Limited and Firm have two tiers, so each has two edges: the inner one where
+// the whole stay starts being charged, and the outer one where the 50% band
+// gives way to a full refund.
+is("limited exactly 7d out is the 50% band", charge("Limited", 168 * HOUR).amount, 500);
+is("limited a minute inside 7d charges in full", charge("Limited", 168 * HOUR - 60000).amount, 1000);
+is("limited exactly 14d out is free", charge("Limited", 336 * HOUR).amount, 0);
+is("limited a minute inside 14d is the 50% band", charge("Limited", 336 * HOUR - 60000).amount, 500);
+
+is("firm exactly 7d out is the 50% band", charge("Firm", 168 * HOUR).amount, 500);
+is("firm exactly 30d out is free", charge("Firm", 720 * HOUR).amount, 0);
+is("firm a minute inside 30d is the 50% band", charge("Firm", 720 * HOUR - 60000).amount, 500);
+
+is("strict exactly 7d out is the 50% band", charge("Strict", 168 * HOUR).amount, 500);
+is("strict a minute inside 7d charges in full", charge("Strict", 168 * HOUR - 60000).amount, 1000);
+
+// The check-in moment itself. `hoursUntil < 0` decides "already checked in",
+// so AT 3 PM on the check-in day the guest has not checked in yet and the
+// nearest tier applies -- not the 100% checked-in rate. A minute later it
+// does. Both sides pinned: this is the one boundary where the two outcomes
+// are a full stay apart.
+is("moderate exactly at check-in is not yet checked in", charge("Moderate", 0).tier, "under_120h");
+is("moderate exactly at check-in charges the tier", charge("Moderate", 0).amount, 550);
+is("moderate a minute after check-in is checked in", charge("Moderate", -60000).tier, "already_checked_in");
+is("moderate a minute after check-in charges in full", charge("Moderate", -60000).amount, 1000);
+
+// And the grace lead, which has the same shape. "exactly 7d out" above covers
+// Strict; this covers the minute inside it, where the lead is NOT met.
+is("grace at exactly the 7d lead applies",
+  charge("Strict", 168 * HOUR, { bookedAt: new Date(CHECK_IN_MS - 168 * HOUR - HOUR).toISOString() }).tier,
+  "grace_period");
+is("grace a minute inside the 7d lead does not apply",
+  charge("Strict", 168 * HOUR - 60000, { bookedAt: new Date(CHECK_IN_MS - 168 * HOUR - HOUR).toISOString() }).tier,
+  "under_168h");
+
+// The other edge of the same window: how long AFTER booking the guest still
+// has. 24h exactly is inside it; a minute later is not. Nothing tested this,
+// so flipping `sinceBooking <= withinHoursOfBooking` to `<` survived every
+// other assertion here, including the ones added above.
+const far = 30 * DAY;   // well beyond any lead requirement, so only the window decides
+is("grace at exactly 24h after booking still applies",
+  charge("Strict", far, { bookedAt: new Date(CHECK_IN_MS - far - 24 * HOUR).toISOString() }).tier,
+  "grace_period");
+is("grace a minute past 24h after booking does not",
+  charge("Strict", far, { bookedAt: new Date(CHECK_IN_MS - far - 24 * HOUR - 60000).toISOString() }).tier,
+  "under_87600h");
+
 // ------------------------------------------------------------------ report --
 console.log(`${pass} passed, ${failures.length} failed`);
 for (const f of failures) console.log("  FAIL " + f);
