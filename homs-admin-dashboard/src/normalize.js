@@ -159,8 +159,13 @@ export function normalizeTransaction(record) {
     checkoutDate: prop(record, "checkout_date"),
     bookingReference: prop(record, "booking_reference"),
     bookingTotal: moneyProp(record, "booking_total"),
-    platformFee: moneyProp(record, "platform_fee"),
-    netPayout: moneyProp(record, "net_payout"),
+    // platform_fee and net_payout are deliberately not mapped. The Worker
+    // stopped writing them on 2026-10-16: they are GHL's marketplace
+    // vocabulary, never computed here, and the dashboard showed net_payout --
+    // which was only ever a copy of booking_total -- under a column headed
+    // "Net Payout". What each recipient is owed comes from the statements,
+    // which work it out. Old records still carry the stale values; not
+    // reading them is how they stop being shown.
     paymentStatus: prop(record, "payment_status"),
     // The booking's own lifecycle, as distinct from whether money arrived.
     //

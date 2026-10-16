@@ -794,14 +794,15 @@ export async function handleReschedule(request, env) {
       // at the original three nights, so the CRM under-reported the booking for
       // as long as anyone cared to look -- found on DEMO-HOMS 2026-09-27.
       //
-      // platform_fee is not written: it is 0 at creation and nothing about a
-      // date change earns a platform its own cut.
+      // platform_fee and net_payout are not written -- retired 2026-10-16, see
+      // the note where ledger.js creates this record. booking_total stays: it
+      // is a real figure, computed by the same bookingTotalOf both sides share,
+      // and it is the one this fix exists to keep current.
       const bookingTotal = bookingTotalOf(snapshot);
       if (pit) await updateObjectRecord(pit, snapshot.locationId, "custom_objects.transactions", transactionId, {
         checkin_date: newCheckIn,
         checkout_date: newCheckOut,
         booking_total: { value: bookingTotal, currency: "default" },
-        net_payout: { value: bookingTotal, currency: "default" },
         // A reschedule overwrote the dates in place and left no trace, so
         // nothing downstream could tell a booking that had been moved from one
         // booked for those dates in the first place.

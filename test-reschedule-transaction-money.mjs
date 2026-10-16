@@ -101,8 +101,7 @@ const reschedule = async (body) => {
   assert.strictEqual(props.checkout_date, "2026-10-22", "the dates still move");
   assert.deepStrictEqual(props.booking_total, { value: 465, currency: "default" },
     "and so does the money -- 400 rent + 65 cleaning, not the original 305");
-  assert.deepStrictEqual(props.net_payout, { value: 465, currency: "default" });
-  console.log("1) Extending a stay updates booking_total and net_payout, not just the dates");
+  console.log("1) Extending a stay updates booking_total, not just the dates");
 }
 
 // ---- 2. it agrees with what settlement would have written --------------
@@ -127,7 +126,6 @@ const reschedule = async (body) => {
   const props = txUpdates[0].body.properties;
   assert.deepStrictEqual(props.booking_total, { value: 225, currency: "default" },
     "two nights at 80 plus cleaning -- the CRM must not keep showing three");
-  assert.deepStrictEqual(props.net_payout, { value: 225, currency: "default" });
   console.log("3) Shortening a stay brings the recorded total down as well");
 }
 
@@ -144,20 +142,27 @@ const reschedule = async (body) => {
   console.log("4) A same-duration move leaves the total equal, having recomputed it");
 }
 
-// ---- 5. platform_fee is left alone -----------------------------------
-// It is 0 at creation and a date change earns no platform anything. Writing it
-// would be a second place for it to drift from whatever creation decides.
+// ---- 5. platform_fee and net_payout are not written -------------------
+// Both retired 2026-10-16. They are GHL's vocabulary for a marketplace that
+// takes a cut and pays out, and neither was ever computed: platform_fee went
+// out as a hardcoded 0 beside a real processing fee, and net_payout went out
+// equal to booking_total -- so the dashboard had a "Net Payout" column
+// reporting the gross as though it were the owner's, cancelled bookings
+// included. What anyone is owed is computed in the statements.
+//
+// booking_total stays, and cases 1-4 above are about keeping it current.
 {
   await reschedule({ newCheckIn: "2026-10-17", newCheckOut: "2026-10-22" });
   const props = txUpdates[0].body.properties;
   assert.strictEqual("platform_fee" in props, false, "not this record's business to restate");
+  assert.strictEqual("net_payout" in props, false, "and not a payout HOMS makes");
   // booking_status joined the list on 2026-10-07: a reschedule left no trace
   // that it had happened, so nothing downstream could tell a moved booking from
   // one booked for those dates in the first place. Added here deliberately --
   // this list is the guard against an update quietly growing, so it is meant to
   // fail when it does.
   assert.deepStrictEqual(Object.keys(props).sort(),
-    ["booking_status", "booking_total", "checkin_date", "checkout_date", "net_payout"],
+    ["booking_status", "booking_total", "checkin_date", "checkout_date"],
     "and nothing else is written either -- an update that touches more than it means to is how records get clobbered");
   console.log("5) The update writes four fields and no more");
 }

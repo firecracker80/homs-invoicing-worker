@@ -2475,11 +2475,15 @@ function renderInventory() {
 function renderReports() {
   const { properties, otaChannels, transactions, checklists } = DATA;
 
+  // No payout column, and no payout figure in the CSV either. It summed
+  // net_payout, which the Worker wrote as a copy of booking_total and stopped
+  // writing on 2026-10-16 -- so the column reported the gross as though it
+  // were the owner's, including on cancelled bookings. The owner statement
+  // is where a payout figure comes from, because it is computed there.
   const revenueByProperty = properties.map((p) => {
     const txs = transactions.filter((t) => t.propertyId === p.id);
     const total = txs.reduce((sum, t) => sum + (Number(t.bookingTotal) || 0), 0);
-    const payout = txs.reduce((sum, t) => sum + (Number(t.netPayout) || 0), 0);
-    return { name: p.name, bookings: txs.length, total, payout };
+    return { name: p.name, bookings: txs.length, total };
   }).sort((a, b) => b.total - a.total);
 
   const byPaymentStatus = {};
@@ -2503,8 +2507,8 @@ function renderReports() {
   $("#panel-reports").innerHTML = `
     <div class="toolbar"><div class="section-title" style="margin:0">Revenue by property</div>
       <button class="btn export-btn" data-export="revenue-by-property">Export CSV</button></div>
-    ${table(["Property", "Bookings", "Booking Total", "Net Payout"],
-      revenueByProperty.map((r) => `<tr><td>${dash(r.name)}</td><td>${r.bookings}</td><td>${money(r.total)}</td><td>${money(r.payout)}</td></tr>`).join("") || emptyRow(4, "No data"),
+    ${table(["Property", "Bookings", "Booking Total"],
+      revenueByProperty.map((r) => `<tr><td>${dash(r.name)}</td><td>${r.bookings}</td><td>${money(r.total)}</td></tr>`).join("") || emptyRow(3, "No data"),
       null)}
 
     ${!showOta() ? "" : `
@@ -2940,7 +2944,6 @@ function openDetail(kind, id) {
       ["OTA Channel", record.otaChannelName],
       ["Booking Reference", record.bookingReference], ["Check-in", dateFmt(record.checkinDate)],
       ["Check-out", dateFmt(record.checkoutDate)], ["Booking Total", money(record.bookingTotal)],
-      ["Platform Fee", money(record.platformFee)], ["Net Payout", money(record.netPayout)],
       ["Payment Status", record.paymentStatus],
     ];
   } else if (kind === "checklist") {
