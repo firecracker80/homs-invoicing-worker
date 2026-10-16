@@ -346,8 +346,21 @@ async function syncRowsToGHL(env, tenant, snapshot, rows, now) {
         checkout_date: snapshot.stay.checkOut,
         booking_reference: snapshot.bookingId,
         booking_total: { value: bookingTotal, currency: "default" },
-        platform_fee: { value: 0, currency: "default" },
-        net_payout: { value: bookingTotal, currency: "default" },
+        // platform_fee and net_payout are NOT written, and were retired here on
+        // 2026-10-16.
+        //
+        // They are GHL's vocabulary for a marketplace that takes a cut and pays
+        // out, which is not what HOMS does. Neither was ever computed: the fee
+        // went out as a hardcoded 0 while the booking carried a real processing
+        // fee, and net_payout went out equal to booking_total, so a cancelled
+        // booking read as the owner being due the whole thing. The dashboard's
+        // "Revenue by property" table had a Net Payout column reading exactly
+        // that number.
+        //
+        // The 85/15 split, the cleaning margin and what each recipient is
+        // actually owed live in the ledger and the statements, which compute
+        // them. A field on this record that merely looks like a payout invites
+        // someone to trust a figure nothing produced.
         payment_status: "paid",
       });
       transactionId = transaction.id;

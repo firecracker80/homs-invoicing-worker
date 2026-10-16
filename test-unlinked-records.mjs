@@ -103,4 +103,46 @@ const snapshotFor = (propertyCode) => ({
   console.log("4) An unlinked record never fails the settlement it belongs to");
 }
 
+// ---- 5. the Transaction is created with four money-bearing fields -------
+// Added 2026-10-16, when platform_fee and net_payout were retired.
+//
+// Both were GHL's vocabulary for a marketplace that takes a cut and pays
+// out, and neither was ever computed here: platform_fee went out as a
+// hardcoded 0 beside a real processing fee, and net_payout went out equal to
+// booking_total -- so the dashboard's "Revenue by property" table reported
+// the gross under a "Net Payout" heading, cancelled bookings included. What
+// each recipient is owed is computed in the ledger and the statements.
+//
+// This asserts the create payload the way test-reschedule-transaction-money
+// case 5 asserts the update payload: nothing in this file read a request
+// BODY before, so re-adding either field would have gone unnoticed on the
+// settlement side while the reschedule side was guarded.
+{
+  const bodies = [];
+  const recording = async (url, init = {}) => {
+    const u = String(url);
+    const body = (o) => ({ ok: true, status: 200, text: async () => JSON.stringify(o) });
+    if (u.includes("/records/search") || u.includes("/associations")) return body({ records: [], associations: [] });
+    if (u.includes("/records")) {
+      if (init.body) bodies.push({ url: u, props: JSON.parse(init.body).properties || {} });
+      return body({ record: { id: "rec-" + bodies.length } });
+    }
+    return body({});
+  };
+  globalThis.fetch = recording;
+  await writeLedgerEntries({ LEDGER_DB: makeD1() }, tenant, snapshotFor("Test Villa 2"), captures);
+
+  const created = bodies.find((b) => b.url.includes("custom_objects.transactions"));
+  assert.ok(created, "the settlement creates a Transaction record");
+  assert.deepStrictEqual(Object.keys(created.props).sort(), [
+    "booking_reference", "booking_total", "checkin_date", "checkout_date",
+    "guest_name", "payment_status", "transaction_name",
+  ], "an exact list on purpose -- it is meant to fail when the write grows a field");
+  assert.strictEqual("platform_fee" in created.props, false, "HOMS takes no platform cut");
+  assert.strictEqual("net_payout" in created.props, false, "and makes no payout from this record");
+  assert.deepStrictEqual(created.props.booking_total, { value: 335, currency: "default" },
+    "booking_total stays, and is real: 270 rent + 65 cleaning, no fee and no deposit");
+  console.log("5) The Transaction is created without platform_fee or net_payout, and booking_total is still real");
+}
+
 console.log("\nPASS — a Transaction that could not find its Property says so, instead of showing a blank name.");
