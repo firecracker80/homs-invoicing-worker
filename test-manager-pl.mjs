@@ -1,6 +1,16 @@
 // Local mock tests for the manager P&L. No network, no GHL, no D1.
 // Run: node test-manager-pl.mjs
 //
+// STATE A WINDOW on any call you then assert amounts from. The fixtures here
+// are pinned to September 2026, and /reports/manager-pl defaults to the last
+// THIRTY DAYS when asked for no range -- so a call without one stops seeing
+// these records as the real clock moves past them. Two did, on 2026-10-10, and
+// the suite went red for a week for no reason anybody had changed. The tests
+// did not break; they expired.
+//
+// The one call that deliberately omits a window asserts the default EXCLUDES
+// July, which only becomes more true with time. That is the safe direction.
+//
 // The field shapes here are DEMO-HOMS's real Expenses object, read from the
 // live schema 2026-09-25: amount, can_reimburse, currency, converted_amount,
 // review_status, paid_on, category -- all MONETORY fields arriving as
@@ -276,7 +286,12 @@ const approved = { review_status: "approved", paid_on: "2026-09-10", category: "
   assert.strictEqual((await call("locationId=loc1&format=json", { "X-Admin-Secret": "adm" })).status, 200);
 
   // HTML is the default, because this is opened in a GHL menu link.
-  const page = await call("locationId=loc1&token=mtok");
+  //
+  // The window is stated, like the JSON call above it. Without one the route
+  // uses its 30-day default, and this file's fixtures are pinned to September
+  // 2026 -- so the expense fell out of range on 2026-10-10 and the page began
+  // rendering a net of 1000 instead of 900. The test did not break; it expired.
+  const page = await call("locationId=loc1&token=mtok&from=2026-09-01&to=2026-09-30");
   assert.strictEqual(page.headers.get("Content-Type")?.includes("text/html"), true);
   const text = await page.text();
   assert.ok(text.includes("Casa Bonita"), "the brand is on the page");
@@ -302,8 +317,11 @@ const approved = { review_status: "approved", paid_on: "2026-09-10", category: "
     TENANTS: { get: async () => ({ brandName: "B", currency: "USD", managerReportToken: "t", ghlPit: "pit" }) },
     LEDGER_DB: { prepare: () => ({ bind: () => ({ all: async () => ({ results: [{ currency: "USD", total_minor: 50000, n: 1 }] }) }) }) },
   };
+  // Windowed, for the same reason as test 12: two of these three records carry
+  // the September fixture date, and the route's 30-day default stopped
+  // containing it on 2026-10-10.
   const text = await (await handleManagerPL(
-    new Request("https://w.dev/reports/manager-pl?locationId=l&token=t"), env)).text();
+    new Request("https://w.dev/reports/manager-pl?locationId=l&token=t&from=2026-09-01&to=2026-09-30"), env)).text();
 
   assert.ok(/still say/.test(text), "the unreviewed expense is called out");
   assert.ok(/no converted amount/.test(text), "so is the unconvertible one");
