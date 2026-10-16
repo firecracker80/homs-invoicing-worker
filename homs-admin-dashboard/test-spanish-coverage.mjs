@@ -99,4 +99,28 @@ console.log("8) translated prose is on one source line");
   }
 }
 
+
+// A figure interpolated mid-sentence makes the whole node match nothing. The
+// manager statement carried one in English on an otherwise Spanish page
+// (Yari, 2026-10-16): "Deducted from owner payouts was recorded as RD$365.00,
+// converted at the rate stored on each expense."
+console.log("9) prose in the statements keeps its figures out of the sentence");
+{
+  // The whole panel, render function included -- the offending line lives
+  // INSIDE renderManagerStatement, so a slice ending at its declaration
+  // scanned none of the markup and passed against the very string it was
+  // written for.
+  const manager = src.slice(src.indexOf("// --- manager statement"), src.indexOf("function renderStatementSection"));
+  const offenders = [...manager.matchAll(/>([A-Z][^<>{}]{10,}\$\{[^}]+\}[^<>]{10,})</g)].map((m) => m[1]);
+  assert.deepStrictEqual(offenders, [],
+    "these sentences interpolate a value and can never be translated: " + offenders.join(" | "));
+
+  for (const k of [
+    "Deducted from owner payouts was recorded as",
+    ", converted at the rate stored on each expense.",
+  ]) {
+    assert.ok(es[k], `the manager statement renders "${k}" and it has no Spanish`);
+  }
+}
+
 console.log("\nPASS — the filter options are generated from their labels, so the next filter is translated too.");

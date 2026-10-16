@@ -81,6 +81,8 @@ const I18N = {
     "expense(s) come off the owners' payouts rather than counting here.":
       "gasto(s) se descuentan del pago a los propietarios en vez de contarse aquí.",
     "Deducted from owner payouts": "Descontado del pago a propietarios",
+    "Deducted from owner payouts was recorded as": "Descontado del pago a propietarios se registró como",
+    ", converted at the rate stored on each expense.": ", convertido al tipo de cambio guardado en cada gasto.",
     "Expenses are what the manager pays for themselves, plus what was paid to cleaners. An owner's costs come off that owner's payout instead and are shown separately.":
       "Los gastos son lo que el administrador paga de su propio bolsillo, más lo pagado a los limpiadores. Los costos del propietario se descuentan de su pago y se muestran aparte.",
     "expense(s) have no Paid On date, so they fall into no period at all.":
@@ -1034,7 +1036,12 @@ function renderManagerStatement() {
       </table>
       ${pl.netIsCeiling ? `<p class="note">At most: cleans with no cleaner cost recorded are missing from this, so the real figure is lower.</p>` : ""}
       ${(pl.ownerBorneByCurrency || []).some((c) => c.currency !== cur)
-        ? `<p class="note">Deducted from owner payouts was recorded as ${pl.ownerBorneByCurrency.map((c) => esc(moneyIn(c.total, c.currency))).join(", ")}, converted at the rate stored on each expense.</p>`
+        // Split around the amount. localize() matches a WHOLE text node, so a
+        // figure interpolated mid-sentence makes the sentence match nothing and
+        // sit in English on a Spanish statement -- the same rule the comment
+        // above this panel sets out, broken here. Two spans, two keys, and the
+        // number between them belongs to neither.
+        ? `<p class="note"><span>Deducted from owner payouts was recorded as</span> ${pl.ownerBorneByCurrency.map((c) => esc(moneyIn(c.total, c.currency))).join(", ")}<span>, converted at the rate stored on each expense.</span></p>`
         : ""}
       <p class="note">Expenses are what the manager pays for themselves, plus what was paid to cleaners. An owner's costs come off that owner's payout instead and are shown separately.</p>
       ${pl.ownerBorneCount
