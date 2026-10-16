@@ -43,7 +43,7 @@
 // Auth is PER-TENANT (this is a multi-tenant worker, one GHL Private
 // Integration Token per client sub-account) -- mirrors the
 // paypalSecretName/airtableToken pattern already used in
-// paypal.js. Tenant KV needs either ghlPit (inline,
+// Tenant KV needs either ghlPit (inline,
 // fine for pilot) or ghlPitSecretName (Worker secret, recommended once past
 // a couple of clients). Field name matches the "PIT" term GHL itself uses
 // for these tokens (see ghl-account-registry.json's pit_connector), and the

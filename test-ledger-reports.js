@@ -220,6 +220,8 @@ const ledgerDb = makeMockD1();
 const hdr = s => ({ get: n => n === "X-Admin-Secret" ? s : null });
 
 let ghlTransactionCalls = 0;
+let e2eInvoicePut = null;
+let e2ePaid = false;
 let mockTransactions = [];
 global.fetch = async (url, opts = {}) => {
   if (url.includes("oauth2/token")) return { ok: true, json: async () => ({ access_token: "T" }) };
@@ -232,7 +234,15 @@ global.fetch = async (url, opts = {}) => {
         seller_receivable_breakdown: { gross_amount: { value: "490" }, paypal_fee: { value: "15" }, net_amount: { value: "475" } } }] } }
     ]
   }) };
-  if (url.includes("checkout/orders")) return { ok: true, json: async () => ({ id: "PP-ORDER", links: [{ rel: "payer-action", href: "https://sandbox.paypal.com/checkoutnow?token=PP" }] }) };
+  if (url.includes("/invoices/INV-E2E/send")) return { ok: true, text: async () => "{}" };
+  if (url.includes("/invoices/INV-E2E")) {
+    if (opts.method === "PUT") { e2eInvoicePut = JSON.parse(opts.body); return { ok: true, text: async () => JSON.stringify({ _id: "INV-E2E", status: "sent" }) }; }
+    return { ok: true, text: async () => JSON.stringify({
+      _id: "INV-E2E", invoiceNumber: "E2E-0001", sourceId: "E2E-1", status: e2ePaid ? "paid" : "sent",
+      currency: "USD", total: 742, amountPaid: e2ePaid ? 742 : 0, amountDue: e2ePaid ? 0 : 742,
+      invoiceItems: [{ name: "Estadía", amount: 700, qty: 1, currency: "USD" }],
+    }) };
+  }
   if (url.includes("/payments/transactions")) {
     ghlTransactionCalls++;
     return { ok: true, text: async () => JSON.stringify({ data: mockTransactions }) };
@@ -251,10 +261,7 @@ const env = { WORKER_URL: "https://w.dev", TENANTS: kv, BOOKINGS: kv, LEDGER_DB:
 await kv.put("L1", JSON.stringify({
   brandName: "JT1", currency: "USD", ownerPct: 0.85, processingFeePct: 0.06,
   defaultCleaningFee: 69, cleaningFeeRecipient: "manager", bookingWorkerEnabled: true,
-  gateway: "paypal", invoiceStrategy: "paypal_url", deposit: { rule: "tiered" }, otaRate: 0.15,
-  paypalApi: "https://p", paypalClientId: "C", paypalSecret: "S",
-  airtableBaseId: "a", airtableToken: "pat", defaultPropertyRecId: "rP",
-  ghlPit: "test-pit"
+  defaultPropertyRecId: "rP", ghlPit: "test-pit"
 }));
 
 // Book + settle a real booking through the actual worker (not a direct
@@ -262,9 +269,15 @@ await kv.put("L1", JSON.stringify({
 // the ledger write, not just that ledger.js works when called directly.
 await worker.fetch({ method: "POST", url: "https://w.dev/booking-created", json: async () => ({
   bookingId: "E2E-1", locationId: "L1", contactId: "c1", firstName: "Ana", lastName: "G",
-  email: "a@x.com", phone: "+1", checkIn: "2026-09-01", checkOut: "2026-09-11", stayTotal: "700"
+  email: "a@x.com", phone: "+1", checkIn: "2026-09-01", checkOut: "2026-09-11", stayTotal: "700",
+  invoiceId: "INV-E2E"
 }), headers: { get: () => null } }, env);
-await worker.fetch({ method: "GET", url: "https://w.dev/paypal/return?bookingId=E2E-1", headers: { get: () => null } }, env);
+e2ePaid = true;
+const paidRes = await worker.fetch({ method: "POST", url: "https://w.dev/ghl-invoice-paid",
+  json: async () => ({ locationId: "L1", invoiceId: "INV-E2E" }),
+  headers: { get: () => null } }, env);
+assert.equal(JSON.parse(paidRes.body).status, "paid",
+  "the invoice-paid route must actually settle it, not skip it: " + paidRes.body);
 
 const afterSettle = await kv.get("E2E-1", { type: "json" });
 assert.equal(afterSettle.settled, true, "booking must actually be settled before checking the ledger");
@@ -385,7 +398,7 @@ mockTransactions = []; // GHL shows nothing -> the enrich booking's income is ge
 const recon1 = await (await worker.fetch({ method: "GET", url: "https://w.dev/reports/reconcile?locationId=L1&from=2026-01-01&to=2026-12-31", headers: hdr("admin123") }, env)).json();
 assert.equal(recon1.unmatched.length, 1, "only the enrich-mode booking (has an invoice_id) should ever be flagged -- E2E-1 (paypal_url, no invoice_id) must never appear here");
 assert.equal(recon1.unmatched[0].bookingId, "E2E-ENRICH");
-console.log("11) /reports/reconcile: paypal_url booking (E2E-1) correctly excluded; enrich-mode booking with no matching GHL transaction -> flagged");
+console.log("11) /reports/reconcile: a booking with no matching GHL transaction -> flagged");
 
 mockTransactions = [{ entityId: "inv_999", amount: 595.00 }]; // matches the seeded row's invoice_id
 const recon2 = await (await worker.fetch({ method: "GET", url: "https://w.dev/reports/reconcile?locationId=L1&from=2026-01-01&to=2026-12-31", headers: hdr("admin123") }, env)).json();

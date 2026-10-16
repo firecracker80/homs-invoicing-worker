@@ -1,13 +1,10 @@
 // payment.js — payment confirmation, settlement, ledgers, GHL notification.
 // Routes handled (wired in index.js):
-//   GET  /paypal/return   — guest returns from PayPal → capture both purchase units
-//   POST /paypal/webhook  — PAYMENT.CAPTURE.COMPLETED (source of truth; verified)
 
 //
 // All paths converge on settle(), which is idempotent: a booking settles once,
 // no matter how many of these fire or in what order.
 
-import { getAccessToken } from "./paypal.js";
 import { settleRescheduleAdjustment } from "./reschedule.js";
 import { writeLedgerEntries } from "./ledger.js";
 import { isMultiListingParent } from "./multi-listing.js";
@@ -28,95 +25,16 @@ function resolveSecret(tenant, env, nameKey, inlineKey) {
   return tenant[inlineKey];
 }
 
-// ---------------------------------------------------------------- PayPal ----
-
-async function capturePayPalOrder(tenant, env, paypalOrderId) {
-  const token = await getAccessToken(tenant, env);
-  const res = await fetch(`${tenant.paypalApi}/v2/checkout/orders/${paypalOrderId}/capture`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${token}`,
-      "PayPal-Request-Id": `capture-${paypalOrderId}` // idempotent capture
-    }
-  });
-  const data = await res.json();
-  // ORDER_ALREADY_CAPTURED is fine — fetch the order for its capture details
-  if (!res.ok) {
-    const already = JSON.stringify(data).includes("ORDER_ALREADY_CAPTURED");
-    if (!already) throw new Error(`PayPal capture failed: ${res.status} ${JSON.stringify(data)}`);
-    const getRes = await fetch(`${tenant.paypalApi}/v2/checkout/orders/${paypalOrderId}`, {
-      headers: { "Authorization": `Bearer ${token}` }
-    });
-    if (!getRes.ok) throw new Error(`PayPal order fetch failed: ${getRes.status}`);
-    return getRes.json();
-  }
-  return data;
-}
-
-// Extract the sole capture from a reschedule delta-charge order (one
-// purchase unit, not the RENT/DEP split of a normal booking).
-function extractSingleCapture(orderData) {
-  const pu = orderData?.purchase_units?.[0];
-  const cap = pu?.payments?.captures?.[0];
-  if (!cap) return null;
-  const brk = cap.seller_receivable_breakdown || {};
-  return {
-    captureId: cap.id,
-    gross: Number(brk.gross_amount?.value ?? cap.amount?.value ?? 0),
-    fee: Number(brk.paypal_fee?.value ?? 0),
-    net: Number(brk.net_amount?.value ?? cap.amount?.value ?? 0),
-    payerEmail: orderData?.payer?.email_address || "",
-    payerId: orderData?.payer?.payer_id || ""
-  };
-}
-
-// Normalize a PayPal order-with-captures into per-unit capture info
-function extractPayPalCaptures(orderData, bookingId) {
-  const out = { payerEmail: orderData?.payer?.email_address || "", payerId: orderData?.payer?.payer_id || "" };
-  for (const pu of orderData?.purchase_units || []) {
-    const unit = (pu.reference_id || "").endsWith("-DEP") ? "DEP" : "RENT";
-    const cap = pu.payments?.captures?.[0];
-    if (!cap) continue;
-    const brk = cap.seller_receivable_breakdown || {};
-    out[unit] = {
-      captureId: cap.id,
-      status: cap.status,
-      gross: Number(brk.gross_amount?.value ?? cap.amount?.value ?? 0),
-      fee: Number(brk.paypal_fee?.value ?? 0),
-      net: Number(brk.net_amount?.value ?? cap.amount?.value ?? 0)
-    };
-  }
-  return out;
-}
-
-// Verify a PayPal webhook signature. Requires tenant.paypalWebhookId
-// (Accounts."PayPal Webhook ID"). Returns true/false.
-async function verifyPayPalWebhook(tenant, env, request, rawBody) {
-  if (!tenant.paypalWebhookId) return false;
-  const token = await getAccessToken(tenant, env);
-  const h = request.headers;
-  const res = await fetch(`${tenant.paypalApi}/v1/notifications/verify-webhook-signature`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
-    body: JSON.stringify({
-      auth_algo: h.get("paypal-auth-algo"),
-      cert_url: h.get("paypal-cert-url"),
-      transmission_id: h.get("paypal-transmission-id"),
-      transmission_sig: h.get("paypal-transmission-sig"),
-      transmission_time: h.get("paypal-transmission-time"),
-      webhook_id: tenant.paypalWebhookId,
-      webhook_event: JSON.parse(rawBody)
-    })
-  });
-  if (!res.ok) return false;
-  return (await res.json()).verification_status === "SUCCESS";
-}
+// The PayPal capture, webhook-verification and return handlers lived here
+// until 2026-10-16. They settled a guest payment against an order the Worker
+// itself created; nothing creates one now, so nothing could reach them. The
+// only settlement route is handleGhlInvoicePaid below, which GHL calls when
+// the invoice it sent is paid.
 
 // A payment is confirmed by one of two routes, and GHL has to be able to read
 // both with ONE field mapping:
 //
-//   guest pays a PayPal link, or a reschedule delta       -> the Worker POSTs
+//   a reschedule delta, or any non-invoice settlement    -> the Worker POSTs
 //     to tenant.ghlPaymentConfirmedUrl, because GHL has no other way to know
 //   guest pays a GHL invoice -> GHL already knows; its own workflow calls
 //     /ghl-invoice-paid and reads our RESPONSE. We must not post back to the
@@ -410,8 +328,8 @@ async function tenantFor(env, snapshot) {
 // Invoice status is Paid), Custom Webhook action. Body (any of the ids):
 //   { locationId, invoiceId, invoiceNumber, contactId, secret? }
 //   headers X-Location-Id / X-Webhook-Secret work too, as on /booking-created.
-// A booking whose invoice was enriched is paid inside GHL, so no PayPal or
-// PayPal return/webhook ever reaches us. This settles it the same way:
+// A booking's invoice is paid inside GHL, which tells us by calling this.
+// Settled the same way a gateway capture used to be:
 // ledger rows (D1 + GHL Transaction/Payments), owner/manager split.
 // GHL is the source of truth: the invoice is re-read and must be Paid; the
 // booking is the one GHL's calendar stamped on it (sourceId). Anything else
@@ -543,70 +461,4 @@ export async function handleGhlInvoicePaid(request, env) {
     }),
     ok: true, invoiceId: invoice._id, ...result,
   });
-}
-
-export async function handlePayPalReturn(request, env) {
-  const url = new URL(request.url);
-  const bookingId = url.searchParams.get("bookingId");
-  const snapshot = await findSnapshot(env, bookingId);
-  if (!snapshot) return html("<h1>Reserva no encontrada</h1>", 404);
-  const tenant = await tenantFor(env, snapshot);
-  if (!tenant) return html("<h1>Configuración no encontrada</h1>", 500);
-
-  // Reschedule delta-charge orders settle differently (single capture,
-  // updates the PARENT order, no RENT/DEP split).
-  if (snapshot.type === "reschedule_adjustment") {
-    if (!snapshot.settled) {
-      const orderData = await capturePayPalOrder(tenant, env, snapshot.paypal.orderId);
-      const cap = extractSingleCapture(orderData);
-      if (!cap) return html("<h1>El pago no pudo completarse. Intenta nuevamente desde tu enlace de pago.</h1>", 402);
-      await settleRescheduleAdjustment(env, tenant, snapshot, cap);
-    }
-    if (tenant.thankYouUrl) return Response.redirect(tenant.thankYouUrl, 302);
-    return html(confirmationPage(tenant, snapshot));
-  }
-
-  if (!snapshot.settled) {
-    const orderData = await capturePayPalOrder(tenant, env, snapshot.paypal.orderId);
-    const captures = extractPayPalCaptures(orderData, bookingId);
-    if (!captures.RENT) return html("<h1>El pago no pudo completarse. Intenta nuevamente desde tu enlace de pago.</h1>", 402);
-    await settle(env, tenant, snapshot, captures);
-  }
-  if (tenant.thankYouUrl) return Response.redirect(tenant.thankYouUrl, 302);
-  return html(confirmationPage(tenant, snapshot));
-}
-
-export async function handlePayPalWebhook(request, env) {
-  const rawBody = await request.text();
-  let event;
-  try { event = JSON.parse(rawBody); } catch { return json({ error: "Bad JSON" }, 400); }
-  if (event.event_type !== "PAYMENT.CAPTURE.COMPLETED") return json({ ignored: event.event_type });
-
-  // Resolve booking via the capture's invoice_id / custom_id (bookingId-RENT / -DEP)
-  const inv = event.resource?.invoice_id || event.resource?.custom_id || "";
-  const bookingId = inv.replace(/-(RENT|DEP|ADJ)$/, "");
-  const snapshot = await findSnapshot(env, bookingId);
-  if (!snapshot) return json({ error: "Unknown booking" }, 404);
-  const tenant = await tenantFor(env, snapshot);
-  if (!tenant) return json({ error: "Unknown tenant" }, 404);
-
-  const verified = await verifyPayPalWebhook(tenant, env, request, rawBody);
-  if (!verified) return json({ error: "Signature verification failed" }, 401);
-
-  if (snapshot.type === "reschedule_adjustment") {
-    if (!snapshot.settled) {
-      const orderData = await capturePayPalOrder(tenant, env, snapshot.paypal.orderId);
-      const cap = extractSingleCapture(orderData);
-      if (cap) await settleRescheduleAdjustment(env, tenant, snapshot, cap);
-    }
-    return json({ ok: true });
-  }
-
-  if (!snapshot.settled) {
-    // Capture may have happened via return URL or webhook-first; fetch full order
-    const orderData = await capturePayPalOrder(tenant, env, snapshot.paypal.orderId);
-    const captures = extractPayPalCaptures(orderData, bookingId);
-    if (captures.RENT) await settle(env, tenant, snapshot, captures);
-  }
-  return json({ ok: true });
 }

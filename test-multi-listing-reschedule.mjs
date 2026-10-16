@@ -140,36 +140,59 @@ const reschedule = async (bookingId, newCheckIn, newCheckOut) => {
   console.log("4) A parent whose span would change is refused, naming the listings to target instead");
 }
 
-// ---- 5. one leg can still be changed, by its own id ------------------
-// This is the supported way to extend a single listing, and it already worked.
+// ---- 5. one leg cannot be repriced on its own ----------------------
+// This asserted that extending a single listing "already worked": six nights
+// became eight and the leg repriced at its own nightly rate.
+//
+// It worked by raising a separate PayPal order for that leg -- which on an
+// enrich account meant a second way to pay, beside the one invoice the guest
+// already holds for the whole reservation. The checkout went on 2026-10-16 and
+// the honest answer came with it: the invoice covers every listing, and
+// updateInvoiceForReschedule reprices a single stay line, so one leg's new
+// total cannot be written into it safely.
+//
+// Refused, and the refusal says what to do instead. A pure shift of the whole
+// reservation still works (tests 1-3) because it changes no money at all.
 {
   await seed();
   const secondId = childBookingId(BOOKING, 1);
+  const before = JSON.parse(store.get(secondId));
   const out = await reschedule(secondId, "2026-11-05", "2026-11-13");
-  assert.strictEqual(out.status, 200, JSON.stringify(out.body));
 
-  const b = JSON.parse(store.get(secondId));
-  assert.strictEqual(b.stay.nights, 8, "six nights became eight");
-  assert.strictEqual(b.charges.rentTotal, 880, "and it is repriced at its own nightly rate");
-  console.log("5) A single leg is rescheduled by its own booking id, and reprices normally");
+  assert.strictEqual(out.status, 422, JSON.stringify(out.body));
+  assert.match(out.body.error, /cannot be repriced on its own/);
+  assert.strictEqual(out.body.parentBookingId, BOOKING, "and it names the reservation to move instead");
+
+  const after = JSON.parse(store.get(secondId));
+  assert.strictEqual(after.stay.nights, before.stay.nights, "the leg is left exactly as it was");
+  assert.strictEqual(after.charges.rentTotal, before.charges.rentTotal, "and so is its money");
+  console.log("5) One leg of a bundle cannot be repriced alone, and nothing moves when it is refused");
 }
 
-// ---- 6. and the reservation notices ---------------------------------
-// The gap this closes. Before, the parent kept the span and the money of a trip
-// that no longer existed -- the same drift #61 closed against the Transaction
-// record and #64 against the invoice.
+// ---- 6. a refused leg change leaves the reservation alone -----------
+// This used to assert the parent noticing a leg that CHANGED LENGTH: the span
+// and totals rebuilt from the children afterwards, closing the drift where a
+// reservation kept the shape of a trip that no longer existed.
+//
+// That change is refused now (test 5), so the property worth holding is the
+// other half of the same concern: a refusal must not half-apply. The parent
+// keeps the span and money it had, rather than being rebuilt from children
+// that were never moved.
+//
+// The parent IS still rebuilt on a shift -- test 3 holds that.
 {
   await seed();
   const parentBefore = JSON.parse(store.get(BOOKING));
   assert.strictEqual(parentBefore.stayRange.checkOut, "2026-11-11");
   assert.strictEqual(parentBefore.charges.rentTotal, 1065);
 
-  await reschedule(childBookingId(BOOKING, 1), "2026-11-05", "2026-11-13");
+  const out = await reschedule(childBookingId(BOOKING, 1), "2026-11-05", "2026-11-13");
+  assert.strictEqual(out.status, 422, "the leg change is refused");
 
   const parentAfter = JSON.parse(store.get(BOOKING));
-  assert.strictEqual(parentAfter.stayRange.checkOut, "2026-11-13", "the reservation now ends when the trip does");
-  assert.strictEqual(parentAfter.charges.rentTotal, 1285, "405 + 880");
-  console.log("6) Changing one leg updates the reservation's span and totals");
+  assert.strictEqual(parentAfter.stayRange.checkOut, "2026-11-11", "the reservation is untouched");
+  assert.strictEqual(parentAfter.charges.rentTotal, 1065, "and so is its money");
+  console.log("6) A refused leg change leaves the reservation exactly as it was");
 }
 
 // ---- 7. a no-op move is rejected rather than run ---------------------
@@ -195,4 +218,4 @@ const reschedule = async (bookingId, newCheckIn, newCheckOut) => {
   console.log("8) A listing that fails is named, and the others still move");
 }
 
-console.log("\nPASS — a bundled reservation moves as a whole or not at all, one leg moves on its own, and the reservation follows either way.");
+console.log("\nPASS — a bundled reservation moves as a whole or not at all, a leg cannot be repriced alone, and a refusal leaves everything where it was.");

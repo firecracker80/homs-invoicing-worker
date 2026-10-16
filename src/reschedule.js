@@ -10,7 +10,6 @@
 
 import { calcSecurityDeposit, round2 } from "./deposit-engine.js";
 import { depositConfigFor, processingFeePctFor } from "./policy.js";
-import { createOrder, getAccessToken } from "./paypal.js";
 import { writeAndSyncRows, bookingTotalOf } from "./ledger.js";
 import { updateObjectRecord } from "./ghl.js";
 import { adminAuthorized, notifyAndRecord, cancellationTier, MANUAL_REFUND_REF, MANUAL_SUFFIX } from "./cancellation.js";
@@ -31,25 +30,6 @@ function resolveTransactionId(snapshot) {
 
 const json = (data, status = 200) =>
   new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json" } });
-
-async function refundPayPalPartial(tenant, env, captureId, amount, note) {
-  const token = await getAccessToken(tenant, env);
-  const res = await fetch(`${tenant.paypalApi}/v2/payments/captures/${captureId}/refund`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${token}`,
-      "PayPal-Request-Id": `reschedule-refund-${captureId}-${amount.toFixed(2)}`
-    },
-    body: JSON.stringify({
-      amount: { value: amount.toFixed(2), currency_code: tenant.currency || "USD" },
-      note_to_payer: note
-    })
-  });
-  const data = await res.json();
-  if (!res.ok) throw new Error(`PayPal refund failed: ${res.status} ${JSON.stringify(data)}`);
-  return data.id;
-}
 
 // GHL renders unresolved merge tags three ways depending on context:
 // literal "{{tag}}", empty string, or the literal STRING "null".
@@ -314,10 +294,69 @@ export async function handleReschedule(request, env) {
   // or refund -- just re-price the new dates and issue a fresh payment link
   // for the full new total. The old (unpaid) link is left to expire on its own.
   if (!snapshot.settled) {
-    const cur0 = tenant.currency || "USD";
     const feePct0 = processingFeePctFor(tenant, snapshot);
     const newProcessingFee = round2(feePct0 * (newRent + snapshot.charges.cleaningFee + newDeposit));
-    const newGrandTotal = round2(newRent + snapshot.charges.cleaningFee + newProcessingFee + newDeposit);
+
+    // A move that changes no money needs no invoice and no repricing: the
+    // dates shift and every figure stays where it was. This is the whole of a
+    // bundled reschedule -- those are pure shifts by construction, the span is
+    // refused if it changes -- and a child of one never carries an invoice
+    // anyway, because the reservation-level facts live on the parent
+    // (multi-listing.js: "the children are stays, not sales").
+    //
+    // Checked before the invoice is required, or a bundled shift is refused for
+    // lacking something it has no reason to have.
+    // Compared as numbers with a zero default: an account with no deposit
+    // leaves securityDeposit.total undefined, and undefined === 0 is false, so
+    // a strict comparison refuses a shift that changes nothing.
+    const moneyUnchanged = round2(newRent) === round2(snapshot.charges.rentTotal ?? 0)
+      && round2(newDeposit) === round2(snapshot.securityDeposit?.total ?? 0);
+    if (moneyUnchanged) {
+      const oldStayS = { ...snapshot.stay };
+      snapshot.stay = { ...snapshot.stay, checkIn: newCheckIn, checkOut: newCheckOut, nights: newNights };
+      snapshot.reschedules = [...(snapshot.reschedules || []), {
+        at: new Date().toISOString(), from: oldStayS,
+        to: { checkIn: newCheckIn, checkOut: newCheckOut, nights: newNights },
+        unpaid: true, unchangedTotals: true, reason: body.reason || ""
+      }];
+      await env.BOOKINGS.put(snapshot.bookingId, JSON.stringify(snapshot));
+
+      if (snapshot.parentBookingId) {
+        const parentS = await env.BOOKINGS.get(snapshot.parentBookingId, { type: "json" });
+        if (parentS && parentS.childBookingIds) await refreshParentFromChildren(env, parentS);
+      }
+
+      const calendarS = await updateGhlBookingDates(env, tenant, snapshot, newCheckIn, newCheckOut);
+
+      await notifyAndRecord(env, snapshot, tenant.ghlRescheduleUrl, rescheduleNotifyPayload({
+        bookingId: snapshot.bookingId,
+        contactId: snapshot.ghlContactId,
+        email: snapshot.guest?.email,
+        guestName: snapshot.guest?.name,
+        oldCheckIn: oldStayS.checkIn, oldCheckOut: oldStayS.checkOut,
+        newCheckIn, newCheckOut, newNights,
+        rentTotal: newRent,
+        depositTotal: newDeposit,
+        processingFee: snapshot.charges.processingFee ?? 0,
+        totalDelta: 0,
+        settlementType: "unpaid_dates_moved",
+        approveUrl: "",
+        balanceDue: null,
+        invoiceNumber: "",
+        adminFeeRetained: 0,
+        cancellationTier: "",
+        propertyName: snapshot.propertyCode || tenant.brandName,
+        calendarUpdateRequired: !calendarS.ok
+      }));
+
+      return json({
+        bookingId: snapshot.bookingId,
+        oldDates: oldStayS,
+        newDates: { checkIn: newCheckIn, checkOut: newCheckOut, nights: newNights },
+        settlement: { type: "unpaid_dates_moved", amount: 0 },
+        calendarUpdateRequired: !calendarS.ok, calendar: calendarS
+      });
+    }
 
     // An unpaid booking on the GHL-invoice path already has an invoice the
     // guest is looking at. Reprice THAT, rather than issuing a second way to
@@ -415,104 +454,38 @@ export async function handleReschedule(request, env) {
       });
     }
 
-    const purchaseUnits = [{
-      reference_id: `${snapshot.bookingId}-RENT`,
-      invoice_id: `${snapshot.bookingId}-RENT`,
-      amount: {
-        currency_code: cur0,
-        value: round2(newRent + snapshot.charges.cleaningFee + newProcessingFee).toFixed(2),
-        breakdown: { item_total: { currency_code: cur0, value: round2(newRent + snapshot.charges.cleaningFee + newProcessingFee).toFixed(2) } }
-      },
-      items: [
-        { name: `Estadía — ${newNights} noche${newNights === 1 ? "" : "s"}`, quantity: String(newNights),
-          unit_amount: { currency_code: cur0, value: rate.toFixed(2) } },
-        ...(snapshot.charges.cleaningFee > 0 ? [{ name: "Tarifa de limpieza", quantity: "1",
-          unit_amount: { currency_code: cur0, value: snapshot.charges.cleaningFee.toFixed(2) } }] : []),
-        { name: "Tarifa de procesamiento de pago", quantity: "1",
-          unit_amount: { currency_code: cur0, value: newProcessingFee.toFixed(2) } }
-      ]
-    }];
-    if (newDeposit > 0) purchaseUnits.push({
-      reference_id: `${snapshot.bookingId}-DEP`,
-      invoice_id: `${snapshot.bookingId}-DEP`,
-      amount: { currency_code: cur0, value: newDeposit.toFixed(2),
-        breakdown: { item_total: { currency_code: cur0, value: newDeposit.toFixed(2) } } },
-      items: newDepositCalc.blocks.map(b => ({
-        name: newDepositCalc.blocks.length > 1
-          ? `Depósito de seguridad (reembolsable) — bloque ${b.block}`
-          : "Depósito de seguridad (reembolsable)",
-        quantity: "1", unit_amount: { currency_code: cur0, value: b.amount.toFixed(2) }
-      }))
-    });
-
-    // A second createOrder/createCheckoutSession call against the SAME
-    // bookingId needs its own idempotency key -- reusing the bare bookingId
-    // would collide with the original (still-open) unpaid order/session and
-    // either return stale pricing or get rejected outright for a body
-    // mismatch under the same key.
-    const repriceKey = `${snapshot.bookingId}-RESCHED-${Date.now()}`;
-    // PayPal only since 2026-10-15; the Stripe branch was removed unused.
-    const { orderId: repriceOrderId, approveUrl } =
-      await createOrder(tenant, env, snapshot.bookingId, purchaseUnits, env.WORKER_URL, repriceKey);
-    const gatewayRef = repriceOrderId;
-
-    const oldStay0 = { ...snapshot.stay };
-    snapshot.stay = { ...snapshot.stay, checkIn: newCheckIn, checkOut: newCheckOut, nights: newNights };
-    snapshot.charges.rentTotal = newRent;
-    snapshot.charges.processingFee = newProcessingFee;
-    snapshot.charges.grandTotal = newGrandTotal;
-    snapshot.securityDeposit.total = newDeposit;
-    snapshot.securityDeposit.blocks = newDepositCalc.blocks;
-    snapshot.paypal = { orderId: gatewayRef, approveUrl };
-    snapshot.reschedules = [...(snapshot.reschedules || []), {
-      at: new Date().toISOString(), from: oldStay0,
-      to: { checkIn: newCheckIn, checkOut: newCheckOut, nights: newNights },
-      unpaid: true, reason: body.reason || ""
-    }];
-    await env.BOOKINGS.put(snapshot.bookingId, JSON.stringify(snapshot));
-
-    // Same reason as on the paid path below: a listing that belongs to a bundled
-    // reservation has moved, so the reservation has to follow. It matters MORE
-    // here -- bundled bookings have no invoice or payment wired yet, so their
-    // children are all unsettled and every one of them takes this branch.
+    // A leg of a bundled reservation, changing length. The invoice lives on
+    // the parent and covers every listing on it, while
+    // updateInvoiceForReschedule reprices a single stay line -- so there is no
+    // honest way to reprice one leg of it here.
+    //
+    // The old code raised a separate PayPal order per child instead, which on
+    // an enrich account meant a second way to pay beside the reservation's own
+    // invoice. Refusing is not a regression on that; it is the same gap, said
+    // out loud.
     if (snapshot.parentBookingId) {
-      const parent0 = await env.BOOKINGS.get(snapshot.parentBookingId, { type: "json" });
-      if (parent0 && parent0.childBookingIds) await refreshParentFromChildren(env, parent0);
+      console.error(`Reschedule refused for ${snapshot.bookingId}: a bundled leg cannot be repriced on its own`);
+      return json({
+        error: "A listing on a bundled reservation cannot be repriced on its own",
+        detail: "The guest pays one invoice for the whole reservation, so changing one leg's length changes a total this endpoint cannot safely rewrite. Move the whole reservation by its own id, or adjust the invoice by hand.",
+        bookingId: snapshot.bookingId,
+        parentBookingId: snapshot.parentBookingId,
+      }, 422);
     }
 
-    // No Transaction record exists yet for an unpaid booking, and no money
-    // moved -- nothing to write to D1 or GHL here.
-
-    const calendar0 = await updateGhlBookingDates(env, tenant, snapshot, newCheckIn, newCheckOut);
-
-    await notifyAndRecord(env, snapshot, tenant.ghlRescheduleUrl, rescheduleNotifyPayload({
-      bookingId: snapshot.bookingId,
-      contactId: snapshot.ghlContactId,
-      email: snapshot.guest?.email,
-      guestName: snapshot.guest?.name,
-      oldCheckIn: oldStay0.checkIn, oldCheckOut: oldStay0.checkOut,
-      newCheckIn, newCheckOut, newNights,
-      rentTotal: newRent,
-      depositTotal: newDeposit,
-      processingFee: newProcessingFee,
-      totalDelta: newGrandTotal,
-      settlementType: "unpaid_new_link",
-      approveUrl,
-      // No invoice and no money moved yet, so there is nothing owed either way.
-      balanceDue: null, invoiceNumber: "",
-      adminFeeRetained: 0,
-      cancellationTier: "",
-      propertyName: snapshot.propertyCode || tenant.brandName,
-      calendarUpdateRequired: !calendar0.ok
-    }));
-
+    // No invoice on an unpaid booking means its enrich failed -- the branch
+    // above handles every booking that has one. There is nothing to reprice
+    // and, since the Worker's own checkout was retired on 2026-10-16, no
+    // other way to ask the guest for money. Refuse rather than move the dates
+    // and leave the charge unreconciled.
+    console.error(`Reschedule refused for ${snapshot.bookingId}: unpaid booking has no GHL invoice`);
     return json({
+      error: "This booking has no invoice to reprice",
+      detail: snapshot.enrichFailed
+        ? "Its invoice was never created: " + (snapshot.enrichFailed.error || "enrich failed")
+        : "An unpaid booking is rescheduled by repricing the invoice the guest already holds.",
       bookingId: snapshot.bookingId,
-      oldDates: oldStay0,
-      newDates: { checkIn: newCheckIn, checkOut: newCheckOut, nights: newNights },
-      settlement: { type: "unpaid_new_link", approveUrl, grandTotal: newGrandTotal },
-      calendarUpdateRequired: !calendar0.ok, calendar: calendar0
-    });
+    }, 409);
   }
 
   const rentDelta = round2(newRent - oldRent);
@@ -609,42 +582,25 @@ export async function handleReschedule(request, env) {
     const settleVia = snapshot.gateway || tenant.gateway || "paypal";
     const rescheduleInvoiceId = snapshot.ghlInvoice?.invoiceId;
 
-    let approveUrl, gatewayRef;
     if (settleVia === "ghl_invoice" && rescheduleInvoiceId) {
       // Nothing to create: the guest already has an invoice. It is repriced
       // further down, once the snapshot carries the new totals, and GHL turns
       // the difference into a balance due on the link they already hold.
       settlement = { type: "invoice_balance_due", amount: chargeAmount, invoiceId: rescheduleInvoiceId };
     } else {
-      const { orderId, approveUrl: url } = await createOrder(tenant, env, childId, purchaseUnits, env.WORKER_URL);
-      approveUrl = url;
-      gatewayRef = orderId;
+      // No invoice on this reservation, and no checkout since 2026-10-16. The
+      // adjustment is recorded as owed rather than silently dropped or charged
+      // through a route that no longer exists.
+      settlement = { type: "additional_charge_needed_manual", amount: chargeAmount, childId };
     }
 
-    // Only the gateway paths raise a separate charge to be settled later. The
-    // invoice path has already decided what it is doing and has no child order
-    // to track -- writing one would leave an adjustment nobody can ever settle.
-    if (settlement.type !== "invoice_balance_due") {
-    settlement = { type: "additional_charge_pending", amount: chargeAmount, approveUrl, gatewayRef, childId };
-
-    // Store a lightweight snapshot so /paypal/return or the webhook can find
-    // and settle THIS delta-charge order when the guest pays it. Without this,
-    // the payment vanishes: real money, zero record.
-    await env.BOOKINGS.put(childId, JSON.stringify({
-      type: "reschedule_adjustment",
-      bookingId: childId,
-      parentBookingId: snapshot.bookingId,
-      locationId: snapshot.locationId,
-      gateway: "paypal",
-      paypal: { orderId: gatewayRef, approveUrl },
-      amount: chargeAmount,
-      rentDelta: netRentDelta, depositDelta, deltaFee,
-      guest: snapshot.guest,
-      ghlContactId: snapshot.ghlContactId,
-      propertyCode: snapshot.propertyCode,
-      settled: false
-    }));
-    }
+    // A child "reschedule_adjustment" snapshot used to be written here, so
+    // /paypal/return could find and settle the delta-charge order when the
+    // guest paid it. There is no such order since 2026-10-16: an extra charge
+    // is either a balance on the guest's existing invoice, or it is recorded
+    // as owed for somebody to collect. Writing a child order nothing can ever
+    // settle would leave an adjustment stranded, which is the failure the old
+    // comment here was guarding against.
 
   } else if (totalDelta < 0) {
     // Refund rent-portion and deposit-portion SEPARATELY, against the capture
@@ -661,46 +617,21 @@ export async function handleReschedule(request, env) {
     const depCaptureId = snapshot.captures?.DEP?.captureId;
     const parts = [];
 
+    // Worked out and recorded, never issued -- see the note on refunds in
+    // cancellation.js. Shortening a paid stay owes the guest money, and this is
+    // how a person finds out there is a payment to make.
     if (rentRefundAmt > 0) {
-      if (!rentCaptureId) {
-        parts.push({ type: "rent_refund_needed_manual", amount: rentRefundAmt });
-      } else {
-        try {
-          const feeNote = cancellationInfo?.adminFee > 0
-            ? ` (admin fee $${cancellationInfo.adminFee.toFixed(2)} retained, tier ${cancellationInfo.tier})`
-            : "";
-          const refundId = await refundPayPalPartial(
-            tenant, env, rentCaptureId, rentRefundAmt,
-            `Reschedule ${snapshot.bookingId}: ajuste de tarifa por cambio de fechas${feeNote}`
-          );
-          parts.push({ type: "rent_refund_issued", amount: rentRefundAmt, refundId });
-        } catch (err) {
-          console.error(`Reschedule rent refund failed for ${snapshot.bookingId}: ${err.message}`);
-          parts.push({ type: "rent_refund_failed", amount: rentRefundAmt, error: err.message });
-        }
-      }
+      parts.push({ type: "rent_refund_needed_manual", amount: rentRefundAmt });
     }
 
     if (depositRefundAmt > 0) {
-      if (!depCaptureId) {
-        parts.push({ type: "deposit_refund_needed_manual", amount: depositRefundAmt });
-      } else {
-        try {
-          const refundId = await refundPayPalPartial(
-            tenant, env, depCaptureId, depositRefundAmt,
-            `Reschedule ${snapshot.bookingId}: ajuste de depósito por cambio de fechas`
-          );
-          parts.push({ type: "deposit_refund_issued", amount: depositRefundAmt, refundId });
-        } catch (err) {
-          console.error(`Reschedule deposit refund failed for ${snapshot.bookingId}: ${err.message}`);
-          parts.push({ type: "deposit_refund_failed", amount: depositRefundAmt, error: err.message });
-        }
-      }
+      parts.push({ type: "deposit_refund_needed_manual", amount: depositRefundAmt });
     }
 
-    const anyFailed = parts.some(p => p.type.includes("failed") || p.type.includes("manual"));
+    // Every part is manual now -- nothing is issued, so there is no "issued"
+    // outcome left to distinguish.
     settlement = {
-      type: anyFailed ? "refund_partial_manual" : "refund_issued",
+      type: "refund_partial_manual",
       amount: round2(rentRefundAmt + depositRefundAmt),
       parts
     };

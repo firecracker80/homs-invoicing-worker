@@ -21,7 +21,6 @@
 //   nights, charged at the same rate a full cancellation would be at that
 //   notice period.
 
-import { getAccessToken } from "./paypal.js";
 import { isMultiListingParent } from "./multi-listing.js";
 import { voidInvoice } from "./ghl-invoice.js";
 import { earnedAddOns } from "./ledger.js";
@@ -180,32 +179,17 @@ export function calcCancellation(snapshot, nowMs, tenant, override) {
   };
 }
 
-// ---- gateway refunds ----
-async function refundPayPalCapture(tenant, env, captureId, amount, note) {
-  const token = await getAccessToken(tenant, env);
-  const body = amount != null
-    ? { amount: { value: amount.toFixed(2), currency_code: tenant.currency || "USD" }, note_to_payer: note }
-    : { note_to_payer: note }; // omit amount = full refund
-  const res = await fetch(`${tenant.paypalApi}/v2/payments/captures/${captureId}/refund`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${token}`,
-      "PayPal-Request-Id": `refund-${captureId}-${amount ?? "full"}`
-    },
-    body: JSON.stringify(body)
-  });
-  const data = await res.json();
-  if (!res.ok) throw new Error(`PayPal refund failed for ${captureId}: ${res.status} ${JSON.stringify(data)}`);
-  return data.id; // refund id
-}
-
-// Only PayPal reaches here. A Stripe branch existed until 2026-10-15 and was
-// removed unused: no snapshot has ever carried a Worker-issued Stripe session,
-// so gatewayRefund has only ever taken this path.
-async function gatewayRefund(tenant, env, snapshot, captureId, amount, note) {
-  return refundPayPalCapture(tenant, env, captureId, amount, note);
-}
+// ---- refunds ----
+//
+// The Worker issues none. It works out what is owed and records it; a person
+// pays it. That has been the behaviour on every live account since they all
+// moved to enrich -- a GHL-invoice booking has no capture of ours to refund
+// against -- and the PayPal refund calls were removed on 2026-10-16 once the
+// last path that could reach them went with the checkout.
+//
+// MANUAL_REFUND_REF on a ledger row is the greppable list of what somebody
+// still owes a guest, and manualRefundRequired on the notification is how they
+// find out. Neither is new; they are simply the only route now.
 
 // ---- shared helpers ----
 async function loadContext(request, env) {
@@ -648,30 +632,11 @@ export async function handleCancel(request, env, { notify = true, voidInvoice: s
   const refundFailures = [];
 
   if (calc.rentUnitRefund > 0) {
-    if (!rentCaptureId) {
-      manualRefunds.push({ type: "rent_refund_needed_manual", amount: calc.rentUnitRefund });
-    } else {
-      try {
-        refundIds.rent = await gatewayRefund(tenant, env, snapshot, rentCaptureId, calc.rentUnitRefund, note);
-      } catch (err) {
-        console.error(`Cancel rent refund failed for ${snapshot.bookingId}: ${err.message}`);
-        refundFailures.push({ type: "rent_refund_failed", amount: calc.rentUnitRefund, error: err.message });
-      }
-    }
+    manualRefunds.push({ type: "rent_refund_needed_manual", amount: calc.rentUnitRefund });
   }
 
   if (calc.depositRefund > 0) {
-    if (!depCaptureId) {
-      manualRefunds.push({ type: "deposit_refund_needed_manual", amount: calc.depositRefund });
-    } else {
-      try {
-        refundIds.deposit = await gatewayRefund(tenant, env, snapshot, depCaptureId,
-          null, note); // PayPal DEP unit refunds in full; null means "the whole capture"
-      } catch (err) {
-        console.error(`Cancel deposit refund failed for ${snapshot.bookingId}: ${err.message}`);
-        refundFailures.push({ type: "deposit_refund_failed", amount: calc.depositRefund, error: err.message });
-      }
-    }
+    manualRefunds.push({ type: "deposit_refund_needed_manual", amount: calc.depositRefund });
   } // PayPal DEP = full refund
 
   // ---- snapshot ----
@@ -858,19 +823,11 @@ export async function handleDepositRefund(request, env) {
   // So the refund is computed and recorded either way. Where there IS a capture
   // (legacy checkout bookings) it is still issued automatically; where there is
   // not, it is marked for a person to pay, exactly as a cancellation does.
-  const captureId = snapshot.captures?.DEP?.captureId || dep.paypalCaptureId;
-  const note = `Devolución de depósito ${snapshot.bookingId}` + (claim > 0 ? ` (menos $${claim.toFixed(2)} por daños)` : "");
-
-  let refundId = null;
-  let manualRefund = false;
-  if (refundAmount > 0) {
-    if (!captureId) {
-      manualRefund = true;
-    } else {
-      refundId = await gatewayRefund(tenant, env, snapshot, captureId,
-        claim > 0 ? refundAmount : null, note);
-    }
-  }
+  // Always recorded, never issued. The capture branch went with the PayPal
+  // checkout on 2026-10-16; before that this endpoint required a capture id and
+  // returned 500 without one, which is every GHL-invoice booking.
+  const refundId = null;
+  const manualRefund = refundAmount > 0;
 
   const status = claim === 0 ? "refunded" : (refundAmount > 0 ? "partial" : "claimed");
   snapshot.securityDeposit.status = status;

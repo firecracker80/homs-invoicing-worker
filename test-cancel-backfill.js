@@ -194,11 +194,16 @@ const reset = async (snap = paidSnapshot(), withSettlement = false) => {
   console.log("5) $173 owed to the guest is recorded on the booking and sent to GHL, not dropped");
 }
 
-// ---- 5b. a refund that was attempted and refused is a failure --------------
-// The other side of the split. Same shape of entry, opposite meaning: here a
-// capture existed, an automated refund was tried, and the gateway said no.
-// Nobody has been told to go and do it by hand, and nobody will unless this
-// reads as the fault it is.
+// ---- 5b. a leftover capture does not exempt a booking from a manual refund ----
+// This used to assert the other side of a split that no longer exists: a
+// capture present, an automated refund attempted, and the gateway refusing --
+// recorded as a FAILURE rather than mixed in with the manual ones.
+//
+// The Worker issues no refunds since 2026-10-16, so nothing can be attempted
+// and nothing can refuse. refundFailures can only be empty now. What still
+// matters is the inverse: a booking carrying a capture id from the retired
+// checkout must not be quietly skipped on the assumption something automated
+// will handle it.
 {
   const withCapture = {
     ...paidSnapshot(),
@@ -206,27 +211,18 @@ const reset = async (snap = paidSnapshot(), withSettlement = false) => {
     captures: { RENT: { gross: 212, captureId: "3AB12345CD678901E", source: "paypal" } },
   };
   await reset(withCapture);
-  // The gateway refuses, the way a real one does: a 4xx, not a thrown socket.
-  const realFetch = globalThis.fetch;
-  globalThis.fetch = async (url, opts = {}) => {
-    if (String(url).includes("/refund")) {
-      const payload = { name: "CAPTURE_FULLY_REFUNDED", message: "capture already refunded" };
-      return { ok: false, status: 422, text: async () => JSON.stringify(payload), json: async () => payload };
-    }
-    return realFetch(url, opts);
-  };
-  const out = await post({ asOf: "2026-09-21T12:47:00Z", reason: "Gateway refuses the refund" });
-  globalThis.fetch = realFetch;
+  const out = await post({ asOf: "2026-09-21T12:47:00Z", reason: "Legacy capture on the booking" });
 
   const snap = JSON.parse(store.get(BOOKING));
-  assert.deepStrictEqual(snap.cancellation.manualRefunds, [],
-    "nothing here is waiting on a person -- the system tried and failed, which is different");
-  const failed = snap.cancellation.refundFailures;
-  assert.equal(failed.length, 1, "the refusal is recorded: " + JSON.stringify(failed));
-  assert.equal(failed[0].type, "rent_refund_failed");
-  assert.match(failed[0].error, /already refunded/, "carrying what the gateway actually said, so it can be acted on");
-  assert.equal(out.body.cancelled, true, "and the cancellation still stands -- the booking is cancelled either way");
-  console.log("5b) A refund the gateway refused is a failure, and is not mixed in with the manual ones");
+  assert.deepStrictEqual(snap.cancellation.refundFailures, [],
+    "nothing is attempted, so nothing can fail");
+  const manual = snap.cancellation.manualRefunds;
+  assert.ok(manual.length > 0,
+    "the refund is owed whoever pays it -- a capture id must not make it disappear");
+  assert.ok(manual.some((m) => m.type === "rent_refund_needed_manual"),
+    "and it is the rent refund, named as a task: " + JSON.stringify(manual));
+  assert.equal(out.body.cancelled, true, "and the cancellation still stands");
+  console.log("5b) A leftover capture does not exempt a booking from the refund it owes");
 }
 
 // ---- 5c. the deposit takes the same route as the rent ---------------------

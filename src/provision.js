@@ -23,7 +23,8 @@
 // out of GHL -- a plaintext credential in Custom Values is readable by every
 // sub-account user and every read-scoped token. Put the secret in a Worker
 // secret (wrangler secret put PAYPAL_SECRET_<X>) and pass its NAME as
-// &paypalSecretName=; paypal.js already resolves tenant.paypalSecretName.
+// &paypalSecretName=. Retained on the tenant record for reference; nothing
+// reads it since the Worker's own checkout was retired on 2026-10-16.
 //
 // fieldKey format, verified live 2026-09-11 against DEMO-HOMS and Luminara
 // (all 19 values on both): GHL returns the merge-tag form,

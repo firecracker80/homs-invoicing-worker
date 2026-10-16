@@ -171,8 +171,15 @@ const reschedule = async (newCheckOut, { snapshot = paidSnapshot(), invoice } = 
   console.log("5) The settlement records the status and balance GHL itself computed");
 }
 
-// ---- 6. a booking that really did pay by gateway is untouched --------
-// The fix must not send every tenant down the invoice path.
+// ---- 6. a booking with no invoice records the charge as owed --------------
+// This asserted that a booking settled by gateway, with no GHL invoice, still
+// got a PayPal order raised for the extra charge. There is no checkout since
+// 2026-10-16, so there is nothing to raise.
+//
+// The charge does not vanish with it: a legacy booking that owes more after a
+// reschedule is recorded as owing it, for somebody to collect. Silently
+// dropping it would be a guest who moved their dates and was never billed the
+// difference.
 {
   const viaPaypal = paidSnapshot({
     gateway: "paypal",
@@ -181,11 +188,13 @@ const reschedule = async (newCheckOut, { snapshot = paidSnapshot(), invoice } = 
   });
   const out = await reschedule("2026-10-22", { snapshot: viaPaypal });
   assert.strictEqual(out.status, 200, JSON.stringify(out.body));
-  assert.deepStrictEqual(invoicePuts, [], "no invoice is touched");
-  assert.ok(gatewayCalls.length > 0, "and the PayPal order is still raised, as it always was");
+  assert.deepStrictEqual(invoicePuts, [], "no invoice to touch");
+  assert.deepStrictEqual(gatewayCalls, [], "and no gateway left to raise a charge with");
   const resched = JSON.parse(store.get(BOOKING)).reschedules.at(-1);
-  assert.strictEqual(resched.settlement.type, "additional_charge_pending");
-  console.log("6) A booking actually settled by gateway still gets a gateway charge");
+  assert.strictEqual(resched.settlement.type, "additional_charge_needed_manual",
+    "the money owed is recorded, not dropped");
+  assert.ok(resched.settlement.amount > 0, "with the amount on it: " + JSON.stringify(resched.settlement));
+  console.log("6) A booking with no invoice records what it owes rather than charging it");
 }
 
 // ---- 7. a reprice that fails does not undo the reschedule -----------

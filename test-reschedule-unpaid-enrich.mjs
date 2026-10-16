@@ -1,6 +1,13 @@
 // Rescheduling an UNPAID booking on the GHL-invoice path reprices that invoice.
 // Run: node test-reschedule-unpaid-enrich.mjs
 //
+// Replaces test-reschedule-unpaid.js, deleted 2026-10-16. That file guarded the
+// same path when it issued a fresh PayPal link, and specifically the
+// idempotency collision found on merge: a second createOrder against the same
+// bookingId needed a DISTINCT PayPal-Request-Id, or PayPal returned the stale
+// original order. There is no order and no key to collide now -- the guest's
+// existing invoice is repriced in place, which is idempotent by construction.
+//
 // It did not, until 2026-10-15. The settled path checked
 // `settleVia === "ghl_invoice"` and repriced; the unpaid path checked nothing
 // and called createOrder unconditionally. Every live account is on the invoice
