@@ -743,15 +743,36 @@ export async function handleCancel(request, env, { notify = true, voidInvoice: s
     if (transactionId) {
       const pit = resolveSecret(tenant, env, "ghlPitSecretName", "ghlPit");
 
-      // Two different facts, written into one field until now. The booking is
-      // cancelled either way; whether money went back is separate, and a guest
-      // charged 100% under a late-cancellation tier has been refunded nothing.
+      // The booking is cancelled. Whether money went back is a separate fact,
+      // and this path no longer claims it.
       //
-      // rentUnitRefund rather than totalRefund: the latter includes the
-      // security deposit, which is the guest's own money and was never booking
-      // revenue. Returning it does not make the booking refunded.
+      // It used to write payment_status "refunded" whenever the tier left
+      // anything to refund. So the live Villa Azul cancellation of 2026-10-16
+      // read "Refunded" in the CRM while 935 still sat with the account and
+      // the manager had not paid a cent of it. On the enrich gateway -- every
+      // live account -- there is no capture to refund against, so a refund is
+      // owed rather than made, and refundIds has been permanently empty since
+      // the PayPal refund calls went on 2026-10-16. The field announced a
+      // refund that by design never happens here.
+      //
+      // So nothing is written: the record keeps payment_status "paid", which
+      // is true. The guest paid, the booking is cancelled, and what is owed
+      // back is carried by manualRefunds on the notification and by
+      // MANUAL_REFUND_REF on the ledger rows -- both of which name an amount,
+      // where this field could only ever imply one.
+      //
+      // The same correction /deposit/refund already made, for the same reason
+      // (see the note further down this file): returning a deposit stopped
+      // writing "refunded" onto a stay that had been paid in full.
+      //
+      // The honest third value, "refund_pending", does not exist on the
+      // Transactions picklist -- its options are paid / pending / refunded /
+      // failed, and "pending" there means unpaid, so writing it would make a
+      // paid booking read as unpaid. Adding the option is a GHL schema change
+      // on each account, not a Worker one. Until it exists, a cancelled
+      // booking with money owed is "paid" + "cancelled", and the notification
+      // is what tells a person to move the money.
       const props = { booking_status: "cancelled" };
-      if (calc.rentUnitRefund > 0) props.payment_status = "refunded";
       if (pit) await updateObjectRecord(pit, snapshot.locationId, "custom_objects.transactions", transactionId, props);
     }
   } catch (err) {
