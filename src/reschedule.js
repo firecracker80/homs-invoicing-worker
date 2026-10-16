@@ -15,7 +15,7 @@ import { updateObjectRecord } from "./ghl.js";
 import { adminAuthorized, notifyAndRecord, cancellationTier, MANUAL_REFUND_REF, MANUAL_SUFFIX } from "./cancellation.js";
 import { paymentConfirmedPayload } from "./payment.js";
 import { updateGhlBookingDates } from "./ghl-calendar.js";
-import { updateInvoiceForReschedule } from "./ghl-invoice.js";
+import { updateInvoiceForReschedule, workerBillsDeposit } from "./ghl-invoice.js";
 import { isMultiListingParent } from "./multi-listing.js";
 
 function resolveSecret(tenant, env, nameKey, inlineKey) {
@@ -288,7 +288,15 @@ export async function handleReschedule(request, env) {
   const newDepositCalc = calcSecurityDeposit(
     newNights, rate, depositConfigFor(tenant), snapshot.charges.cleaningFee
   );
-  const newDeposit = newDepositCalc.totalDeposit;
+  // A GHL-native security deposit is not the Worker's to resize. GHL set it,
+  // GHL's invoice carries it, and the Worker's own engine is "disabled" on such
+  // a tenant -- so it returns 0, which would erase the recorded amount and
+  // make a pure date shift read as a price change (moneyUnchanged compares
+  // this against what the snapshot holds). Carried across instead.
+  const nativeDeposit = workerBillsDeposit(snapshot)
+    ? 0
+    : round2(snapshot.securityDeposit?.total || 0);
+  const newDeposit = nativeDeposit > 0 ? nativeDeposit : newDepositCalc.totalDeposit;
 
   // UNPAID booking: nothing was ever captured, so there's no delta to charge
   // or refund -- just re-price the new dates and issue a fresh payment link

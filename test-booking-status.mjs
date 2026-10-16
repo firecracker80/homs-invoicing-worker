@@ -115,17 +115,37 @@ const merged = () => Object.assign({}, ...txUpdates);
   console.log("2) A cancellation that refunded nothing does not claim a refund");
 }
 
-// ---- 3. and one that did refund says so -----------------------------
-// The other side of case 2, or "never write payment_status" would pass it.
-// Cancelled five days out on the legacy policy: 20% charged, 80% back.
+// ---- 3. and one that owes a refund does not claim to have paid it ---
+// Rewritten 2026-10-16. This used to assert the opposite: that a cancellation
+// with anything left to refund wrote payment_status "refunded". It does not
+// any more, and the case it was protecting turned out not to exist.
+//
+// "refunded" says the money went back. On the enrich gateway -- every live
+// account -- there is no capture of ours to refund against, so the Worker
+// works out what is owed and a person pays it. refundIds has been permanently
+// empty since the PayPal refund calls were removed on 2026-10-16, so there is
+// no path left on which a cancellation refunds anything itself.
+//
+// What it cost while it did write the word: the live Villa Azul cancellation
+// of 2026-10-16 read "Refunded" in the CRM with 935 still sitting in the
+// account and nothing paid back.
+//
+// Cancelled five days out: 20% charged, 80% owed. The owed amount still has
+// to reach somebody, so this asserts BOTH halves -- no false claim on the
+// record, and a named figure on the response. Dropping the write without the
+// second half would leave a cancellation that says nothing about the money at
+// all, which is how the first version of this field came to exist.
 {
-  await post("/cancel", { reason: "test" },
+  const out = await post("/cancel", { reason: "test" },
     snap({ stay: { checkIn: "2026-12-01", checkOut: "2026-12-08", nights: 7, nightlyRate: 80 } }));
   const p = merged();
   assert.strictEqual(p.booking_status, "cancelled");
-  assert.strictEqual(p.payment_status, "refunded",
-    "money did go back, so the payment status still has to say so");
-  console.log("3) A cancellation that did refund still records the refund");
+  assert.ok(!("payment_status" in p),
+    `the refund is owed, not made -- payment_status must be left at paid, got ${JSON.stringify(p.payment_status)}`);
+  const owed = (out.body.manualRefunds || []).find((m) => m.type === "rent_refund_needed_manual");
+  assert.ok(owed && owed.amount > 0,
+    `and the amount owed has to be named somewhere actionable, got ${JSON.stringify(out.body.manualRefunds)}`);
+  console.log(`3) A cancellation that owes ${owed.amount} says so, and does not claim it was refunded`);
 }
 
 // ---- 4. a returned security deposit is not a refunded booking -------

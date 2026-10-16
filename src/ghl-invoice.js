@@ -174,10 +174,53 @@ const LEGACY_LINES = ["Cargo por procesamiento / Processing fee"];
 // appended beside it, and the guest pays the processing fee twice.
 const OUR_LINES = new Set([DEPOSIT_LINE, FEE_LINE_ES, FEE_LINE_EN, ...LEGACY_LINES]);
 
+// Who bills the security deposit.
+//
+// Two different arrangements, and until 2026-10-16 the snapshot could not tell
+// them apart. A "tiered_legacy" tenant (Luminara) has the Worker size the
+// deposit and append DEPOSIT_LINE to the invoice. Every other tenant uses
+// GHL's own native Security Deposit, which is on the draft before the Worker
+// sees it -- so the deposit engine returns 0, securityDeposit.total was
+// written as 0, and the Worker recorded no deposit at all for a guest who had
+// paid one.
+//
+// What that cost, on the live Villa Azul cancellation of 2026-10-16: the guest
+// paid 1,754.30 including a 350 native deposit, and the cancellation accounted
+// for 1,404.30 of it -- 585 refunded, 819.30 retained. The 350 was in neither
+// column. It also marked securityDeposit "refunded" at 0, and /deposit/refund
+// answered "No deposit on this booking" to the form an account holder submits
+// to find out what is owed back.
+//
+// So the amount is now read off the invoice. No arithmetic above changes: a
+// native deposit line is already inside nativeSubtotal, so it was always in
+// the fee basis and the grand total. Only the record of it is new -- which is
+// what every later question about that money needs.
+export const DEPOSIT_WORKER = "worker";
+export const DEPOSIT_GHL_NATIVE = "ghl_native";
+
+// The deposit lines GHL itself put on the draft. Index 0 is the stay, by the
+// convention repriceFromInvoice reads it with, and is never a deposit however
+// a property happens to be named.
+export function nativeDepositTotal(nativeItems) {
+  return round2((nativeItems || []).slice(1)
+    .filter(isSecurityDeposit)
+    .reduce((s, i) => s + lineTotal(i), 0));
+}
+
+// True when the Worker is the one that bills the deposit, so it appends
+// DEPOSIT_LINE and counts the amount on top of the invoice's own subtotal.
+// False for a GHL-native deposit, where doing either bills it twice.
+export function workerBillsDeposit(snapshot) {
+  const dep = snapshot?.securityDeposit;
+  return (dep?.total || 0) > 0 && dep?.source !== DEPOSIT_GHL_NATIVE;
+}
+
 export function buildAppendItems(snapshot, tenant) {
   const cur = tenant.currency || "USD";
   const items = [];
-  if (snapshot.securityDeposit.total > 0)
+  // Only a deposit the Worker itself sized. A native one is already a line on
+  // the invoice; appending ours beside it charges the guest twice.
+  if (workerBillsDeposit(snapshot))
     items.push({ name: DEPOSIT_LINE, currency: cur, amount: round2(snapshot.securityDeposit.total), qty: 1 });
   if (snapshot.charges.processingFee > 0)
     items.push({ name: feeLineFor(tenant), currency: cur, amount: round2(snapshot.charges.processingFee), qty: 1 });
@@ -243,8 +286,19 @@ export function repriceFromInvoice(snapshot, tenant, nativeItems) {
   snapshot.charges.processingFee = processingFee;
   snapshot.charges.grandTotal = round2(nativeSubtotal + processingFee + deposit.totalDeposit);
   snapshot.charges.amountsSource = "ghl_invoice";
-  snapshot.securityDeposit.total = deposit.totalDeposit;
-  snapshot.securityDeposit.blocks = deposit.blocks;
+  // The Worker's own engine first -- it is the only one that produces blocks,
+  // and a tenant configured for it is not using GHL's native deposit. Where it
+  // returns nothing, whatever GHL billed IS the deposit.
+  if (deposit.totalDeposit > 0) {
+    snapshot.securityDeposit.total = deposit.totalDeposit;
+    snapshot.securityDeposit.blocks = deposit.blocks;
+    snapshot.securityDeposit.source = DEPOSIT_WORKER;
+  } else {
+    const nativeDeposit = nativeDepositTotal(nativeItems);
+    snapshot.securityDeposit.total = nativeDeposit;
+    snapshot.securityDeposit.blocks = [];
+    snapshot.securityDeposit.source = nativeDeposit > 0 ? DEPOSIT_GHL_NATIVE : null;
+  }
   if (snapshot.payout) {
     snapshot.payout.basis = basis;
     snapshot.payout.owner = round2(basis * snapshot.payout.ownerPct);
@@ -449,9 +503,17 @@ export function isPassThrough(item, tenant) {
   return PASS_THROUGH_PATTERNS.some((re) => re.test(name));
 }
 
+// One definition, read twice: a deposit is a pass-through (owed to nobody,
+// outside the commission basis) AND the amount the guest gets back. Those were
+// the same regex by coincidence until the second reader existed.
+export const DEPOSIT_NAME = /deposit|dep(ó|o)sito|garant(í|i)a/i;
+export function isSecurityDeposit(item) {
+  return DEPOSIT_NAME.test(String(item?.name ?? "").trim());
+}
+
 const PASS_THROUGH_PATTERNS = [
   /\btax|impuesto|itbis|\bitbi\b/i,
-  /deposit|dep(ó|o)sito|garant(í|i)a/i,
+  DEPOSIT_NAME,
   // "tarifa de servicio" is deliberately NOT here. The real line reads "Cargo
   // por procesamiento / Processing fee" and is caught by "procesamiento", and
   // the broader wording swallowed anything an account chose to call a service
@@ -626,7 +688,13 @@ export async function updateInvoiceForReschedule(
   const cur = tenant.currency || "USD";
   const nativeSubtotal = round2([newStayLine, ...otherNative]
     .reduce((s, i) => s + Number(i.amount || 0) * Number(i.qty || 1), 0));
-  const deposit = round2(snapshot.securityDeposit?.total || 0);
+  // Only a Worker-billed deposit counts on top of the invoice's own subtotal,
+  // and only a Worker-billed deposit gets a line. A GHL-native Security
+  // Deposit is already one of otherNative: adding it to the basis charges a
+  // fee on it twice, and appending DEPOSIT_LINE bills the deposit itself
+  // twice. Both would have started happening the moment the snapshot began
+  // recording a native deposit, so they are fixed in the same change.
+  const deposit = workerBillsDeposit(snapshot) ? round2(snapshot.securityDeposit.total) : 0;
   const feePct = processingFeePctFor(tenant, snapshot);
   const processingFee = round2(feePct * (nativeSubtotal + deposit));
 
