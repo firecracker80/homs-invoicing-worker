@@ -873,6 +873,95 @@ function managerPlHtml({ brandName, fromLabel, toLabel, allTime = false, pl, loc
 // with entityId/entitySourceType per transaction. Unlike invoices, this
 // endpoint's own schema lists locationId as the scoping param, not altId --
 // don't assume it needs altId too just because invoices did.
+// What the Worker said is owed, against what the payment processor says went
+// back. Added 2026-10-16.
+//
+// Every refund on every live account is issued by hand -- the Worker works out
+// the figure and a person pays it -- and until now nothing compared the two.
+// MANUAL_REFUND_REF marked the ledger rows as pending and no code path ever
+// cleared it, so the "what is owed" list could only grow: 12 bookings carried
+// the marker on 2026-10-16, including one already paid in full.
+//
+// The fix is not a route for a person to tick off. GHL already records the
+// truth on its own payment transaction -- status "partially_refunded" and
+// amountRefunded 935 on the Villa Azul invoice, matching the Worker's figure
+// to the cent (Yari, 2026-10-16) -- and this function already fetches those
+// transactions for the unmatched check. It was reading entityId and throwing
+// status and amountRefunded away.
+//
+// The state worth having is "mismatch". The cancellation notification for that
+// booking went out saying 585 before the deposit bug was fixed; the real figure
+// was 935. Anyone acting on the email would have left the guest 350 short, and
+// nothing in the system would have said so.
+async function reconcileRefunds(env, transactions, ledgerBookings) {
+  // Refunds per invoice, summed across that invoice's transactions. A failed
+  // attempt refunds nothing and must not be read as a zero-refund success --
+  // the Villa Azul invoice carries three transactions, two of them failed.
+  const byEntity = new Map();
+  for (const t of transactions) {
+    if (!t.entityId) continue;
+    if (String(t.status || "").toLowerCase() === "failed") continue;
+    const seen = byEntity.get(t.entityId) || { refunded: 0, statuses: [] };
+    seen.refunded = round2(seen.refunded + Number(t.amountRefunded || 0));
+    seen.statuses.push(String(t.status || "unknown").toLowerCase());
+    byEntity.set(t.entityId, seen);
+  }
+
+  const rows = [];
+  for (const b of ledgerBookings) {
+    if (!b.invoice_id) continue;
+    const seen = byEntity.get(b.invoice_id);
+    if (!seen) continue;   // no GHL transaction at all: that is `unmatched`, not a refund question
+
+    const snapshot = env.BOOKINGS ? await env.BOOKINGS.get(b.booking_id, { type: "json" }) : null;
+
+    // A cancellation's totalRefund ALREADY includes the security deposit, so
+    // the two are never added. Only a booking that was not cancelled can have
+    // a deposit returned on its own, after inspection.
+    const expected = snapshot?.cancellation
+      ? round2(snapshot.cancellation.totalRefund || 0)
+      : round2(snapshot?.securityDeposit?.refundedAmount || 0);
+    const refunded = seen.refunded;
+    if (expected === 0 && refunded === 0) continue;
+
+    const row = {
+      bookingId: b.booking_id, invoiceId: b.invoice_id, invoiceNumber: b.invoice_number,
+      expected, refunded, ghlStatus: seen.statuses.join(", "),
+    };
+    if (!snapshot) {
+      rows.push({ ...row, state: "no_snapshot",
+        note: "money went back on a booking this Worker has no record of -- it never ran settle() for this invoice" });
+    } else if (expected === 0) {
+      rows.push({ ...row, state: "unexpected",
+        note: "a refund was issued that the Worker never priced -- refunded outside the system, or against the wrong invoice" });
+    } else if (refunded === 0) {
+      rows.push({ ...row, state: "owed", owed: expected,
+        note: "the Worker priced this refund and nothing has gone back yet -- this is the list of what somebody still owes a guest" });
+    } else if (Math.abs(refunded - expected) < 0.005) {
+      rows.push({ ...row, state: "settled",
+        note: "paid in full; the manual_refund_pending marker on this booking's ledger rows is stale, not outstanding" });
+    } else {
+      rows.push({ ...row, state: "mismatch", delta: round2(refunded - expected),
+        note: refunded < expected
+          ? "the guest was refunded LESS than the Worker calculated"
+          : "the guest was refunded MORE than the Worker calculated" });
+    }
+  }
+
+  const count = (state) => rows.filter((r) => r.state === state).length;
+  const sum = (state, field) => round2(rows.filter((r) => r.state === state).reduce((s, r) => s + (r[field] || 0), 0));
+  return {
+    rows,
+    summary: {
+      owed: count("owed"), owedTotal: sum("owed", "owed"),
+      settled: count("settled"),
+      mismatch: count("mismatch"),
+      unexpected: count("unexpected"),
+      noSnapshot: count("no_snapshot"),
+    },
+  };
+}
+
 async function ghlFetchTransactions(tenant, env, locationId, fromLabel, toLabel) {
   const pit = tenant.ghlPit || (tenant.ghlPitSecretName && env[tenant.ghlPitSecretName]);
   if (!pit) throw new Error("No GHL PIT configured for this tenant (ghlPit / ghlPitSecretName)");
@@ -916,12 +1005,16 @@ export async function handleReconcile(request, env) {
   const ghlEntityIds = new Set(transactions.map(t => t.entityId).filter(Boolean));
   const unmatched = ledgerBookings.filter(b => b.invoice_id && !ghlEntityIds.has(b.invoice_id));
 
+  const refunds = await reconcileRefunds(env, transactions, ledgerBookings);
+
   return json({
     locationId, from: fromLabel, to: toLabel,
     ledgerBookingCount: ledgerBookings.length,
     ghlTransactionCount: transactions.length,
     ghlFetchError: ghlError,
     unmatched: unmatched.map(b => ({ bookingId: b.booking_id, invoiceId: b.invoice_id, invoiceNumber: b.invoice_number })),
+    refundSummary: refunds.summary,
+    refunds: refunds.rows,
     note: "Only meaningful for invoiceStrategy:'enrich' bookings -- paypal_url bookings never touch GHL's transactions ledger, so they'll always show as unmatched here (that's expected, not a desync)."
   });
 }
