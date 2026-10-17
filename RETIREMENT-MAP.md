@@ -161,7 +161,10 @@ resolution and the pass-through classification are all added here. The
 processing fee specifically **cannot** move to a GHL native additional fee:
 those bill on the rental base price, while PayPal takes its cut of the whole
 captured amount, so a native fee under-recovers — worst on the bookings with the
-largest deposits. That is why the native route was rejected outright.
+largest deposits. That is why the native route was rejected outright. The 6%
+also absorbs the USD-to-DOP exchange loss (Yari, 2026-10-16), which is why the
+rate is higher than any PayPal fee you can measure and must not be cut to
+match one.
 
 **Expense attribution.** `expenses.js` — owner-borne costs become ledger rows
 that reduce that owner's payout. GHL has an Expenses object but no notion of
