@@ -43,10 +43,11 @@ const ledgerDb = {
 };
 
 let mockTransactions = [];
+let transactionUrls = [];
 global.fetch = async (url) => {
   const u = String(url);
   const ok = (o) => ({ ok: true, status: 200, text: async () => JSON.stringify(o), json: async () => o });
-  if (u.includes("/payments/transactions")) return ok({ data: mockTransactions });
+  if (u.includes("/payments/transactions")) { transactionUrls.push(u); return ok({ data: mockTransactions }); }
   return ok({});
 };
 
@@ -73,6 +74,7 @@ async function reconcile() {
 }
 
 const seed = async ({ bookingId = "BK-CANCEL", snapshot, transactions }) => {
+  transactionUrls = [];
   ledgerRows.length = 0;
   ledgerRows.push({ booking_id: bookingId, invoice_id: INVOICE, invoice_number: "000035" });
   store.delete(bookingId);
@@ -282,6 +284,54 @@ const seed = async ({ bookingId = "BK-CANCEL", snapshot, transactions }) => {
   assert.strictEqual(out.unmatched.length, 1, "no transaction at all is still unmatched");
   assert.deepStrictEqual(out.refunds, [], "and is not also listed as a refund problem");
   console.log("11) A booking with no GHL transaction stays in unmatched and only there");
+}
+
+// ---- 12. the transactions request is shaped so GHL will answer it --------
+// Not a detail. ghlFetchTransactions had sent locationId and no altId since
+// 2026-08-29 and threw 422 on every live call -- handleReconcile catches that
+// into ghlFetchError and carries on with an empty list, so it answered 200
+// while reporting every enrich booking as unmatched (15 of them on DEMO-HOMS,
+// all false) and every refund as zero.
+//
+// A mock that answers any URL cannot catch that, which is why nine passing
+// cases above did not. This asserts the request itself.
+{
+  await seed({
+    snapshot: cancelled(935),
+    transactions: [{ entityId: INVOICE, status: "partially_refunded", amountRefunded: 935 }],
+  });
+  await reconcile();
+  assert.strictEqual(transactionUrls.length, 1, "reconcile fetches the transaction list once");
+  const q = new URL(transactionUrls[0]).searchParams;
+  assert.strictEqual(q.get("altId"), LOC,
+    "altId is required on every payments/* operation -- without it GHL answers 422 and the whole report degrades silently");
+  assert.strictEqual(q.get("altType"), "location");
+  assert.strictEqual(q.get("startAt"), "2026-10-01", "and the window is passed through");
+  assert.strictEqual(q.get("endAt"), "2026-10-31");
+  console.log("12) The transactions request carries altId, which GHL rejects the call without");
+}
+
+// ---- 13. an all-time window omits the dates rather than sending "null" ---
+// resolveWindow returns null labels for period=all, and URLSearchParams turns
+// a null into the string "null". So ?period=all sent startAt=null&endAt=null.
+{
+  await seed({
+    snapshot: cancelled(935),
+    transactions: [{ entityId: INVOICE, status: "partially_refunded", amountRefunded: 935 }],
+  });
+  const res = await handleReconcile({
+    method: "GET",
+    url: `https://w.dev/reports/reconcile?locationId=${LOC}&period=all`,
+    headers: { get: (n) => (n === "X-Admin-Secret" ? "admin123" : null) },
+  }, env);
+  const out = await res.json();
+  assert.strictEqual(out.ghlFetchError, null, "an all-time reconcile must still reach GHL");
+  const q = new URL(transactionUrls[0]).searchParams;
+  assert.ok(!q.has("startAt"), `all-time must omit startAt, not send it as a string -- got ${q.get("startAt")}`);
+  assert.ok(!q.has("endAt"), `and omit endAt -- got ${q.get("endAt")}`);
+  assert.strictEqual(q.get("altId"), LOC, "and still carry altId");
+  assert.strictEqual(out.refunds[0].state, "settled", "and still reconcile the refund");
+  console.log("13) period=all omits the date params instead of sending the string 'null'");
 }
 
 console.log("\nPASS — reconcile compares what the Worker priced against what the processor refunded.");
