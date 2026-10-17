@@ -983,19 +983,76 @@ async function reconcileRefunds(env, transactions, ledgerBookings) {
   };
 }
 
+// Paged, because one page is not the account.
+//
+// This asked for limit=100 offset=0 and took whatever came back as the whole
+// truth. DEMO-HOMS already returns 50 transactions all-time against 25
+// invoices -- one invoice alone carries three, a success and two failed
+// attempts -- so a real client passes 100 and the list quietly truncates.
+//
+// Truncation here does not look like an error. The missing transactions make
+// their bookings read as "no GHL transaction" in the unmatched check and as
+// "nothing refunded" in the refund check, which is the same silent, confident
+// wrongness the altId 422 produced for two months.
+const TRANSACTIONS_PAGE_SIZE = 100;
+// 10,000 transactions. A stop rather than a limit: it only matters if GHL
+// keeps serving full pages forever, and looping on a live endpoint is worse
+// than reporting that the answer was cut short.
+const TRANSACTIONS_MAX_PAGES = 100;
+
 async function ghlFetchTransactions(tenant, env, locationId, fromLabel, toLabel) {
   const pit = tenant.ghlPit || (tenant.ghlPitSecretName && env[tenant.ghlPitSecretName]);
   if (!pit) throw new Error("No GHL PIT configured for this tenant (ghlPit / ghlPitSecretName)");
-  const q = new URLSearchParams({ altId: locationId, altType: "location", limit: "100", offset: "0" });
-  if (fromLabel) q.set("startAt", fromLabel);
-  if (toLabel) q.set("endAt", toLabel);
-  const res = await fetch(`${GHL_BASE}/payments/transactions?${q}`, {
-    headers: { Authorization: `Bearer ${pit}`, Version: GHL_VERSION, Accept: "application/json" }
-  });
-  const text = await res.text();
-  let data; try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
-  if (!res.ok) { const err = new Error(`GHL GET /payments/transactions -> ${res.status} ${JSON.stringify(data).slice(0, 500)}`); err.status = res.status; throw err; }
-  return data.data || [];
+
+  const transactions = [];
+  const seenIds = new Set();
+  let totalCount = null;
+  let pages = 0;
+  let truncated = false;
+
+  for (let offset = 0; ; offset += TRANSACTIONS_PAGE_SIZE) {
+    if (pages >= TRANSACTIONS_MAX_PAGES) { truncated = true; break; }
+
+    const q = new URLSearchParams({
+      altId: locationId, altType: "location",
+      limit: String(TRANSACTIONS_PAGE_SIZE), offset: String(offset),
+    });
+    if (fromLabel) q.set("startAt", fromLabel);
+    if (toLabel) q.set("endAt", toLabel);
+
+    const res = await fetch(`${GHL_BASE}/payments/transactions?${q}`, {
+      headers: { Authorization: `Bearer ${pit}`, Version: GHL_VERSION, Accept: "application/json" }
+    });
+    const text = await res.text();
+    let data; try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
+    if (!res.ok) { const err = new Error(`GHL GET /payments/transactions -> ${res.status} ${JSON.stringify(data).slice(0, 500)}`); err.status = res.status; throw err; }
+    pages += 1;
+
+    const page = Array.isArray(data.data) ? data.data : [];
+    if (Number.isFinite(Number(data.totalCount))) totalCount = Number(data.totalCount);
+
+    // Deduplicated by id, and a page that adds nothing new ends the loop.
+    // That is the guard against an endpoint that ignores offset and keeps
+    // serving page one -- which would otherwise spin until the page cap and
+    // report a truncation that was really a repeat.
+    let added = 0;
+    for (const t of page) {
+      const id = t?._id ?? t?.id;
+      if (id != null) { if (seenIds.has(id)) continue; seenIds.add(id); }
+      transactions.push(t);
+      added += 1;
+    }
+
+    if (page.length < TRANSACTIONS_PAGE_SIZE) break;        // a short page is the last page
+    if (added === 0) break;                                  // offset is being ignored
+    if (totalCount != null && transactions.length >= totalCount) break;
+  }
+
+  // Reported rather than inferred: the caller says so in its response, so a
+  // short answer is visible instead of being read as a complete one.
+  if (totalCount != null && transactions.length < totalCount) truncated = true;
+
+  return { transactions, totalCount, pages, truncated };
 }
 
 export async function handleReconcile(request, env) {
@@ -1019,8 +1076,15 @@ export async function handleReconcile(request, env) {
 
   let transactions = [];
   let ghlError = null;
+  let ghlPages = 0;
+  let ghlTotalCount = null;
+  let ghlTruncated = false;
   try {
-    transactions = await ghlFetchTransactions(tenant, env, locationId, fromLabel, toLabel);
+    const fetched = await ghlFetchTransactions(tenant, env, locationId, fromLabel, toLabel);
+    transactions = fetched.transactions;
+    ghlPages = fetched.pages;
+    ghlTotalCount = fetched.totalCount;
+    ghlTruncated = fetched.truncated;
   } catch (err) {
     ghlError = err.message;
   }
@@ -1034,6 +1098,11 @@ export async function handleReconcile(request, env) {
     locationId, from: fromLabel, to: toLabel,
     ledgerBookingCount: ledgerBookings.length,
     ghlTransactionCount: transactions.length,
+    ghlTransactionTotal: ghlTotalCount,
+    ghlPagesFetched: ghlPages,
+    // True means this report is answering from less than the account holds, so
+    // its unmatched and refund findings are incomplete rather than clean.
+    ghlTransactionsTruncated: ghlTruncated,
     ghlFetchError: ghlError,
     unmatched: unmatched.map(b => ({ bookingId: b.booking_id, invoiceId: b.invoice_id, invoiceNumber: b.invoice_number })),
     refundSummary: refunds.summary,
