@@ -44,10 +44,23 @@ const ledgerDb = {
 
 let mockTransactions = [];
 let transactionUrls = [];
+// Serves mockTransactions as real pages: honours limit/offset and reports
+// totalCount, the way the live endpoint does. A mock that returns the whole
+// list for any offset cannot tell a paged reader from an unpaged one, which is
+// why cases 1-13 could not have caught a missing second page.
+let pageMode = "paged";
 global.fetch = async (url) => {
   const u = String(url);
   const ok = (o) => ({ ok: true, status: 200, text: async () => JSON.stringify(o), json: async () => o });
-  if (u.includes("/payments/transactions")) { transactionUrls.push(u); return ok({ data: mockTransactions }); }
+  if (u.includes("/payments/transactions")) {
+    transactionUrls.push(u);
+    const q = new URL(u).searchParams;
+    const limit = Number(q.get("limit") || 100);
+    const offset = Number(q.get("offset") || 0);
+    if (pageMode === "ignores_offset") return ok({ data: mockTransactions.slice(0, limit), totalCount: mockTransactions.length });
+    if (pageMode === "no_total") return ok({ data: mockTransactions.slice(offset, offset + limit) });
+    return ok({ data: mockTransactions.slice(offset, offset + limit), totalCount: mockTransactions.length });
+  }
   return ok({});
 };
 
@@ -73,8 +86,9 @@ async function reconcile() {
   return res.json();
 }
 
-const seed = async ({ bookingId = "BK-CANCEL", snapshot, transactions }) => {
+const seed = async ({ bookingId = "BK-CANCEL", snapshot, transactions, mode = "paged" }) => {
   transactionUrls = [];
+  pageMode = mode;
   ledgerRows.length = 0;
   ledgerRows.push({ booking_id: bookingId, invoice_id: INVOICE, invoice_number: "000035" });
   store.delete(bookingId);
@@ -332,6 +346,105 @@ const seed = async ({ bookingId = "BK-CANCEL", snapshot, transactions }) => {
   assert.strictEqual(q.get("altId"), LOC, "and still carry altId");
   assert.strictEqual(out.refunds[0].state, "settled", "and still reconcile the refund");
   console.log("13) period=all omits the date params instead of sending the string 'null'");
+}
+
+// ---- 14. more transactions than fit on one page --------------------------
+// The request asked for limit=100 offset=0 and took the answer as the whole
+// account. DEMO-HOMS already returns 50 all-time against 25 invoices -- one
+// invoice carries three, a success and two failed attempts -- so a real client
+// passes 100 and the list truncates.
+//
+// Truncation does not look like an error. The missing transactions make their
+// bookings read as "no GHL transaction" in the unmatched check and "nothing
+// refunded" in the refund check: the same silent, confident wrongness the
+// altId 422 produced for two months.
+//
+// 250 transactions, with the one that matters LAST, so a single-page read
+// cannot pass by luck.
+{
+  const filler = Array.from({ length: 249 }, (_, i) => ({
+    _id: "tx-" + i, entityId: "inv-other-" + i, status: "succeeded", amountRefunded: 0,
+  }));
+  await seed({
+    snapshot: cancelled(935),
+    transactions: [...filler, { _id: "tx-last", entityId: INVOICE, status: "partially_refunded", amountRefunded: 935 }],
+  });
+  const out = await reconcile();
+  assert.strictEqual(out.ghlTransactionCount, 250, "every page is read, not just the first");
+  assert.strictEqual(out.ghlPagesFetched, 3, "250 at 100 a page is three requests");
+  assert.strictEqual(out.ghlTransactionsTruncated, false, "and the answer is complete");
+  assert.strictEqual(out.refunds.length, 1, "the booking on the last page is still reconciled");
+  assert.strictEqual(out.refunds[0].state, "settled");
+  assert.strictEqual(out.unmatched.length, 0, "and is not falsely flagged as missing from GHL");
+  const offsets = transactionUrls.map((u) => new URL(u).searchParams.get("offset"));
+  assert.deepStrictEqual(offsets, ["0", "100", "200"], "offset advances by the page size");
+  console.log("14) 250 transactions are read across 3 pages, and the booking on the last page reconciles");
+}
+
+// ---- 15. an endpoint that ignores offset must not spin -------------------
+// If offset is ignored, every page is page one. Without a guard this loops to
+// the page cap, sends a hundred identical requests to a live endpoint, and
+// then reports a truncation that was really a repeat. A page that adds nothing
+// new ends the read instead.
+{
+  const filler = Array.from({ length: 150 }, (_, i) => ({
+    _id: "dup-" + i, entityId: "inv-dup-" + i, status: "succeeded", amountRefunded: 0,
+  }));
+  await seed({ snapshot: cancelled(935), transactions: filler, mode: "ignores_offset" });
+  const out = await reconcile();
+  assert.ok(out.ghlPagesFetched <= 2, "a repeating endpoint must stop at once, took " + out.ghlPagesFetched + " pages");
+  assert.strictEqual(out.ghlTransactionCount, 100, "deduplicated by id, so the repeat is not counted twice");
+  assert.strictEqual(out.ghlTransactionsTruncated, true,
+    "and it says the answer is short of the 150 the endpoint claims, rather than passing 100 off as all of them");
+  console.log("15) An endpoint that ignores offset stops after one repeat and reports the answer as short");
+}
+
+// ---- 16. no totalCount still pages to the end ----------------------------
+// totalCount drives the completeness check, but it must not be required to
+// page: a short page is the last page either way.
+{
+  const filler = Array.from({ length: 120 }, (_, i) => ({
+    _id: "nt-" + i, entityId: "inv-nt-" + i, status: "succeeded", amountRefunded: 0,
+  }));
+  await seed({
+    snapshot: cancelled(935),
+    transactions: [...filler, { _id: "nt-last", entityId: INVOICE, status: "partially_refunded", amountRefunded: 935 }],
+    mode: "no_total",
+  });
+  const out = await reconcile();
+  assert.strictEqual(out.ghlTransactionCount, 121, "a short page ends the read without needing a count");
+  assert.strictEqual(out.ghlTransactionTotal, null, "and the count is reported as unknown rather than guessed");
+  assert.strictEqual(out.ghlTransactionsTruncated, false, "an unknown total is not a truncation");
+  assert.strictEqual(out.refunds[0].state, "settled");
+  console.log("16) With no totalCount it still pages to the end, and reports the total as unknown");
+}
+
+// ---- 17. one past a page boundary ----------------------------------------
+// The totalCount break is `collected >= totalCount`, and case 14 cannot tell
+// that from `>= totalCount - 1`: with 250 of 250, both stop in the same place.
+// Mutation testing found it survive.
+//
+// It is reachable, and it costs exactly one transaction. At 201 the off-by-one
+// stops after two full pages holding 200, satisfied that 200 >= 200, and the
+// 201st is never read. Here that last one is the refund, so the booking would
+// read as unmatched AND as nothing-refunded -- both false, and both quiet.
+{
+  const filler = Array.from({ length: 200 }, (_, i) => ({
+    _id: "edge-" + i, entityId: "inv-edge-" + i, status: "succeeded", amountRefunded: 0,
+  }));
+  await seed({
+    snapshot: cancelled(935),
+    transactions: [...filler, { _id: "edge-last", entityId: INVOICE, status: "partially_refunded", amountRefunded: 935 }],
+  });
+  const out = await reconcile();
+  assert.strictEqual(out.ghlTransactionCount, 201,
+    "the 201st transaction is read -- stopping at 200 of 201 is a full page that looks complete");
+  assert.strictEqual(out.ghlPagesFetched, 3, "which takes a third page holding one row");
+  assert.strictEqual(out.ghlTransactionsTruncated, false);
+  assert.strictEqual(out.refunds.length, 1, "and the refund on it is still found");
+  assert.strictEqual(out.refunds[0].state, "settled");
+  assert.strictEqual(out.unmatched.length, 0);
+  console.log("17) A count one past a page boundary still reads the final page");
 }
 
 console.log("\nPASS — reconcile compares what the Worker priced against what the processor refunded.");
