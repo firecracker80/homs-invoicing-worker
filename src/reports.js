@@ -866,13 +866,34 @@ function managerPlHtml({ brandName, fromLabel, toLabel, allTime = false, pl, loc
 // payment that got recorded directly in GHL (e.g. manually marked paid)
 // without ever hitting this Worker's settle() path.
 //
-// list-transactions schema (2026-08-29, not yet exercised against real
-// settled data -- verify against a live account with real enrich-mode
-// transactions before trusting this in production): GET /payments/transactions
-// ?altType=location&locationId=...&startAt&endAt, response { data: [...] }
-// with entityId/entitySourceType per transaction. Unlike invoices, this
-// endpoint's own schema lists locationId as the scoping param, not altId --
-// don't assume it needs altId too just because invoices did.
+// GET /payments/transactions?altId&altType=location&startAt&endAt, response
+// { data: [...] } with entityId/status/amountRefunded per transaction.
+//
+// altId IS required, and this cost the whole endpoint.
+//
+// The note here used to say the opposite -- "this endpoint's own schema lists
+// locationId as the scoping param, not altId -- don't assume it needs altId
+// too just because invoices did" -- written 2026-08-29 against the published
+// schema and never run against a live account, which the same note admitted.
+// Run against DEMO-HOMS on 2026-10-16 it returns:
+//
+//   422 {"message":["altId should not be empty","altId must be a string"]}
+//
+// which is the failure this project's own CLAUDE.md already lists under
+// "gotchas already paid for": altId is required on every payments/* and
+// invoices/* operation. The comment was not merely wrong, it talked the next
+// person out of the fix.
+//
+// So ghlFetchTransactions had thrown on every live call since it was written.
+// handleReconcile catches the throw into ghlFetchError and carries on with an
+// empty list, which means its unmatched check reported EVERY enrich booking as
+// having no GHL transaction -- 15 of them on DEMO-HOMS, all false -- and the
+// refund reconciliation added in #160 reported zeros for everything. A report
+// that cannot fetch its comparison set still answered 200.
+//
+// startAt/endAt are omitted entirely for an all-time window rather than sent
+// as the string "null", which is what URLSearchParams makes of a null and what
+// period=all was sending.
 // What the Worker said is owed, against what the payment processor says went
 // back. Added 2026-10-16.
 //
@@ -965,7 +986,9 @@ async function reconcileRefunds(env, transactions, ledgerBookings) {
 async function ghlFetchTransactions(tenant, env, locationId, fromLabel, toLabel) {
   const pit = tenant.ghlPit || (tenant.ghlPitSecretName && env[tenant.ghlPitSecretName]);
   if (!pit) throw new Error("No GHL PIT configured for this tenant (ghlPit / ghlPitSecretName)");
-  const q = new URLSearchParams({ altType: "location", locationId, startAt: fromLabel, endAt: toLabel, limit: "100", offset: "0" });
+  const q = new URLSearchParams({ altId: locationId, altType: "location", limit: "100", offset: "0" });
+  if (fromLabel) q.set("startAt", fromLabel);
+  if (toLabel) q.set("endAt", toLabel);
   const res = await fetch(`${GHL_BASE}/payments/transactions?${q}`, {
     headers: { Authorization: `Bearer ${pit}`, Version: GHL_VERSION, Accept: "application/json" }
   });
