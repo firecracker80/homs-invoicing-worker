@@ -180,11 +180,19 @@ Storage & Databases → KV → **TENANTS** → Add entry, key = the client's
 ```
 
 ### `processingFeePct` — leave it out unless you mean to override it
-The Worker's processing-fee line exists to recover what PayPal takes, and
-PayPal charges on the **whole captured amount** — rent, add-ons, cleaning, tax
-and the security deposit. That is why it cannot be a GHL calendar Additional
-Fee: those are a percentage of the service price only, so they under-recover,
-worst on the bookings with the largest deposits.
+The 6% recovers **two** costs:
+
+1. **What PayPal takes**, charged on the **whole captured amount** — rent,
+   add-ons, cleaning, tax and the security deposit. That is why it cannot be a
+   GHL calendar Additional Fee: those are a percentage of the service price
+   only, so they under-recover, worst on the bookings with the largest
+   deposits.
+2. **Currency exchange.** Guests are invoiced in USD and the business operates
+   in the DR, so every booking loses something on the conversion.
+
+**Do not set this rate by measuring PayPal's fee.** A capture on 2026-10-16
+reported a PayPal fee of 3.52% against the 6% charged; that gap is the FX
+spread, not over-recovery, and no gateway field reports it.
 
 Omit the field and provisioning derives it: **6% when the account has a
 `WPayPal Client ID` Custom Value, 0 when it does not.** An explicit value is

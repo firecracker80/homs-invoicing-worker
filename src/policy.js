@@ -201,13 +201,25 @@ export function isPetFeeName(name, tenant) {
 
 // ---- Processing fee ---------------------------------------------------------
 //
-// The Worker's processing-fee line exists for one reason: to recover what
-// PayPal takes. PayPal charges its percentage on the WHOLE captured amount --
-// rent, add-ons, cleaning, taxes and the security deposit -- which is why this
-// cannot be moved to a GHL calendar Additional Fee. Those are a percentage of
-// the service price only, so they under-recover, worst on the bookings with
-// the largest deposits. (Yari, 2026-10-13, removing the native one for exactly
-// this reason.)
+// The 6% recovers TWO costs, and the second one is the easy one to lose.
+//
+// 1. What PayPal takes. It charges its percentage on the WHOLE captured
+//    amount -- rent, add-ons, cleaning, taxes and the security deposit --
+//    which is why this cannot be a GHL calendar Additional Fee. Those are a
+//    percentage of the service price only, so they under-recover, worst on
+//    the bookings with the largest deposits. (Yari, 2026-10-13, removing the
+//    native one for exactly this reason.)
+//
+// 2. CURRENCY EXCHANGE. Guests are invoiced in USD and the business operates
+//    in the DR, so every booking loses something on the conversion. The 6%
+//    absorbs that too (Yari, 2026-10-16).
+//
+// Which means: DO NOT set this rate by measuring PayPal's fee. A real
+// sandbox capture on 2026-10-16 showed seller_receivable_breakdown.paypal_fee
+// of 61.72 on a 1,754.30 gross -- 3.52%, well under the 6% charged. Read
+// against reason 1 alone that looks like over-recovery by two and a half
+// points, and the obvious "fix" is to cut the rate. It is not over-recovery;
+// the rest is the FX spread, which no gateway field reports.
 //
 // Stripe is not a case here: the DR entity cannot hold a Stripe account.
 export const PAYPAL_FEE_PCT = 0.06;
@@ -279,6 +291,6 @@ export function deriveProcessingFeePct(provisioned, existing) {
   if (provisioned && provisioned.processingFeePct != null) return null;
   const clientId = provisioned?.paypalClientId || existing?.paypalClientId;
   return clientId
-    ? { value: PAYPAL_FEE_PCT, reason: "wpaypal_client_id is set: PayPal takes its cut of the whole captured amount, so the Worker recovers it" }
+    ? { value: PAYPAL_FEE_PCT, reason: "wpaypal_client_id is set: the Worker recovers PayPal's cut of the whole captured amount, plus the USD-to-DOP exchange loss" }
     : { value: 0, reason: "no wpaypal_client_id in this account's custom values, so there is no PayPal fee to pass on" };
 }
