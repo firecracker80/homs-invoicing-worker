@@ -33,7 +33,7 @@
 
 import {
   fetchAllObjectRecords, createObjectRecord, fetchAssociations, linkIfPossible, findRecordByName,
-  propertyContactsFor, fetchContactName,
+  propertyContactsFor, fetchContactName, fetchContactPayout,
 } from "./ghl.js";
 
 const toMinor = n => Math.round(Number(n) * 100);
@@ -97,11 +97,18 @@ export async function resolvePayoutNamesFromGhl(pit, locationId, propertyCode) {
     if (!property) return {};
 
     const { ownerContactId, managerContactId } = propertyContactsFor(property, associations);
-    const [ownerName, managerName] = await Promise.all([
-      ownerContactId ? fetchContactName(pit, ownerContactId) : null,
+    const [owner, managerName] = await Promise.all([
+      ownerContactId ? fetchContactPayout(pit, locationId, ownerContactId) : null,
       managerContactId ? fetchContactName(pit, managerContactId) : null,
     ]);
-    return { ownerName: ownerName || undefined, managerName: managerName || undefined };
+    return {
+      ownerName: owner?.name || undefined,
+      managerName: managerName || undefined,
+      // Undefined, not null, so `??` in the caller falls through to the
+      // account value. A null here would read as a deliberate 0%.
+      ownerPct: owner?.ownerPct ?? undefined,
+      splitNote: owner?.note || undefined,
+    };
   } catch {
     return {};
   }
@@ -132,6 +139,24 @@ export async function writeLedgerEntries(env, tenant, snapshot, captures) {
 
   const ownerName = fromGhl.ownerName ?? snapshot.payout.ownerName ?? null;
   const managerName = fromGhl.managerName ?? snapshot.payout.managerName ?? null;
+
+  // Per-owner split. The account-level pct was written onto the snapshot at
+  // booking time; a split on the owner's own contact overrides it here, for the
+  // same reason the name does. Only the OWNER percentage is read and the
+  // manager's is derived -- `revenue_split_manager_` also exists and the two can
+  // contradict each other (85 and 20 are both accepted by the form), so trusting
+  // one and deriving the other is the only way the pair cannot disagree.
+  if (fromGhl.splitNote) console.warn(`Ledger: ${fromGhl.splitNote}`);
+  const resolvedPct = fromGhl.ownerPct ?? snapshot.payout.ownerPct;
+  if (resolvedPct !== snapshot.payout.ownerPct) {
+    // Written back, not just used locally: cancellation.js and reschedule.js
+    // both read snapshot.payout.ownerPct later, and a split applied only to
+    // these rows would make a refund reverse a different share than the income
+    // it is reversing.
+    snapshot.payout.ownerPct = resolvedPct;
+    snapshot.payout.owner = round2(basis * resolvedPct);
+    snapshot.payout.manager = round2(basis - snapshot.payout.owner);
+  }
 
   // Written back onto the snapshot, not just held locally. nameFor() fills any
   // row that did not set a name of its own from snapshot.payout -- so a resolved
