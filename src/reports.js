@@ -914,6 +914,48 @@ function managerPlHtml({ brandName, fromLabel, toLabel, allTime = false, pl, loc
 // booking went out saying 585 before the deposit bug was fixed; the real figure
 // was 935. Anyone acting on the email would have left the guest 350 short, and
 // nothing in the system would have said so.
+
+// A rent refund that a shortening booked, which a later extension has made
+// unjustified.
+//
+// reschedule.js only ever APPENDS to snapshot.reschedules and never reads prior
+// entries, so shortening a stay books a manual rent refund and extending it
+// again does not cancel one. The books then say money is owed back for nights
+// the guest is staying. Found on booking 7bpsi7UKwCNGnEhirJ7S, 2026-10-25:
+// shortened 4n -> 2n ($400 refund booked), extended back to 4n, refund still
+// pending with no reversal.
+//
+// Deliberately narrow. It fires ONLY when the net rent change across every
+// reschedule is >= 0 -- the stay is back to its original length or longer -- so
+// no rent was given up overall yet a rent refund is outstanding. That is
+// unambiguous. Partial staleness (shortened 4->2, extended back to 3) would
+// need the cancellation-tier maths to say how much is still justified, and a
+// detector that guesses at money is worse than one that stays quiet.
+export function staleRescheduleRefund(snapshot) {
+  const entries = snapshot?.reschedules || [];
+
+  // There is deliberately NO "fewer than two reschedules" guard. One was here
+  // and mutation testing showed nothing could distinguish it from its absence:
+  // a lone shortening always has a negative rentDelta, so the net check below
+  // already returns null for it. A guard that cannot be told apart from not
+  // having it is not protection, it is dead code that reads like protection.
+  // Removing it also makes the detector slightly stricter in a way that is
+  // correct -- a single entry that somehow booked a rent refund without giving
+  // up any rent is exactly the anomaly this report exists to surface.
+  let pending = 0;
+  for (const e of entries) {
+    for (const part of e?.settlement?.parts || []) {
+      if (part.type === "rent_refund_needed_manual") pending = round2(pending + (part.amount || 0));
+    }
+  }
+  if (pending <= 0) return null;
+
+  const netRentDelta = round2(entries.reduce((sum, e) => sum + (e.rentDelta || 0), 0));
+  if (netRentDelta < 0) return null;     // the stay IS net shorter; something is still owed
+
+  return { pending, netRentDelta, reschedules: entries.length };
+}
+
 async function reconcileRefunds(env, transactions, ledgerBookings) {
   // Refunds per invoice, summed across that invoice's transactions. A failed
   // attempt refunds nothing and must not be read as a zero-refund success --
@@ -943,12 +985,22 @@ async function reconcileRefunds(env, transactions, ledgerBookings) {
       ? round2(snapshot.cancellation.totalRefund || 0)
       : round2(snapshot?.securityDeposit?.refundedAmount || 0);
     const refunded = seen.refunded;
-    if (expected === 0 && refunded === 0) continue;
 
     const row = {
       bookingId: b.booking_id, invoiceId: b.invoice_id, invoiceNumber: b.invoice_number,
       expected, refunded, ghlStatus: seen.statuses.join(", "),
     };
+
+    // Checked before the early-out below: this booking has no cancellation and
+    // no deposit refund, so expected and refunded are both 0 and it would
+    // otherwise never be looked at.
+    const stale = staleRescheduleRefund(snapshot);
+    if (stale) {
+      rows.push({ ...row, state: "stale_reschedule_refund", owed: stale.pending,
+        note: `a shortening booked ${stale.pending} in manual rent refunds, but across ${stale.reschedules} reschedules the stay is net ${stale.netRentDelta === 0 ? "back to its original length" : "LONGER than it started"} -- nothing is owed back and these rows should not be paid` });
+    }
+
+    if (expected === 0 && refunded === 0) continue;
     if (!snapshot) {
       rows.push({ ...row, state: "no_snapshot",
         note: "money went back on a booking this Worker has no record of -- it never ran settle() for this invoice" });
@@ -975,6 +1027,8 @@ async function reconcileRefunds(env, transactions, ledgerBookings) {
     rows,
     summary: {
       owed: count("owed"), owedTotal: sum("owed", "owed"),
+      staleRescheduleRefund: count("stale_reschedule_refund"),
+      staleRescheduleRefundTotal: sum("stale_reschedule_refund", "owed"),
       settled: count("settled"),
       mismatch: count("mismatch"),
       unexpected: count("unexpected"),
