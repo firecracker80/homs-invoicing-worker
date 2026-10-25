@@ -25,6 +25,58 @@ export async function fetchContactName(pit, contactId) {
   }
 }
 
+// The owner's revenue split, read off the owner CONTACT rather than the
+// account-level custom value.
+//
+// Why the contact wins: an account has one `ownerPct`, and Casa Bonita already
+// has two owners on it. Whoever linked an owner to a property did it while
+// running the business; the account value was typed once at provisioning and
+// never revisited. Same argument the ledger already makes for owner NAMES --
+// this just extends it to the number that decides who gets paid.
+//
+// Returns a FRACTION (0.85), never the percentage, so callers cannot confuse
+// the two. Null means "not set, use the fallback" and is NOT the same as 0.
+const OWNER_SPLIT_KEY = "contact.revenue_split_owner_";
+
+export async function fetchContactPayout(pit, locationId, contactId) {
+  const out = { name: null, ownerPct: null, note: null };
+  if (!pit || !contactId) return out;
+  try {
+    const res = await ghlRequest(pit, "GET", `/contacts/${encodeURIComponent(contactId)}`);
+    const c = res?.contact || res || {};
+    const full = [c.firstName, c.lastName].filter(Boolean).join(" ").trim();
+    out.name = c.name || full || c.companyName || c.email || null;
+
+    if (!locationId) return out;
+    // A contact's customFields carry the field ID, not its key, so the key has
+    // to be resolved against the location's field list. One extra read on a
+    // path that already makes several.
+    const fields = await ghlRequest(pit, "GET",
+      `/locations/${encodeURIComponent(locationId)}/customFields?model=contact`);
+    const defn = (fields?.customFields || []).find((f) => f.fieldKey === OWNER_SPLIT_KEY);
+    if (!defn) return out;
+
+    const raw = (c.customFields || []).find((f) => f.id === defn.id)?.value;
+    // Unset is the common case and is not a fault. Distinguishing it from a
+    // deliberate 0 matters: 0 means the owner takes nothing, which is a real
+    // if unusual arrangement, while unset means fall back to the account.
+    if (raw === undefined || raw === null || raw === "") return out;
+
+    const pct = Number(raw);
+    if (!Number.isFinite(pct) || pct < 0 || pct > 100) {
+      // Refuse loudly rather than coerce. A split is money: a garbled value
+      // silently becoming 0% or 100% would move someone's income without
+      // anyone seeing a failure.
+      out.note = `owner split on contact ${contactId} is not a usable percentage (${JSON.stringify(raw)}) -- falling back`;
+      return out;
+    }
+    out.ownerPct = pct / 100;
+    return out;
+  } catch {
+    return out;
+  }
+}
+
 async function ghlRequest(pit, method, path, body) {
   const res = await fetch(BASE + path, {
     method,
