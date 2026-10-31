@@ -15,6 +15,7 @@ import {
   resolveJoins,
 } from "./normalize.js";
 import { getTenant, resolvePit } from "./tenants.js";
+import { handleSupportList } from "./support.js";
 import { requireAdmin, requireProvision, requireServices, handleLogin, handleLogout } from "./auth.js";
 import { invoicingFetch } from "./invoicing.js";
 import { provision } from "./provision.js";
@@ -1202,6 +1203,13 @@ export default {
     // Worker's KV and kept in step.
     // Already behind the default-deny gate above; a second requireAdmin here
     // would imply that gate is not trusted, which is worse than terse.
+    // Support panel: the client's own support tickets, read out of the HOMS
+    // pipeline. Below the default-deny gate, so a client session can only ask
+    // for its own account - see requireAdmin.
+    if (url.pathname === "/api/support") {
+      return handleSupportList(request, env);
+    }
+
     if (url.pathname === "/api/manager-pl") {
       return proxyStatement(env, url, {
         path: "/reports/manager-pl",

@@ -850,4 +850,91 @@ const textsOf = (root) => textNodesOf(root).map((n) => n.nodeValue.trim());
   console.log("19) The panel states the owner's costs plainly and warns only when nobody said whose a cost is");
 }
 
+// ---- 20. the support panel, same sweep as case 9 ----------------------
+//
+// Cases 9 and 15 sweep the MANAGER panel, and they pass whether or not the
+// support panel holds a single Spanish string -- which is exactly how a panel
+// ships half-translated. This renders the support panel with every optional
+// field populated and asserts the same thing of it.
+//
+// A ticket's own words are data and must survive untouched. A status is NOT
+// data: it arrives from the Worker as one of four fixed English labels, so it
+// must translate.
+{
+  const app = loadApp("?locationId=L1", page());
+
+  app.vmEval(`
+    DATA = { kind: "client" };
+    supportState = {
+      loading: false, error: null,
+      data: {
+        locationId: "L1", tenant: "DEMO-HOMS", count: 4, scanned: 9,
+        tickets: [
+          { id: "o1", subject: "Invoice did not send", description: "Pressed send and nothing arrived",
+            type: "Something in HOMS is not working", status: "New",
+            submittedOn: "2026-10-30", firstReply: null, resolution: null },
+          { id: "o2", subject: "Adding a property", description: null,
+            type: "How do I do this in HOMS?", status: "In progress",
+            submittedOn: "2026-10-29", firstReply: "2026-10-29", resolution: null },
+          { id: "o3", subject: "Change the pet fee", description: null,
+            type: "Change a setting or add something", status: "Waiting on you",
+            submittedOn: "2026-10-28", firstReply: "2026-10-28", resolution: null },
+          { id: "o4", subject: "My payment link", description: null,
+            type: "HOMS billing", status: "Resolved",
+            submittedOn: "2026-10-20", firstReply: "2026-10-20", resolution: "Reissued the link" },
+        ],
+      },
+    };
+    renderSupport();
+    __html = $("#panel-support").innerHTML;
+  `);
+  const html = app.vmEval("__html");
+  assert.ok(html && html.length > 200, "the support panel rendered something");
+
+  // Open first, resolved last: a client opens this for the thing still being
+  // worked on, not the thing most recently filed.
+  const order = ["New", "In progress", "Waiting on you", "Resolved"]
+    .map((st) => html.indexOf(`>${st}<`));
+  assert.ok(order.every((n) => n >= 0), "every status rendered as its own text node");
+  assert.deepStrictEqual(order, [...order].sort((a, b) => a - b),
+    "statuses are out of order, so the panel is not showing open tickets first");
+
+  const keys = new Set(JSON.parse(app.vmEval("JSON.stringify(Object.keys(I18N.es))")));
+
+  // The client's own words. These must NEVER be translated, so they are exempt
+  // from the sweep AND asserted absent from the dictionary.
+  const DATA_STRINGS = [
+    "Invoice did not send", "Pressed send and nothing arrived", "Adding a property",
+    "Change the pet fee", "My payment link", "Reissued the link",
+  ];
+  for (const d of DATA_STRINGS) {
+    assert.ok(html.includes(d), `fixture did not render: ${d}`);
+    assert.ok(!keys.has(d), `${d} is a dictionary key, so a client's own words would be rewritten`);
+  }
+
+  const prose = [...html.matchAll(/>([^<>]+)</g)]
+    .map((m) => m[1].trim())
+    .filter((t) => /[A-Za-z]{3}/.test(t))
+    .filter((t) => !DATA_STRINGS.includes(t));
+
+  const untranslatable = [...new Set(prose)].filter((t) => !keys.has(t));
+  assert.deepStrictEqual(untranslatable, [],
+    `these would stay English on a Spanish page: ${JSON.stringify(untranslatable)}`);
+  assert.ok(prose.length >= 10, "and there was real prose to check, not an empty panel");
+
+  // The empty state is prose too, and is the state most clients see first.
+  app.vmEval(`
+    supportState = { loading: false, error: null, data: { tickets: [] } };
+    renderSupport();
+    __empty = $("#panel-support").innerHTML;
+  `);
+  const empty = [...app.vmEval("__empty").matchAll(/>([^<>]+)</g)]
+    .map((m) => m[1].trim()).filter((t) => /[A-Za-z]{3}/.test(t));
+  assert.ok(empty.length > 0, "the empty state says something");
+  assert.deepStrictEqual(empty.filter((t) => !keys.has(t)), [],
+    "the empty state would stay English");
+
+  console.log(`20) All ${new Set(prose).size} labels in the support panel are dictionary keys, and a ticket's own words are not`);
+}
+
 console.log("\nPASS — the dashboard renders in the account's language, switches both ways, settles after one pass, translates no data, asks for the period it names, says why it left anything out, says whose cost is whose, and states no figure it cannot know.");

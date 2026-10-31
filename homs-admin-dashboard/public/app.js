@@ -269,6 +269,27 @@ const I18N = {
     // match it.
     "The HOMS Portfolio Intake the client filled in (.xlsx). Properties are created from it; rental listings still have to be created by hand, and you get a checklist for those. Nothing is written until you review the rows and press Import.":
       "El Formulario de Portafolio HOMS que llenó el cliente (.xlsx). Las propiedades se crean a partir de él; los anuncios de alquiler todavía hay que crearlos a mano, y se genera una lista de verificación para esos. No se guarda nada hasta que revise las filas y presione Importar.",
+
+    // Support tab. "Status", "Type" and "New" are already above and are reused
+    // deliberately -- "New" is "Nueva", which is the right gender for solicitud.
+    "Support": "Soporte",
+    "Request": "Solicitud",
+    "Submitted": "Enviada",
+    "First reply": "Primera respuesta",
+    "Resolution": "Resolución",
+    "In progress": "En proceso",
+    "Waiting on you": "Esperando su respuesta",
+    "Resolved": "Resuelta",
+    "You have not raised any support requests.": "No ha enviado ninguna solicitud de soporte.",
+    // The four Support Type values, which arrive from the Worker as the English
+    // option labels and are each rendered as a whole text node of their own.
+    "Something in HOMS is not working": "Algo en HOMS no funciona",
+    "How do I do this in HOMS?": "¿Cómo hago esto en HOMS?",
+    "Change a setting or add something": "Cambiar una configuración o agregar algo",
+    "HOMS billing": "Facturación de HOMS",
+    // One source line, like the intake note above, so the key is the whole node.
+    "HOMS support covers the software itself. For anything about your bookings, guests or owners, you are the one who handles it.":
+      "El soporte de HOMS cubre el sistema en sí. Todo lo relacionado con sus reservas, huéspedes o propietarios lo maneja usted.",
   },
 };
 
@@ -860,6 +881,94 @@ function renderTab(tabKey) {
   if (fn) fn();
 }
 
+// --- support -----------------------------------------------------------------
+//
+// The client's own support tickets, read out of the HOMS account's Support
+// Request pipeline via /api/support. There is no copy of a ticket in this
+// account: the Opportunity Yari drags IS the record, so a status here cannot be
+// stale or disagree with hers.
+//
+// Only this client's tickets arrive. /api/support sits below the default-deny
+// requireAdmin gate, which 403s a client session asking for another account, and
+// the Worker filters on opportunity.support_account on top of that.
+//
+// Labels are emitted in English on purpose, like the manager statement: the
+// localize() walker swaps them from the same dictionary as the rest of the page.
+// That walker matches WHOLE text nodes, so every date, subject and count is kept
+// out of its sentence -- a value interpolated mid-sentence makes that sentence
+// match nothing and silently stay English.
+let supportState = { data: null, error: null, loading: false };
+
+async function loadSupport() {
+  const locationId = getLocationId();
+  if (!locationId) return;
+  supportState.loading = true;
+  supportState.error = null;
+  renderSupport();
+  try {
+    const res = await apiFetch("/api/support?locationId=" + encodeURIComponent(locationId));
+    const json = await res.json();
+    if (!res.ok) throw new Error(json.detail || json.error || `HTTP ${res.status}`);
+    supportState.data = json;
+  } catch (err) {
+    supportState.error = err.message || "Could not load support requests";
+    supportState.data = null;
+  } finally {
+    supportState.loading = false;
+    renderSupport();
+  }
+}
+
+// Open tickets first, then newest. A client opening this tab wants the thing
+// still being worked on, not the thing most recently filed.
+const SUPPORT_ORDER = { "New": 0, "In progress": 1, "Waiting on you": 2, "Resolved": 3 };
+
+function renderSupport() {
+  const panel = $("#panel-support");
+  if (!panel) return;
+
+  const intro = `<p class="note banner"><span>HOMS support covers the software itself. For anything about your bookings, guests or owners, you are the one who handles it.</span></p>`;
+
+  if (supportState.loading) {
+    panel.innerHTML = intro + `<div class="state-msg">Loading live data from GHL…</div>`;
+    return;
+  }
+  if (supportState.error) {
+    panel.innerHTML = intro + `<div class="state-msg error">${esc(supportState.error)}</div>`;
+    return;
+  }
+  const d = supportState.data;
+  if (!d || !d.tickets || !d.tickets.length) {
+    panel.innerHTML = intro + `<div class="state-msg">You have not raised any support requests.</div>`;
+    return;
+  }
+
+  const tickets = d.tickets.slice().sort((a, b) => {
+    const oa = SUPPORT_ORDER[a.status] ?? 9;
+    const ob = SUPPORT_ORDER[b.status] ?? 9;
+    if (oa !== ob) return oa - ob;
+    return String(b.submittedOn || "").localeCompare(String(a.submittedOn || ""));
+  });
+
+  // Status is a text node of its own so the dictionary can swap it. The class is
+  // derived from the stage, not from the words, so translating cannot change the
+  // colour.
+  const rows = tickets.map((tk) => {
+    const cls = String(tk.status || "").toLowerCase().replace(/[^a-z]+/g, "-");
+    return `<tr>
+      <td>${dateFmt(tk.submittedOn)}</td>
+      <td><strong>${esc(tk.subject)}</strong>${tk.description ? `<br><small class="muted">${esc(tk.description)}</small>` : ""}</td>
+      <td>${tk.type ? esc(tk.type) : "—"}</td>
+      <td><span class="pill pill-${esc(cls)}">${esc(tk.status)}</span></td>
+      <td>${tk.firstReply ? dateFmt(tk.firstReply) : "—"}</td>
+      <td>${tk.resolution ? esc(tk.resolution) : "—"}</td>
+    </tr>`;
+  }).join("");
+
+  panel.innerHTML = intro
+    + table(["Submitted", "Request", "Type", "Status", "First reply", "Resolution"], rows, tickets.length);
+}
+
 // --- manager statement ------------------------------------------------------
 //
 // Rendered from the invoicing Worker's figures, never recomputed here. This
@@ -1091,9 +1200,12 @@ function renderAll({ refetch = true } = {}) {
   renderStatement();
   if (refetch) loadOwnerStatement();
   renderManagerStatement();
+  renderSupport();
   // Fetched rather than computed, so it arrives after the first paint. Not
   // awaited: the rest of the dashboard must not wait on the invoicing Worker.
   if (refetch) loadManagerPl();
+  // Same reasoning, different account: this one reads the HOMS pipeline.
+  if (refetch) loadSupport();
 }
 
 // ---------- Vendor P&L (own book) ----------
@@ -3052,7 +3164,7 @@ function showTab(tab) {
   activeTab = tab;
   document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t.dataset.tab === tab));
 
-  // Ten tabs are 1206px wide and a phone shows 375 of them, so the strip
+  // Eleven tabs are wider than any phone viewport, so the strip
   // scrolls -- which is no use if the tab you just picked is the one off-screen.
   //
   // Arithmetic on the strip rather than scrollIntoView. scrollIntoView also
