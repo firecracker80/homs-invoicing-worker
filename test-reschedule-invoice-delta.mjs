@@ -72,12 +72,18 @@ const invoiceOnFile = () => ({
 
 let invoicePuts = [];
 let gatewayCalls = [];
+let callOrder = [];
 const makeFetch = (invoice = invoiceOnFile()) => async (url, opts = {}) => {
   const u = String(url);
   const ok = (obj) => ({ ok: true, status: 200, json: async () => obj, text: async () => JSON.stringify(obj) });
   if (u.includes("paypal") || u.includes("stripe")) { gatewayCalls.push(u); return ok({ id: "PP-1", links: [{ rel: "payer-action", href: "https://x" }], access_token: "T" }); }
+  if (u.includes("/calendars/bookings/manage/") && opts.method === "PUT") {
+    callOrder.push("calendar");
+    return ok({ ok: true });
+  }
   if (u.includes(`/invoices/${INVOICE}`) && opts.method === "PUT") {
     const body = JSON.parse(opts.body);
+    callOrder.push("invoice");
     invoicePuts.push(body);
     const total = body.invoiceItems.reduce((s, i) => s + Number(i.amount) * Number(i.qty ?? 1), 0);
     return ok({ ...invoice, ...body, total, amountDue: Math.round((total - 418.7) * 100) / 100, status: "partially_paid" });
@@ -96,7 +102,7 @@ const env = { WORKER_URL: "https://w.dev", TENANTS: kv, BOOKINGS: kv, ADMIN_SECR
 await kv.put(LOC, JSON.stringify(tenant));
 
 const reschedule = async (newCheckOut, { snapshot = paidSnapshot(), invoice } = {}) => {
-  invoicePuts = []; gatewayCalls = [];
+  invoicePuts = []; gatewayCalls = []; callOrder = [];
   global.fetch = makeFetch(invoice ?? invoiceOnFile());
   await kv.put(BOOKING, JSON.stringify(snapshot));
   const res = await worker.fetch({
@@ -214,3 +220,35 @@ const reschedule = async (newCheckOut, { snapshot = paidSnapshot(), invoice } = 
 }
 
 console.log("\nPASS — a stay extended on an invoiced booking becomes a balance due on that invoice, not an orphaned gateway order.");
+
+// ---- the calendar move happens BEFORE the invoice is repriced ----------
+//
+// Order, not presence. Both calls were always made; for months the calendar one
+// ran ~150 lines later, after the ledger sync, and that is what made the
+// repricing worthless.
+//
+// 2026-11-02, DEMO-HOMS booking 7bpsi7UKwCNGnEhirJ7S: a 2-night stay extended
+// to 6 repriced CORRECTLY -- the Worker wrote nativeSubtotal 1640, fee 98.40,
+// total 1,738.40, and GHL's API confirmed those numbers in the response -- and
+// the invoice read 1,550 with two lines seconds later. Changing a booking's
+// dates makes GHL regenerate a calendar-sourced invoice from the booking's own
+// products, wiping the cleaning fee, the add-ons and the processing fee. Both
+// writes landed in the same second, so updatedAt showed only one of them and
+// the Worker looked guilty for most of a day.
+//
+// This asserts the sequence rather than the result because the result is not
+// observable from here: GHL's regeneration is GHL's, and a stub cannot
+// reproduce it. What a test CAN pin is that we no longer hand it the chance.
+{
+  const out = await reschedule("2026-10-22");
+  assert.strictEqual(out.status, 200, JSON.stringify(out.body));
+
+  const cal = callOrder.indexOf("calendar");
+  const inv = callOrder.indexOf("invoice");
+  assert.notStrictEqual(cal, -1, "the calendar booking was never updated");
+  assert.notStrictEqual(inv, -1, "the invoice was never repriced");
+  assert.ok(cal < inv,
+    `the calendar move must precede the invoice reprice, or GHL's regeneration ` +
+    `discards it -- got ${JSON.stringify(callOrder)}`);
+  console.log("8) The calendar move precedes the invoice reprice, so GHL cannot discard the new pricing");
+}

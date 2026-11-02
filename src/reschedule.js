@@ -658,6 +658,24 @@ export async function handleReschedule(request, env) {
   snapshot.charges.grandTotal = round2(
     newRent + snapshot.charges.cleaningFee + snapshot.charges.processingFee + newDeposit
   );
+  // The calendar move runs BEFORE the invoice reprice, and the order is
+  // load-bearing. It used to run ~150 lines further down, after the ledger sync.
+  //
+  // 2026-11-02, booking 7bpsi7UKwCNGnEhirJ7S: a 2-night stay extended to 6
+  // repriced CORRECTLY -- the Worker wrote nativeSubtotal 1640, fee 98.40,
+  // total 1,738.40, and GHL's own API confirmed those numbers back -- and the
+  // invoice read 1,550 with two lines seconds later. Changing a booking's dates
+  // makes GHL regenerate a calendar-sourced invoice from the booking's own
+  // products (the listing and the deposit), which wipes the cleaning fee, every
+  // add-on and the processing fee. Both writes fell in the same second, so
+  // updatedAt never showed two of them and the Worker looked like the culprit
+  // for most of a day.
+  //
+  // Moving the dates first lets that regeneration happen, then reprices on top
+  // of whatever GHL leaves behind. The settlement object is the oracle: on a
+  // correct run the invoice ends up matching settlement.total.
+  const calendar = await updateGhlBookingDates(env, tenant, snapshot, newCheckIn, newCheckOut);
+
   // Reprice the guest's invoice now that the snapshot holds the new totals --
   // buildAppendItems reads them, so this cannot run back in the settlement
   // branch where the charges are still the old stay's.
@@ -819,7 +837,6 @@ export async function handleReschedule(request, env) {
     ghlOk = false;
   }
 
-  const calendar = await updateGhlBookingDates(env, tenant, snapshot, newCheckIn, newCheckOut);
 
   // Money owed back to the guest that no gateway is going to move: either there
   // was no capture to refund against (the ghl_invoice gateway, by design) or a
