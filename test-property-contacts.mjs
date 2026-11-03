@@ -26,6 +26,16 @@ const ASSOCIATIONS = [
 
 const property = (relations) => ({ id: "p1", properties: { property_name: "Casa Bonita" }, relations });
 
+// The owner's revenue split lives on the contact as a custom field, resolved by
+// key against the location's field list -- so a case that sets one has to serve
+// the definition as well as the value.
+const SPLIT_FIELD_ID = "field-revenue-split-owner";
+const SPLIT_FIELD_KEY = "contact.revenue_split_owner_";
+
+// Case 3 builds the GHL stub; case 3b drives the same one with a split set, so
+// the builder is shared rather than written twice and allowed to drift.
+let serveGhl;
+
 // ---- 1. two contacts on one property, told apart ---------------------
 // Both are contacts. The only thing distinguishing them is WHICH association
 // each relation belongs to, so reading the object type alone picks whichever
@@ -76,17 +86,21 @@ const property = (relations) => ({ id: "p1", properties: { property_name: "Casa 
 
 // ---- 3. the names, resolved end to end ------------------------------
 {
-  const serve = ({ properties = [], contacts = {} }) => {
+  const serve = ({ properties = [], contacts = {}, splitField = false }) => {
     globalThis.fetch = async (url) => {
       const u = String(url);
       const contact = u.match(/\/contacts\/([^/?]+)/);
-      const body = contact ? { contact: contacts[contact[1]] || null }
+      const body = u.includes("/customFields")
+          ? { customFields: splitField ? [{ id: SPLIT_FIELD_ID, fieldKey: SPLIT_FIELD_KEY }] : [] }
+        : contact ? { contact: contacts[contact[1]] || null }
         : u.includes("/associations/") ? { associations: ASSOCIATIONS }
         : u.includes("custom_objects.properties") ? { records: properties }
         : { records: [] };
       return { ok: true, status: 200, text: async () => JSON.stringify(body) };
     };
   };
+
+  serveGhl = serve;
 
   serve({
     properties: [property([
@@ -95,13 +109,20 @@ const property = (relations) => ({ id: "p1", properties: { property_name: "Casa 
     ])],
     contacts: { "c-owner": { firstName: "Carlos", lastName: "Mendoza" }, "c-manager": { name: "Rosa Jiménez" } },
   });
+  // The whole return shape, not just the names: since 2026-10-25 the resolver
+  // also answers with the owner's own revenue split. Both split keys are
+  // undefined here because this owner has none set, and undefined rather than
+  // null is load-bearing -- writeLedgerEntries reads them with "??", so
+  // undefined falls through to the account percentage where a null would read as
+  // a deliberate 0% and hand the owner nothing. Asserted as the whole object on
+  // purpose: a field appearing here unannounced is what this test is for.
   assert.deepStrictEqual(await resolvePayoutNamesFromGhl("pit", "L1", "Casa Bonita"),
-    { ownerName: "Carlos Mendoza", managerName: "Rosa Jiménez" });
+    { ownerName: "Carlos Mendoza", managerName: "Rosa Jiménez", ownerPct: undefined, splitNote: undefined });
 
   // A property nobody linked resolves nothing, so the configured names stand.
   serve({ properties: [property([])] });
   assert.deepStrictEqual(await resolvePayoutNamesFromGhl("pit", "L1", "Casa Bonita"),
-    { ownerName: undefined, managerName: undefined });
+    { ownerName: undefined, managerName: undefined, ownerPct: undefined, splitNote: undefined });
 
   // The RIGHT property, on an account that has several. Taking the first record
   // would resolve every booking to whoever owns whichever property GHL returned
@@ -124,6 +145,40 @@ const property = (relations) => ({ id: "p1", properties: { property_name: "Casa 
   assert.deepStrictEqual(await resolvePayoutNamesFromGhl(null, "L1", "Casa Bonita"), {},
     "and an account with no PIT does not try");
   console.log("3) Owner and manager names resolve from their linked contacts, and resolve to nothing when unlinked");
+}
+
+// ---- 3b. the split reaches the caller, not just fetchContactPayout --------
+// test-per-owner-split.mjs proves fetchContactPayout reads the field, and proves
+// the split arithmetic, each on its own. Neither says the two are joined: a
+// resolver that stopped calling fetchContactPayout, or dropped its percentage on
+// the way out, passes that whole file AND every assertion in case 3 above --
+// because "no split set" and "split thrown away" both look like undefined.
+{
+  const withSplit = (value) => {
+    serveGhl({
+      properties: [property([{ associationId: OWNER_ASSOC, objectKey: "contact", recordId: "c-owner" }])],
+      contacts: { "c-owner": { name: "Carlos Mendoza", customFields: [{ id: SPLIT_FIELD_ID, value }] } },
+      splitField: true,
+    });
+    return resolvePayoutNamesFromGhl("pit", "L1", "Casa Bonita");
+  };
+
+  // A PERCENTAGE on the contact has to arrive as the FRACTION the ledger
+  // multiplies by. 70 reaching the caller unconverted would pay out 7000%.
+  const set = await withSplit(70);
+  assert.strictEqual(set.ownerPct, 0.7, "70 on the owner's contact resolves as 0.70");
+  assert.strictEqual(set.splitNote, undefined, "and warns about nothing, because a set split is not a fault");
+  assert.strictEqual(set.ownerName, "Carlos Mendoza", "and the name comes from the same read");
+
+  // 0% is a real arrangement, and has to survive a chain written with ?? and ||.
+  assert.strictEqual((await withSplit(0)).ownerPct, 0, "a deliberate 0% is carried through, not read as unset");
+
+  // A garbled split falls back AND says so, rather than coercing to 0% in silence.
+  const garbled = await withSplit("eighty-five");
+  assert.strictEqual(garbled.ownerPct, undefined, "an unusable split falls back to the account percentage");
+  assert.match(garbled.splitNote, /not a usable percentage/, "and reports why it fell back");
+  assert.strictEqual(garbled.ownerName, "Carlos Mendoza", "while the name still resolves");
+  console.log("3b) The owner's own revenue split resolves through to the caller, and an unusable one falls back loudly");
 }
 
 // ---- 4. GHL being unreachable costs a name, never a settlement -------
