@@ -19,7 +19,10 @@ import { handleSupportList } from "./support.js";
 import {
   handleHostLoginStart, handleHostLoginVerify, handleHostLogout, requireHost,
 } from "./host-auth.js";
-import { handleHostPostRequest } from "./host-board.js";
+import {
+  handleHostPostRequest, handleHostListRequests, handleHostClaimRequest,
+  handleHostReleaseRequest, handleHostFulfilledRequest,
+} from "./host-board.js";
 import { requireAdmin, requireProvision, requireServices, handleLogin, handleLogout } from "./auth.js";
 import { invoicingFetch } from "./invoicing.js";
 import { provision } from "./provision.js";
@@ -1203,13 +1206,27 @@ export default {
     if (url.pathname === "/api/host/requests" && request.method === "POST") {
       return handleHostPostRequest(request, env);
     }
+    if (url.pathname === "/api/host/requests" && request.method === "GET") {
+      return handleHostListRequests(request, env);
+    }
+    // /api/host/requests/<id>/<action>. The id is matched rather than split off
+    // positionally so a path with extra segments cannot smuggle one through.
+    const boardAction = url.pathname.match(
+      /^\/api\/host\/requests\/([A-Za-z0-9_-]{1,64})\/(claim|release|fulfilled)$/
+    );
+    if (boardAction && request.method === "POST") {
+      const [, requestId, action] = boardAction;
+      if (action === "claim") return handleHostClaimRequest(request, env, requestId);
+      if (action === "release") return handleHostReleaseRequest(request, env, requestId);
+      return handleHostFulfilledRequest(request, env, requestId);
+    }
     if (url.pathname.startsWith("/api/host/")) {
       const host = await requireHost(request, env);
       if (host.denied) return host.denied;
-      // No board route exists yet. Answering 404 here, INSIDE the gate, keeps
-      // the board's route list from being readable by anyone who is not signed
-      // in -- an unauthenticated 404 and an unauthenticated 401 are different
-      // answers, and the difference is a map.
+      // Answering 404 here, INSIDE the gate, keeps the board's route list from
+      // being readable by anyone who is not signed in -- an unauthenticated 404
+      // and an unauthenticated 401 are different answers, and the difference is
+      // a map.
       return Response.json({ error: "Not found" }, { status: 404 });
     }
 
