@@ -273,6 +273,45 @@ async function boardAccounts(env) {
 //
 // The guest's name is NOT in this payload and must never be. It would put the
 // poster's client into an email sent to another host.
+// The payload GHL maps.
+//
+// Three rules, all of them about the mapping step rather than about us. GHL's
+// Inbound Webhook trigger learns the field list from a sample request, and
+// whatever is not in that sample cannot be referenced in the workflow
+// afterwards. So:
+//
+//   FLAT. A nested `poster: {label}` is fragile to reference and awkward to
+//   read in the builder. Top-level keys only.
+//
+//   EVERY KEY ON EVERY EVENT. `releaseCount` and `reason` only mean something
+//   on a release, but if they are absent from a `claimed` sample they are
+//   unmappable, and one workflow has to handle all four events.
+//
+//   NEVER NULL. An empty or null value can be dropped when the sample is
+//   captured, which silently costs a merge tag. Empty string, or 0.
+//
+// Changing this shape after Yari has mapped it means rebuilding the workflow,
+// so it is worth being fussy here and nowhere else.
+function boardEventPayload({
+  event, opp, posterAccount, claimerAccount, releaseCount = 0, reason = "",
+}) {
+  const text = (v) => (v == null ? "" : String(v));
+  return {
+    event,
+    requestCode: text(opp.id),
+    zone: text(cfOf(opp, FIELD.zone)),
+    checkIn: text(cfOf(opp, FIELD.checkIn)).slice(0, 10),
+    checkOut: text(cfOf(opp, FIELD.checkOut)).slice(0, 10),
+    guests: Number(cfOf(opp, FIELD.guests) || 0),
+    posterAccountId: text(posterAccount?.locationId),
+    posterLabel: text(posterAccount?.label),
+    claimerAccountId: text(claimerAccount?.locationId),
+    claimerLabel: text(claimerAccount?.label),
+    releaseCount: Number(releaseCount || 0),
+    reason: text(reason),
+  };
+}
+
 async function notifyBoardEvent(env, payload) {
   const url = env.HOST_BOARD_EVENT_URL;
   if (!url) {
@@ -500,16 +539,12 @@ export async function handleHostClaimRequest(request, env, id) {
       }, 409);
     }
 
-    const notified = await notifyBoardEvent(env, {
-      event: "claimed",
-      requestCode: opp.id,
-      zone: cfOf(opp, FIELD.zone),
-      checkIn: String(cfOf(opp, FIELD.checkIn) || "").slice(0, 10),
-      checkOut: String(cfOf(opp, FIELD.checkOut) || "").slice(0, 10),
-      guests: cfOf(opp, FIELD.guests),
-      poster: { accountId: poster?.locationId || null, label: poster?.label || null },
-      claimer: { accountId: host.locationId, label: me?.label || null },
-    });
+    const notified = await notifyBoardEvent(env, boardEventPayload({
+      event: "claimed", opp,
+      posterAccount: poster,
+      claimerAccount: me || { locationId: host.locationId },
+      releaseCount: Number(cfOf(opp, CLAIM.releases) || 0),
+    }));
 
     return json({ ok: true, claimed: true, requestCode: opp.id, notified });
   } catch (err) {
@@ -563,24 +598,15 @@ export async function handleHostReleaseRequest(request, env, id) {
       [CLAIM.releases]: releaseCount,
     });
 
-    const notified = await notifyBoardEvent(env, {
-      event: isClaimer ? "released_by_claimer" : "released_by_poster",
-      requestCode: opp.id,
-      zone: cfOf(opp, FIELD.zone),
-      checkIn: String(cfOf(opp, FIELD.checkIn) || "").slice(0, 10),
-      checkOut: String(cfOf(opp, FIELD.checkOut) || "").slice(0, 10),
-      guests: cfOf(opp, FIELD.guests),
-      poster: {
-        accountId: accounts.byContact.get(posterContactId)?.locationId || null,
-        label: accounts.byContact.get(posterContactId)?.label || null,
+    const notified = await notifyBoardEvent(env, boardEventPayload({
+      event: isClaimer ? "released_by_claimer" : "released_by_poster", opp,
+      posterAccount: accounts.byContact.get(posterContactId),
+      claimerAccount: {
+        locationId: claimedByAccount,
+        label: cfOf(opp, CLAIM.byLabel),
       },
-      claimer: {
-        accountId: claimedByAccount || null,
-        label: cfOf(opp, CLAIM.byLabel) || null,
-      },
-      releaseCount,
-      reason,
-    });
+      releaseCount, reason,
+    }));
 
     return json({
       ok: true, released: true, requestCode: opp.id,
@@ -623,22 +649,16 @@ export async function handleHostFulfilledRequest(request, env, id) {
     const accounts = await boardAccounts(env);
     await writeStage(pit, opp, STAGE.fulfilled, {});
 
-    const notified = await notifyBoardEvent(env, {
-      event: "fulfilled",
-      requestCode: opp.id,
-      zone: cfOf(opp, FIELD.zone),
-      checkIn: String(cfOf(opp, FIELD.checkIn) || "").slice(0, 10),
-      checkOut: String(cfOf(opp, FIELD.checkOut) || "").slice(0, 10),
-      guests: cfOf(opp, FIELD.guests),
-      poster: {
-        accountId: host.locationId,
-        label: accounts.byLocation.get(host.locationId)?.label || null,
+    const notified = await notifyBoardEvent(env, boardEventPayload({
+      event: "fulfilled", opp,
+      posterAccount: accounts.byLocation.get(host.locationId)
+        || { locationId: host.locationId },
+      claimerAccount: {
+        locationId: cfOf(opp, CLAIM.byAccount),
+        label: cfOf(opp, CLAIM.byLabel),
       },
-      claimer: {
-        accountId: cfOf(opp, CLAIM.byAccount) || null,
-        label: cfOf(opp, CLAIM.byLabel) || null,
-      },
-    });
+      releaseCount: Number(cfOf(opp, CLAIM.releases) || 0),
+    }));
 
     return json({ ok: true, fulfilled: true, requestCode: opp.id, notified });
   } catch (err) {

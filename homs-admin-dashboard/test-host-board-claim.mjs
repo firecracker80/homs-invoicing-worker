@@ -337,8 +337,46 @@ const listFor = async (env) => (await (await handleHostListRequests(req(env), en
   assert.deepStrictEqual(hooks.map((h) => h.event),
     ["claimed", "released_by_claimer", "claimed", "released_by_poster", "claimed", "fulfilled"],
     "the four events are not distinguishable, so one workflow cannot branch on them");
-  assert.ok(hooks.every((h) => h.poster?.label && h.claimer?.label),
+
+  // GHL's Inbound Webhook trigger learns its field list from ONE sample
+  // request, and a field absent from that sample cannot be referenced in the
+  // workflow afterwards. One workflow handles all four events, so every event
+  // has to carry the identical key set -- otherwise mapping from a `claimed`
+  // sample leaves a release with no `reason` to put in the message.
+  const KEYS = [
+    "event", "requestCode", "zone", "checkIn", "checkOut", "guests",
+    "posterAccountId", "posterLabel", "claimerAccountId", "claimerLabel",
+    "releaseCount", "reason",
+  ].sort();
+  for (const h of hooks) {
+    assert.deepStrictEqual(Object.keys(h).sort(), KEYS,
+      `the ${h.event} payload has a different key set from the others, so one ` +
+      `mapping cannot serve all four events`);
+  }
+
+  // FLAT. A nested poster.label is fragile to reference in the builder.
+  for (const h of hooks) {
+    for (const [k, v] of Object.entries(h)) {
+      assert.notStrictEqual(typeof v, "object",
+        `${h.event}.${k} is nested; the payload must be flat for GHL to map it`);
+    }
+  }
+
+  // NEVER NULL. An empty value can be dropped when the sample is captured,
+  // which silently costs a merge tag.
+  for (const h of hooks) {
+    for (const [k, v] of Object.entries(h)) {
+      assert.ok(v !== null && v !== undefined,
+        `${h.event}.${k} is null, so it may not survive the mapping step`);
+    }
+  }
+
+  assert.ok(hooks.every((h) => h.posterLabel && h.claimerLabel),
     "both sides must be named or the workflow cannot introduce them");
+  const released = hooks.find((h) => h.event === "released_by_claimer");
+  assert.strictEqual(released.reason, "flooded", "the release reason has to reach the workflow");
+  assert.strictEqual(released.releaseCount, 1);
+  assert.strictEqual(typeof hooks[0].guests, "number", "guests is sent as a number, not a string");
 
   // This payload is what GHL mails from. The guest's name in here would put the
   // poster's client into a message sent to another host.
