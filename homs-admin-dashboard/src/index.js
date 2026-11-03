@@ -19,6 +19,7 @@ import { handleSupportList } from "./support.js";
 import {
   handleHostLoginStart, handleHostLoginVerify, handleHostLogout, requireHost,
 } from "./host-auth.js";
+import { handleHostPostRequest } from "./host-board.js";
 import { requireAdmin, requireProvision, requireServices, handleLogin, handleLogout } from "./auth.js";
 import { invoicingFetch } from "./invoicing.js";
 import { provision } from "./provision.js";
@@ -1198,6 +1199,9 @@ export default {
     }
     if (url.pathname === "/api/host/logout" && request.method === "POST") {
       return handleHostLogout();
+    }
+    if (url.pathname === "/api/host/requests" && request.method === "POST") {
+      return handleHostPostRequest(request, env);
     }
     if (url.pathname.startsWith("/api/host/")) {
       const host = await requireHost(request, env);
