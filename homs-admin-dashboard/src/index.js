@@ -16,6 +16,10 @@ import {
 } from "./normalize.js";
 import { getTenant, resolvePit } from "./tenants.js";
 import { handleSupportList } from "./support.js";
+import {
+  handleHostLoginStart, handleHostLoginVerify, handleHostLogout, requireHost,
+} from "./host-auth.js";
+import { handleHostPostRequest } from "./host-board.js";
 import { requireAdmin, requireProvision, requireServices, handleLogin, handleLogout } from "./auth.js";
 import { invoicingFetch } from "./invoicing.js";
 import { provision } from "./provision.js";
@@ -1180,6 +1184,33 @@ export default {
       const denied = await requireServices(request, env);
       if (denied) return denied;
       return serviceRoutes[url.pathname](request, env);
+    }
+
+    // Host board: its own sign-in, its own cookie, its own scope. These sit
+    // ABOVE the dashboard's default-deny gate because requireAdmin is the wrong
+    // gate for them -- a host is not an operator and has no dashboard session.
+    // Sign-in itself is necessarily unauthenticated; everything past it goes
+    // through requireHost.
+    if (url.pathname === "/api/host/login/start" && request.method === "POST") {
+      return handleHostLoginStart(request, env);
+    }
+    if (url.pathname === "/api/host/login/verify" && request.method === "POST") {
+      return handleHostLoginVerify(request, env);
+    }
+    if (url.pathname === "/api/host/logout" && request.method === "POST") {
+      return handleHostLogout();
+    }
+    if (url.pathname === "/api/host/requests" && request.method === "POST") {
+      return handleHostPostRequest(request, env);
+    }
+    if (url.pathname.startsWith("/api/host/")) {
+      const host = await requireHost(request, env);
+      if (host.denied) return host.denied;
+      // No board route exists yet. Answering 404 here, INSIDE the gate, keeps
+      // the board's route list from being readable by anyone who is not signed
+      // in -- an unauthenticated 404 and an unauthenticated 401 are different
+      // answers, and the difference is a map.
+      return Response.json({ error: "Not found" }, { status: 404 });
     }
 
     // Every remaining /api/* route requires dashboard auth. Default-deny: a new
