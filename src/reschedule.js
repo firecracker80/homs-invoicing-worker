@@ -10,7 +10,7 @@
 
 import { calcSecurityDeposit, round2 } from "./deposit-engine.js";
 import { depositConfigFor, processingFeePctFor } from "./policy.js";
-import { writeAndSyncRows, bookingTotalOf } from "./ledger.js";
+import { writeAndSyncRows, bookingTotalOf, earnedAddOns } from "./ledger.js";
 import { updateObjectRecord } from "./ghl.js";
 import { adminAuthorized, notifyAndRecord, cancellationTier, MANUAL_REFUND_REF, MANUAL_SUFFIX } from "./cancellation.js";
 import { paymentConfirmedPayload } from "./payment.js";
@@ -409,7 +409,12 @@ export async function handleReschedule(request, env) {
       // The invoice's own recomputed fee wins over the one derived above: it is
       // what the guest will actually be asked for.
       const feeCharged = repriced.processingFee != null ? repriced.processingFee : newProcessingFee;
-      const grandTotal = round2(newRent + snapshot.charges.cleaningFee + feeCharged + newDeposit);
+      // earnedAddOns reads only addOns/petFee, neither of which a date move
+      // changes, so it is safe here even though charges.rentTotal is still the
+      // old stay's at this point.
+      const grandTotal = round2(
+        newRent + snapshot.charges.cleaningFee + earnedAddOns(snapshot) + feeCharged + newDeposit
+      );
 
       snapshot.stay = { ...snapshot.stay, checkIn: newCheckIn, checkOut: newCheckOut, nights: newNights };
       snapshot.charges.rentTotal = newRent;
@@ -656,7 +661,8 @@ export async function handleReschedule(request, env) {
   snapshot.securityDeposit.total = newDeposit;
   snapshot.securityDeposit.blocks = newDepositCalc.blocks;
   snapshot.charges.grandTotal = round2(
-    newRent + snapshot.charges.cleaningFee + snapshot.charges.processingFee + newDeposit
+    newRent + snapshot.charges.cleaningFee + earnedAddOns(snapshot)
+      + snapshot.charges.processingFee + newDeposit
   );
   // The calendar move runs BEFORE the invoice reprice, and the order is
   // load-bearing. It used to run ~150 lines further down, after the ledger sync.
@@ -697,7 +703,8 @@ export async function handleReschedule(request, env) {
       if (result.ok && result.processingFee != null) {
         snapshot.charges.processingFee = result.processingFee;
         snapshot.charges.grandTotal = round2(
-          newRent + snapshot.charges.cleaningFee + result.processingFee + newDeposit
+          newRent + snapshot.charges.cleaningFee + earnedAddOns(snapshot)
+            + result.processingFee + newDeposit
         );
       }
     } catch (err) {
