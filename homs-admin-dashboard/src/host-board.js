@@ -334,6 +334,10 @@ function publicView(opp, { accounts, viewerLocationId, viewerContactId }) {
     claimedByLabel: cfOf(opp, CLAIM.byLabel),
     claimedByMe: Boolean(claimedByAccount) && claimedByAccount === viewerLocationId,
     claimedAt: String(cfOf(opp, CLAIM.at) || "").slice(0, 10) || null,
+    // Claimed, but by nobody this Worker can name -- almost certainly moved by
+    // hand in GHL. Surfaced rather than hidden: the page should offer it as
+    // claimable, not show it as taken.
+    claimUnattributed: STAGE_NAME[opp.pipelineStageId] === "claimed" && !claimedByAccount,
     releaseCount: Number(cfOf(opp, CLAIM.releases) || 0),
     createdAt: opp.createdAt || null,
   };
@@ -431,14 +435,33 @@ export async function handleHostClaimRequest(request, env, id) {
     const { opp, error } = await loadRequest(pit, id);
     if (error) return error;
 
+    // A card can reach Claimed without a claimer.
+    //
+    // Yari, 2026-11-03: nothing on the GHL side can populate Claimed By. A
+    // workflow writes contact fields and there is no contact field for this;
+    // worse, a workflow fired by a stage change has no idea which host did the
+    // dragging, and the contact on the record is the POSTER. So a card dragged
+    // to Claimed in the GHL UI sits in Claimed with no claimer recorded.
+    //
+    // That is not a claim, and treating it as one strands the request in
+    // exactly the way this route exists to prevent: nobody could claim it
+    // ("already claimed" -- by nobody) and only the poster could free it, while
+    // the board told every other host it was taken. An unattributed hold is
+    // therefore claimable.
     const stage = STAGE_NAME[opp.pipelineStageId];
-    if (stage !== "active") {
+    const heldBy = cfOf(opp, CLAIM.byAccount);
+    const unattributed = stage === "claimed" && !heldBy;
+    if (stage !== "active" && !unattributed) {
       return json({
         error: stage === "claimed"
           ? "Another host has already claimed this request."
           : "This request is no longer open.",
         code: "not_active", stage,
       }, 409);
+    }
+    if (unattributed) {
+      console.warn(`Request ${opp.id} was in Claimed with no claimer recorded ` +
+        `(moved by hand in GHL?); claiming it for ${host.locationId}`);
     }
 
     const posterContactId = opp.contact?.id || opp.contactId || null;

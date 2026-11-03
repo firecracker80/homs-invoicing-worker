@@ -363,5 +363,42 @@ const listFor = async (env) => (await (await handleHostListRequests(req(env), en
   console.log("10) A dead webhook is reported, not swallowed, and does not undo the claim");
 }
 
+// ---- 11. a card dragged to Claimed in GHL by hand ---------------------
+// Yari, 2026-11-03: nothing on the GHL side can populate Claimed By -- a
+// workflow writes contact fields, there is no contact field for this, and a
+// stage-change workflow does not know who dragged the card. So this state is
+// reachable in normal use, not a freak case.
+//
+// Before it was handled the request was STUCK: every other host was told
+// "another host has already claimed this" when none had, and only the poster
+// could free it. That is the stranding this whole route exists to prevent.
+{
+  seed();
+  // Stage moved, no claim fields written -- exactly what a drag leaves behind.
+  const rec = store.get("opp-1");
+  store.set("opp-1", { ...rec, pipelineStageId: S_CLAIMED });
+
+  const third = await envFor(THIRD);
+  const r = (await listFor(third))[0];
+  assert.strictEqual(r.claimUnattributed, true,
+    "a hold with no claimer looks identical to a real one, so the page shows it as taken");
+  assert.strictEqual(r.claimedByLabel, null);
+
+  const res = await handleHostClaimRequest(req(third), third, "opp-1");
+  const body = await res.json();
+  assert.strictEqual(res.status, 200,
+    `a hand-dragged card could not be claimed by anyone: ${JSON.stringify(body)}`);
+  assert.strictEqual(fieldOf("opp-1", CLAIM.byAccount), THIRD, "and now it has a real claimer");
+  assert.strictEqual((await listFor(third))[0].claimUnattributed, false);
+
+  // The rule must not swallow a REAL claim: once attributed, the next host is
+  // refused as before. Otherwise this fix would be a way to steal a claim.
+  const claimer = await envFor(CLAIMER);
+  const steal = await handleHostClaimRequest(req(claimer), claimer, "opp-1");
+  assert.strictEqual(steal.status, 409, "an attributed claim was overwritten by the next caller");
+  assert.strictEqual(fieldOf("opp-1", CLAIM.byAccount), THIRD, "and the real claimer still holds it");
+  console.log("11) An unattributed hold is claimable; a real claim still is not");
+}
+
 console.log("\nPASS — claim and release ship together, release has two callers, only the poster " +
   "marks filled, and the guest's name appears in no read and no webhook at any stage.");
