@@ -49,8 +49,8 @@ async function hmac(secret, message) {
 // The cookie used to carry the ADMIN_KEY itself. That was survivable while one
 // person held it: a client cannot be given a cookie containing the operator's
 // password.
-export async function mintSession(env, { scope, locationId = null }) {
-  const body = `${scope}.${locationId || ""}.${Math.floor(Date.now() / 1000) + SESSION_TTL_SECONDS}`;
+export async function mintSession(env, { scope, locationId = null, ttlSeconds = SESSION_TTL_SECONDS }) {
+  const body = `${scope}.${locationId || ""}.${Math.floor(Date.now() / 1000) + ttlSeconds}`;
   return `${body}.${await hmac(signingKeyFor(env), body)}`;
 }
 
