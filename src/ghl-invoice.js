@@ -669,11 +669,53 @@ export async function updateInvoiceForReschedule(
   // billed per night stays per night with a new quantity, and a line billed as
   // one lump stays one lump with a new amount. Rewriting a "9 x 135" line into
   // a single "1215" is a worse invoice even though the total matches.
-  const [stayLine, ...otherNative] = nativeItems;
+  const [stayLine, ...survivingNative] = nativeItems;
   const billedPerNight = previousNights > 1 && Number(stayLine.qty) === previousNights;
   const newStayLine = billedPerNight
     ? { ...stayLine, qty: snapshot.stay.nights }
     : { ...stayLine, amount: round2(snapshot.charges.rentTotal), qty: 1 };
+
+  // REBUILD, don't pass through.
+  //
+  // Moving a booking's dates makes GHL regenerate a calendar-sourced invoice
+  // from the booking's own products, which is the listing and the deposit and
+  // nothing else. The cleaning fee, every add-on and our processing fee are
+  // gone by the time we read it. Measured twice on DEMO-HOMS: 2026-11-02 the
+  // reprice ran first and was overwritten; 2026-11-03, with the calendar moved
+  // first, the Worker read nativeSubtotal 1550 on a booking priced at 1640 and
+  // charged a correct 6% of the wrong base. Under-collected 188.40 and 95.40.
+  //
+  // So the invoice is stated from the snapshot rather than patched from
+  // whatever survived. ENSURE-PRESENT, never append: if GHL did not strip a
+  // line, adding a second one would bill the guest twice for it, which is a
+  // worse failure than the one being fixed.
+  const cur = tenant.currency || "USD";
+  const sameName = (a, b) =>
+    String(a || "").trim().toLowerCase() === String(b || "").trim().toLowerCase();
+
+  // `present` grows as lines are restored, so two addOnDetail entries sharing a
+  // name cannot both be added either.
+  const present = [newStayLine, ...survivingNative];
+  const restored = [];
+  const restore = (line) => { restored.push(line); present.push(line); };
+  const has = (pred) => present.some(pred);
+
+  // Cleaning. The name must still satisfy isCleaningFee or the ledger splits it
+  // with the owner instead of paying the cleaner out of it.
+  const cleaningFee = round2(snapshot.charges.cleaningFee || 0);
+  if (cleaningFee > 0 && !has(isCleaningFee)) {
+    const name = snapshot.charges.cleaningFeeName
+      || (String(tenant?.locale || "").toLowerCase().startsWith("es") ? "Limpieza" : "Cleaning Fee");
+    restore({ name, currency: cur, amount: cleaningFee, qty: 1 });
+  }
+
+  // Add-ons, by name, from what the booking was actually priced with.
+  for (const addOn of snapshot.charges.addOnDetail || []) {
+    const amount = round2(addOn.amount || 0);
+    if (amount <= 0) continue;
+    if (has((i) => sameName(i?.name, addOn.name))) continue;
+    restore({ name: addOn.name, currency: cur, amount, qty: 1 });
+  }
 
   // The processing fee is recomputed from the invoice's own new subtotal rather
   // than read off the snapshot.
@@ -685,8 +727,7 @@ export async function updateInvoiceForReschedule(
   // original stay's amount understates what the guest owes. Same basis
   // repriceFromInvoice used when the invoice was first built: the fee applies to
   // everything on it, plus any deposit.
-  const cur = tenant.currency || "USD";
-  const nativeSubtotal = round2([newStayLine, ...otherNative]
+  const nativeSubtotal = round2([newStayLine, ...survivingNative, ...restored]
     .reduce((s, i) => s + Number(i.amount || 0) * Number(i.qty || 1), 0));
   // Only a Worker-billed deposit counts on top of the invoice's own subtotal,
   // and only a Worker-billed deposit gets a line. A GHL-native Security
@@ -702,7 +743,7 @@ export async function updateInvoiceForReschedule(
   if (deposit > 0) ourLines.push({ name: DEPOSIT_LINE, currency: cur, amount: deposit, qty: 1 });
   if (processingFee > 0) ourLines.push({ name: feeLineFor(tenant), currency: cur, amount: processingFee, qty: 1 });
 
-  const invoiceItems = [newStayLine, ...otherNative, ...ourLines];
+  const invoiceItems = [newStayLine, ...survivingNative, ...restored, ...ourLines];
 
   const updated = await ghlFetch(
     tenant, env, `/invoices/${invoiceId}`,
@@ -731,6 +772,33 @@ export async function updateInvoiceForReschedule(
   // GHL computes amountDue, so report what it decided rather than what we
   // expected it to decide -- those disagreeing is worth seeing, not hiding.
   const after = updated?.invoice || updated || {};
+
+  // RECONCILE. Everything above fixes a clobber the Worker causes itself, by
+  // moving the dates. It cannot fix one caused afterwards: a manager who edits
+  // the booking's dates in the GHL calendar once this has run re-triggers the
+  // same regeneration, and the lines go again with nothing watching.
+  //
+  // So state what the invoice was meant to total and compare it to what GHL
+  // says it totals. The two were already disagreeing on 2026-11-03 -- the
+  // receipt carried amount 424 against amountDue 328.60 -- and nothing looked
+  // at it. This is the one check that would have caught the whole bug on the
+  // first run, from data the Worker already had in hand.
+  //
+  // Reported, not thrown: the dates have moved and the ledger is about to be
+  // written, so the useful outcome is a receipt that says "this invoice is
+  // wrong by 95.40", not a failed reschedule.
+  const expectedTotal = round2(nativeSubtotal + deposit + processingFee);
+  const ghlTotal = Number(after.total);
+  const reconciled = !Number.isFinite(ghlTotal) || Math.abs(ghlTotal - expectedTotal) <= 0.01;
+  if (!reconciled) {
+    console.error(
+      `Invoice ${invoiceId} does not total what was billed: GHL says ${ghlTotal}, ` +
+      `lines sum to ${expectedTotal} (off by ${round2(expectedTotal - ghlTotal)}). ` +
+      `Something rewrote the invoice after this update -- most likely a manual ` +
+      `calendar date change on booking ${snapshot.bookingId}.`
+    );
+  }
+
   return {
     ok: true,
     invoiceId,
@@ -740,6 +808,11 @@ export async function updateInvoiceForReschedule(
     nativeSubtotal,
     amountDue: after.amountDue ?? null,
     total: after.total ?? null,
+    // What had to be put back, so a receipt says whether GHL stripped anything
+    // on this run rather than leaving it to be inferred from the arithmetic.
+    restoredLines: restored.map((i) => i.name),
+    expectedTotal,
+    reconciled,
   };
 }
 
@@ -816,6 +889,11 @@ export async function enrichAndSendInvoice(
   if (nativeCleaning > 0) {
     snapshot.charges.cleaningFee = nativeCleaning;
     snapshot.charges.cleaningFeeSource = "ghl_native";
+    // The NAME too, not just the amount. A reschedule has to put this line back
+    // after GHL regenerates the invoice, and a line it has to invent a name for
+    // is a line the guest sees change wording between versions of their bill.
+    const cleaningLine = nativeItems.find(isCleaningFee);
+    if (cleaningLine?.name) snapshot.charges.cleaningFeeName = String(cleaningLine.name).trim();
   }
 
   // Fill in the property from the invoice when the booking webhook could not
