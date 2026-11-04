@@ -690,11 +690,36 @@ export async function handleReschedule(request, env) {
   // ledger is about to be written, and an invoice that could not be repriced is
   // one call to recover. Throwing would leave the caller unsure which half
   // happened, which is the same trap provisionTenantRecord avoids.
-  if (settlement.type === "invoice_balance_due") {
+  // NOT gated on settlement.type.
+  //
+  // It was, and that made #168 a half-fix. `invoice_balance_due` is set in one
+  // place only -- the charge branch, when the guest owes MORE -- so a
+  // SHORTENING fell to refund_partial_manual, admin_fee_only, or stayed "none",
+  // and skipped the rebuild entirely. But updateGhlBookingDates above runs
+  // unconditionally, and GHL regenerates a calendar-sourced invoice on any date
+  // change, in either direction. So shortening a stay stripped the cleaning
+  // fee, every add-on and the processing fee off a live invoice and put nothing
+  // back -- and said nothing, because the reconcile warning that would have
+  // announced it lives inside this very block.
+  //
+  // My own test for #168 only extended a stay, which is why the suite was green
+  // over it.
+  //
+  // Safe in both directions, and that is why this does not wait on measuring
+  // whether GHL also strips on a shortening: the rebuild is ensure-present. If
+  // nothing was stripped it adds nothing and the fee recomputes to the same
+  // number; if something was, it is restored. The gate is therefore "is there
+  // an invoice to keep correct", not "is the guest paying more".
+  const settleViaForInvoice = snapshot.gateway || tenant.gateway || "paypal";
+  const invoiceToRebuild = settleViaForInvoice === "ghl_invoice"
+    ? (settlement.invoiceId || snapshot.ghlInvoice?.invoiceId || null)
+    : null;
+
+  if (invoiceToRebuild) {
     try {
       const result = await updateInvoiceForReschedule({
         tenant, env, locationId: snapshot.locationId,
-        invoiceId: settlement.invoiceId, snapshot, previousNights: oldStay.nights,
+        invoiceId: invoiceToRebuild, snapshot, previousNights: oldStay.nights,
       });
       settlement = { ...settlement, ...result };
       // The guest is now billed a larger fee, so the booking has to say so --
