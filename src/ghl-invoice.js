@@ -172,7 +172,37 @@ const LEGACY_LINES = ["Cargo por procesamiento / Processing fee"];
 // changes, or an invoice enriched before this one did, still has to be
 // recognised as ours -- otherwise its old line survives the strip, a new one is
 // appended beside it, and the guest pays the processing fee twice.
-const OUR_LINES = new Set([DEPOSIT_LINE, FEE_LINE_ES, FEE_LINE_EN, ...LEGACY_LINES]);
+const OUR_LINES = new Set([DEPOSIT_LINE, FEE_LINE_ES, FEE_LINE_EN, ...LEGACY_LINES]
+  .map((n) => n.trim().toLowerCase()));
+
+// Compared case-insensitively, and trimmed.
+//
+// The comment above LEGACY_LINES already names this failure mode, for renames
+// rather than for case: a line of ours that is not recognised "would survive
+// the strip AND a new one would be appended, and the guest would be charged the
+// processing fee twice". Exact-string matching left the same hole open for
+// capitalisation. A GHL product line named "Processing Fee" differs from the
+// Worker's "Processing fee" in one letter, and on DEMO-HOMS INV-000032 carries
+// one -- so it survived the strip, sat inside the fee basis (6% charged ON a
+// processing fee), and collected a second fee line beside it.
+//
+// It also defeated invoiceHasWorkerLines, which is the guard that stops an
+// already-enriched invoice being enriched again.
+//
+// Deliberately NOT pattern-based. OUR_LINES answers "did the Worker write this
+// exact line"; isFeeLine/FEE_LINE_PATTERNS answers "is this line not the stay".
+// Making this one fuzzy would strip a native Cleaning Fee or Tax as though we
+// had written it. The divergence between the two is the design; only the case
+// sensitivity was a defect.
+//
+// Checked for false positives before changing it: lowercasing catches
+// "Processing Fee" and "PROCESSING FEE" and leaves Security Deposit, Cleaning
+// Fee, Late Check-out, Early Check-In, Tax, Pet Fee and Airport Shuttle native.
+// A native "Security Deposit" does not collide with DEPOSIT_LINE either way,
+// because DEPOSIT_LINE is the combined
+// "Depósito de seguridad / Security deposit" string.
+export const isOurLine = (item) =>
+  OUR_LINES.has(String(item?.name ?? "").trim().toLowerCase());
 
 // Who bills the security deposit.
 //
@@ -372,7 +402,7 @@ export async function invoiceHasWorkerLines({ tenant, env, locationId, invoiceId
   const inv = await ghlFetch(
     tenant, env, `/invoices/${invoiceId}?altId=${encodeURIComponent(locationId)}&altType=location`, {}, fetchImpl
   );
-  return (inv.invoiceItems || []).some(i => OUR_LINES.has(i?.name)) || isSettled(inv.status);
+  return (inv.invoiceItems || []).some(isOurLine) || isSettled(inv.status);
 }
 
 // --- enrich + send ---------------------------------------------------------
@@ -659,7 +689,7 @@ export async function updateInvoiceForReschedule(
 
   // Our own lines are rebuilt from the new totals rather than edited, the same
   // way enrichAndSendInvoice treats them.
-  const nativeItems = (existing.invoiceItems || []).filter((i) => !OUR_LINES.has(i?.name));
+  const nativeItems = (existing.invoiceItems || []).filter((i) => !isOurLine(i));
   if (!nativeItems.length) {
     return { ok: false, reason: "no_native_items", detail: `Invoice ${invoiceId} has no stay line to reprice.` };
   }
@@ -840,7 +870,7 @@ export async function enrichAndSendInvoice(
   const { declined, unanswered } = optionalAddOnsToRemove(tenant, addOnAnswers);
   // A run that died after its PUT left our lines on the draft already; drop
   // them so finishing it doesn't add them twice.
-  const ghlItems = (existing.invoiceItems || []).filter(i => !OUR_LINES.has(i?.name));
+  const ghlItems = (existing.invoiceItems || []).filter(i => !isOurLine(i));
   const nativeItems = ghlItems.filter((i) =>
     !declined.some((name) => matchesAddOnName(i?.name, name))
   );
