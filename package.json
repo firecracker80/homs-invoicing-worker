@@ -2,8 +2,9 @@
   "name": "booking-worker",
   "type": "module",
   "scripts": {
-    "test": "node test-worker.js",
-    "deploy": "wrangler deploy"
+    "test": "node run-tests.mjs",
+    "deploy": "wrangler deploy",
+    "test:all": "node run-tests.mjs --all"
   },
   "dependencies": {
     "esbuild": "^0.28.1"
