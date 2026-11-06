@@ -373,6 +373,32 @@ const listFor = async (env) => (await (await handleHostListRequests(req(env), en
 
   assert.ok(hooks.every((h) => h.posterLabel && h.claimerLabel),
     "both sides must be named or the workflow cannot introduce them");
+
+  // TWO date formats on purpose, and this pins both so they cannot drift.
+  //
+  // The webhook sends DD-MM-YYYY because the emails print it raw and an
+  // inbound-webhook workflow has no contact or locale to format from (Yari,
+  // 2026-11-06). The routes' own request and response contract stays
+  // YYYY-MM-DD, because that is what sorts, compares and round-trips.
+  //
+  // Getting either one wrong is silent: a DD-MM date in the API would still
+  // look like a date and would sort wrongly, and an ISO date in an email would
+  // just read oddly to a DR host.
+  for (const h of hooks) {
+    assert.match(h.checkIn, /^\d{2}-\d{2}-\d{4}$/,
+      `webhook checkIn "${h.checkIn}" must be DD-MM-YYYY for the emails`);
+    assert.match(h.checkOut, /^\d{2}-\d{2}-\d{4}$/,
+      `webhook checkOut "${h.checkOut}" must be DD-MM-YYYY for the emails`);
+    // And it is the SAME day, not a day shifted by parsing through UTC.
+    const [dd, mm, yyyy] = h.checkIn.split("-");
+    assert.strictEqual(`${yyyy}-${mm}-${dd}`, soon(30),
+      "the reformatted date is not the same calendar day -- it went through a Date");
+  }
+  const board = await listFor(poster);
+  assert.match(board[0].checkIn, /^\d{4}-\d{2}-\d{2}$/,
+    `the board READ must stay YYYY-MM-DD, got "${board[0].checkIn}" -- the page and ` +
+    `anything that sorts depend on it`);
+  assert.strictEqual(board[0].checkIn, soon(30));
   const released = hooks.find((h) => h.event === "released_by_claimer");
   assert.strictEqual(released.reason, "flooded", "the release reason has to reach the workflow");
   assert.strictEqual(released.releaseCount, 1);
