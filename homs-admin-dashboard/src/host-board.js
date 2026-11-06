@@ -57,6 +57,25 @@ const yesNo = (v) => (v === true || v === "Yes" || v === "yes" ? "Yes" : "No");
 // dashboard date a day early once.
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 
+// DD-MM-YYYY, for the webhook only.
+//
+// Yari's ruling 2026-11-06 (via Cadence): the board emails show dates
+// DD-MM-YYYY. They print the payload raw -- an inbound-webhook workflow has no
+// contact and no locale to format from -- so the formatting has to happen here
+// or not at all. Matches what the board page and the dashboard already show.
+//
+// String surgery, never Date. A bare "2026-12-03" parses as UTC midnight, which
+// is the evening of the 2nd in the DR, and that has already shifted every
+// dashboard date by a day once.
+//
+// THE ROUTES' OWN CONTRACT DOES NOT MOVE. Requests and responses stay
+// YYYY-MM-DD, because that is what sorts, compares and round-trips. Only the
+// outbound webhook values are reformatted, and only for display.
+const ddmmyyyy = (iso) => {
+  const m = ISO_DATE.exec(String(iso || "").slice(0, 10));
+  return m ? `${m[0].slice(8, 10)}-${m[0].slice(5, 7)}-${m[0].slice(0, 4)}` : "";
+};
+
 async function ghl(pit, path, init = {}) {
   const res = await fetch(`https://services.leadconnectorhq.com${path}`, {
     ...init,
@@ -300,8 +319,10 @@ function boardEventPayload({
     event,
     requestCode: text(opp.id),
     zone: text(cfOf(opp, FIELD.zone)),
-    checkIn: text(cfOf(opp, FIELD.checkIn)).slice(0, 10),
-    checkOut: text(cfOf(opp, FIELD.checkOut)).slice(0, 10),
+    // DD-MM-YYYY: the emails print these raw. Field NAMES and TYPES are
+    // unchanged (still text), so the mapped trigger does not need redoing.
+    checkIn: ddmmyyyy(cfOf(opp, FIELD.checkIn)),
+    checkOut: ddmmyyyy(cfOf(opp, FIELD.checkOut)),
     guests: Number(cfOf(opp, FIELD.guests) || 0),
     posterAccountId: text(posterAccount?.locationId),
     posterLabel: text(posterAccount?.label),
