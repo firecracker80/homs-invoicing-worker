@@ -722,6 +722,41 @@ export async function handleReschedule(request, env) {
         invoiceId: invoiceToRebuild, snapshot, previousNights: oldStay.nights,
       });
       settlement = { ...settlement, ...result };
+
+      // RESTATE A REFUND FROM THE INVOICE, not from the rent delta.
+      //
+      // rentRefundAmt comes from netRentDelta, which knows only that a night
+      // came off. It never asks whether the guest has an outstanding balance
+      // that the reduction comes out of first. On a part-paid booking that
+      // double-counts: INV-000039 had 1314.40 paid of 1950.40, the shortened
+      // invoice is 1750.40, so the guest still OWES 436.00 and is owed nothing
+      // -- yet the settlement instructed a 200.00 cash refund. Paying it would
+      // have collected 1538.40 against 1750.40.
+      //
+      // Only a genuine overpayment is cash. Note this lands on the number an
+      // operator would have guessed anyway: 636.00 due less the 200.00 night is
+      // 436.00, which is exactly right once the fee stays put.
+      if (result.ok && settlement.type === "refund_partial_manual"
+          && result.paidBefore != null && result.total != null) {
+        const overpaid = round2(Math.max(0, result.paidBefore - result.total));
+        settlement = {
+          ...settlement,
+          amount: overpaid,
+          refundBasis: "invoice_overpayment",
+          paidBefore: result.paidBefore,
+          newInvoiceTotal: result.total,
+          // Processing fees are not refundable, so say so on the record rather
+          // than leaving a reader to infer it from the arithmetic.
+          processingFeeRefundable: false,
+          feeNotRefunded: result.feeNotRefunded ?? 0,
+          parts: overpaid > 0
+            ? [{ type: "rent_refund_needed_manual", amount: overpaid }]
+            : [],
+          ...(overpaid === 0
+            ? { note: "The shortening comes off the balance still owed. No cash refund." }
+            : {}),
+        };
+      }
       // The guest is now billed a larger fee, so the booking has to say so --
       // the invoice and the snapshot disagreeing about what was charged is the
       // same class of drift #61 closed on the Transaction record.

@@ -767,7 +767,28 @@ export async function updateInvoiceForReschedule(
   // recording a native deposit, so they are fixed in the same change.
   const deposit = workerBillsDeposit(snapshot) ? round2(snapshot.securityDeposit.total) : 0;
   const feePct = processingFeePctFor(tenant, snapshot);
-  const processingFee = round2(feePct * (nativeSubtotal + deposit));
+  const computedFee = round2(feePct * (nativeSubtotal + deposit));
+
+  // PROCESSING FEES ARE NOT REFUNDABLE. Yari, 2026-11-10.
+  //
+  // So a fee already collected is never reduced. The 6% recovers the gateway's
+  // cut AND the USD-to-DOP spread, both of which were spent the moment the
+  // guest paid and are not coming back; recomputing the fee downward on a
+  // shortening would write an invoice that disagrees with the money actually
+  // taken, and hand the guest a credit for something the business cannot
+  // recover.
+  //
+  // Measured case: 7 nights billed a 110.40 fee on a 1840 basis. Shortened to
+  // 6, the basis falls to 1640 and the fee recomputes to 98.40 -- so the
+  // invoice would show 12.00 less fee than was charged.
+  //
+  // Floored only when the guest has actually PAID. On an unpaid booking no
+  // gateway cut and no exchange loss have been incurred, so there is nothing to
+  // protect and the fee recomputes freely. An EXTENSION is unaffected either
+  // way: the computed fee is the larger one, so the max() returns it.
+  const feeAlreadyCharged = round2(snapshot.charges?.processingFee || 0);
+  const feeIsSunk = Boolean(snapshot.settled) && feeAlreadyCharged > 0;
+  const processingFee = feeIsSunk ? Math.max(computedFee, feeAlreadyCharged) : computedFee;
 
   const ourLines = [];
   if (deposit > 0) ourLines.push({ name: DEPOSIT_LINE, currency: cur, amount: deposit, qty: 1 });
@@ -802,6 +823,13 @@ export async function updateInvoiceForReschedule(
   // GHL computes amountDue, so report what it decided rather than what we
   // expected it to decide -- those disagreeing is worth seeing, not hiding.
   const after = updated?.invoice || updated || {};
+
+  // What the guest had paid BEFORE this rewrite, from the invoice we read at the
+  // top. Captured here because it is the only reliable basis for deciding
+  // whether a shortening owes anybody cash: after the rewrite, amountDue is the
+  // new balance, and whether GHL reports an overpayment as a negative amountDue
+  // is not something to rely on.
+  const paidBefore = round2(Number(existing.total || 0) - Number(existing.amountDue || 0));
 
   // RECONCILE. Everything above fixes a clobber the Worker causes itself, by
   // moving the dates. It cannot fix one caused afterwards: a manager who edits
@@ -843,6 +871,12 @@ export async function updateInvoiceForReschedule(
     restoredLines: restored.map((i) => i.name),
     expectedTotal,
     reconciled,
+    paidBefore,
+    feeCharged: processingFee,
+    // Clamped: on an EXTENSION the computed fee is the larger one, and an
+    // unclamped subtraction reported a negative "withheld" amount (-24.00 on a
+    // 7-to-9-night case). Nothing is withheld when the fee goes up.
+    feeNotRefunded: feeIsSunk ? round2(Math.max(0, feeAlreadyCharged - computedFee)) : 0,
   };
 }
 

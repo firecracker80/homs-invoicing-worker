@@ -42,8 +42,19 @@ const RATE = 200, CLEANING = 65, ADDON = 25, DEPOSIT = 350;
 const OLD_NIGHTS = 7, NEW_NIGHTS = 5;
 const NEW_RENT = RATE * NEW_NIGHTS;                                  // 1000
 const EXPECTED_SUBTOTAL = NEW_RENT + CLEANING + ADDON + DEPOSIT;     // 1440
-const EXPECTED_FEE = Math.round(0.06 * EXPECTED_SUBTOTAL * 100) / 100;  // 86.40
-const EXPECTED_TOTAL = Math.round((EXPECTED_SUBTOTAL + EXPECTED_FEE) * 100) / 100;  // 1526.40
+
+// PROCESSING FEES ARE NOT REFUNDABLE (Yari, 2026-11-10), and this fixture is a
+// PAID booking carrying a 110.40 fee. So the fee is NOT recomputed down to 6% of
+// the new basis -- it stays at what was collected. The 6% recovers the gateway's
+// cut and the USD-to-DOP spread, both already spent.
+//
+// This expectation changed WITH the policy, not to match the code: before the
+// ruling the fee fell to 86.40 and the invoice totalled 1526.40, which showed
+// 24.00 less fee than had been taken. Both figures are kept below so the test
+// still asserts the arithmetic rather than just the outcome.
+const FEE_IF_RECOMPUTED = Math.round(0.06 * EXPECTED_SUBTOTAL * 100) / 100;  // 86.40
+const EXPECTED_FEE = 110.4;                                                 // floored: already charged
+const EXPECTED_TOTAL = Math.round((EXPECTED_SUBTOTAL + EXPECTED_FEE) * 100) / 100;  // 1550.40
 
 const STAY = { name: "Villa Azul", currency: "USD", productId: "p-stay", amount: RATE * OLD_NIGHTS, qty: 1 };
 const LATE = { name: "Late Check-out", currency: "USD", productId: "p-late", amount: ADDON, qty: 1 };
@@ -161,8 +172,12 @@ const near = (a, b) => Math.abs(Number(a) - Number(b)) <= 0.01;
 
   assert.ok(near(sumOf(sent), EXPECTED_TOTAL),
     `the rebuilt invoice totals ${sumOf(sent)}, expected ${EXPECTED_TOTAL}`);
-  assert.ok(near(named(/process/i)[0].amount, EXPECTED_FEE),
-    `fee ${named(/process/i)[0].amount}, expected 6% of ${EXPECTED_SUBTOTAL} = ${EXPECTED_FEE}`);
+  const feeBilled = named(/process/i)[0].amount;
+  assert.ok(near(feeBilled, EXPECTED_FEE),
+    `fee ${feeBilled} should be the ${EXPECTED_FEE} already collected, not reduced`);
+  assert.ok(!near(feeBilled, FEE_IF_RECOMPUTED),
+    `the fee was recomputed down to ${FEE_IF_RECOMPUTED} -- processing fees are not refundable, ` +
+    `so a collected fee must not shrink when a night comes off`);
   console.log(`1) Shortening rebuilds the invoice: ${sumOf(sent)} with the fee on the whole bill`);
 }
 
