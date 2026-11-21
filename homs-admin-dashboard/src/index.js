@@ -14,7 +14,7 @@ import {
   normalizeContact,
   resolveJoins,
 } from "./normalize.js";
-import { getTenant, resolvePit } from "./tenants.js";
+import { getTenant, resolvePit, planAtLeast, planDenied } from "./tenants.js";
 import { handleSupportList } from "./support.js";
 import {
   handleHostLoginStart, handleHostLoginVerify, handleHostLogout, requireHost,
@@ -1055,6 +1055,25 @@ async function handleProvision(request, env) {
 async function proxyStatement(env, url, { path, params, unavailableLabel }) {
   const locationId = url.searchParams.get("locationId");
   if (!locationId) return Response.json({ error: "locationId is required" }, { status: 400 });
+
+  // Plan gate -- Report tier. The line Yari drew is between running your own
+  // operation and accounting to someone else for their money, and owner and
+  // manager statements ARE that accounting.
+  //
+  // Gated inside proxyStatement rather than at each route on purpose: every
+  // statement route funnels through here, so a statement route added later is
+  // gated by construction instead of by somebody remembering to add it.
+  //
+  // Note this is deliberately a VISIBILITY gate, not a computation one. The
+  // ledger runs for every tier because settlement and refunds must be correct
+  // at Operate or the product is broken -- which is exactly why upgrading to
+  // Report shows a client their whole history immediately rather than starting
+  // them at zero.
+  const planTenant = await getTenant(env, locationId);
+  const gate = planAtLeast(planTenant, "report");
+  if (!gate.ok) {
+    return planDenied({ feature: unavailableLabel, ...gate });
+  }
 
   // An allow-list, and every name the page can send has to be in it. It dropped
   // `period` silently once (2026-10-05): the page asked for all time, the Worker
