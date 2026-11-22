@@ -435,3 +435,15 @@ export async function createContactTask(pit, contactId, { title, body, dueDate, 
   });
   return res.task || res;
 }
+
+// The sub-account's own record, which carries settings.saasSettings -- the only
+// place GHL states which SaaS plan a client is actually on, and the status of
+// that subscription. Used by the plan gate in tenants.js.
+//
+// Accounts that are not SaaS customers (the agency's own, a client provisioned
+// by hand) return saasMode "not_activated" and no planDetails at all. That is
+// not an error; it is the answer.
+export async function fetchLocation(pit, locationId) {
+  const res = await ghlRequest(pit, "GET", `/locations/${locationId}`);
+  return res.location || res;
+}

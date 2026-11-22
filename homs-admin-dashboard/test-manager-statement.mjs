@@ -38,6 +38,18 @@ let seen = [];
 const serveWorker = (status, body) => {
   seen = [];
   globalThis.fetch = async (url, init) => {
+    // The plan gate reads the client's live subscription from GHL before
+    // proxying. That is a different upstream from the invoicing Worker and must
+    // not be counted as one -- `seen` exists to catch the statement being
+    // fetched twice, and would stop catching it if this leaked in.
+    if (String(url).includes("/locations/")) {
+      return {
+        ok: true, status: 200,
+        text: async () => JSON.stringify({
+          location: { settings: { saasSettings: { saasMode: "not_activated" } } },
+        }),
+      };
+    }
     seen.push({ url: String(url), headers: init?.headers || {} });
     return { ok: status < 400, status, text: async () => JSON.stringify(body) };
   };

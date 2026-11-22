@@ -1069,8 +1069,11 @@ async function proxyStatement(env, url, { path, params, unavailableLabel }) {
   // at Operate or the product is broken -- which is exactly why upgrading to
   // Report shows a client their whole history immediately rather than starting
   // them at zero.
-  const planTenant = await getTenant(env, locationId);
-  const gate = planAtLeast(planTenant, "report");
+  //
+  // The plan is read LIVE from the client's subscription, cached 60s. Nothing
+  // stores it, so an upgrade or downgrade takes effect on the next load and
+  // there is no sync step to drift.
+  const gate = await planAtLeast(env, locationId, "report");
   if (!gate.ok) {
     return planDenied({ feature: unavailableLabel, ...gate });
   }
