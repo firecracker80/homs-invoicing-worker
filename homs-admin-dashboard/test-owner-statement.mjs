@@ -65,6 +65,13 @@ console.log("1) the statement is fetched from the invoicing Worker, not computed
   const res = await call(`locationId=${CLIENT}&period=all`);
   const body = await res.json();
   assert.equal(res.status, 200);
+  // The gate fails open, so an ALLOWED request is the one case where a gate
+  // doing nothing looks identical to a gate that works. This header is how the
+  // two are told apart: "lookup-failed:401" means the PIT cannot read the
+  // location and every account is being waved through.
+  assert.equal(res.headers.get("X-HOMS-Plan-Source"), "saas:not_activated",
+    "an allowed request must still say WHY it was allowed");
+  assert.equal(res.headers.get("X-HOMS-Plan"), "control");
   assert.equal(seen.length, 1, "exactly one upstream call");
   assert.ok(seen[0].url.includes("/reports/owner-statement"), "the owner statement endpoint, not the manager one");
   assert.ok(seen[0].url.includes("format=json"));

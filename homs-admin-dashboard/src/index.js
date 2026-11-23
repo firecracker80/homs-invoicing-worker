@@ -1109,7 +1109,25 @@ async function proxyStatement(env, url, { path, params, unavailableLabel }) {
     // Pass the Worker's own status and body through. A 404 for an unknown
     // locationId or a 500 for a missing PIT says more than anything this route
     // could invent on its behalf.
-    return new Response(text, { status: res.status, headers: { "Content-Type": "application/json" } });
+    //
+    // X-HOMS-Plan-Source makes the gate observable on a request it ALLOWED,
+    // which is the only case where it can fail silently. The gate fails open,
+    // so a PIT without the scope to read saasSettings resolves every account to
+    // "lookup-failed:401" and grants everything -- a gate that is doing nothing
+    // looks exactly like a gate that is working. The header is how you tell:
+    //   subscription         read a live plan; the gate is real
+    //   saas:not_activated   not a SaaS customer (the agency's own accounts)
+    //   lookup-failed:401    the PIT cannot read the location -- SCOPE MISSING
+    // It is a header, not a body field, so nothing that parses the statement
+    // JSON has to change.
+    return new Response(text, {
+      status: res.status,
+      headers: {
+        "Content-Type": "application/json",
+        "X-HOMS-Plan-Source": String(gate.source),
+        "X-HOMS-Plan": String(gate.plan),
+      },
+    });
   } catch (err) {
     // A configuration gap is the dashboard's fault and fixable; an unreachable
     // Worker is not. They are different problems and get different statuses.
