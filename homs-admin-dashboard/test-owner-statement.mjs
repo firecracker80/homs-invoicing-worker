@@ -38,6 +38,18 @@ let seen = [];
 const serveWorker = (status, body) => {
   seen = [];
   globalThis.fetch = async (url, init) => {
+    // The plan gate reads the client's live subscription from GHL before
+    // proxying. That is a different upstream from the invoicing Worker and must
+    // not be counted as one -- `seen` exists to catch the statement being
+    // fetched twice, and would stop catching it if this leaked in.
+    if (String(url).includes("/locations/")) {
+      return {
+        ok: true, status: 200,
+        text: async () => JSON.stringify({
+          location: { settings: { saasSettings: { saasMode: "not_activated" } } },
+        }),
+      };
+    }
     seen.push({ url: String(url), headers: init?.headers || {} });
     return { ok: status < 400, status, text: async () => JSON.stringify(body) };
   };
@@ -53,6 +65,13 @@ console.log("1) the statement is fetched from the invoicing Worker, not computed
   const res = await call(`locationId=${CLIENT}&period=all`);
   const body = await res.json();
   assert.equal(res.status, 200);
+  // The gate fails open, so an ALLOWED request is the one case where a gate
+  // doing nothing looks identical to a gate that works. This header is how the
+  // two are told apart: "lookup-failed:401" means the PIT cannot read the
+  // location and every account is being waved through.
+  assert.equal(res.headers.get("X-HOMS-Plan-Source"), "saas:not_activated",
+    "an allowed request must still say WHY it was allowed");
+  assert.equal(res.headers.get("X-HOMS-Plan"), "control");
   assert.equal(seen.length, 1, "exactly one upstream call");
   assert.ok(seen[0].url.includes("/reports/owner-statement"), "the owner statement endpoint, not the manager one");
   assert.ok(seen[0].url.includes("format=json"));

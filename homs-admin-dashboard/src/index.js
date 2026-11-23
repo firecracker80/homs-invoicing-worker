@@ -14,7 +14,7 @@ import {
   normalizeContact,
   resolveJoins,
 } from "./normalize.js";
-import { getTenant, resolvePit } from "./tenants.js";
+import { getTenant, resolvePit, planAtLeast, planDenied } from "./tenants.js";
 import { handleSupportList } from "./support.js";
 import {
   handleHostLoginStart, handleHostLoginVerify, handleHostLogout, requireHost,
@@ -1056,6 +1056,28 @@ async function proxyStatement(env, url, { path, params, unavailableLabel }) {
   const locationId = url.searchParams.get("locationId");
   if (!locationId) return Response.json({ error: "locationId is required" }, { status: 400 });
 
+  // Plan gate -- Report tier. The line Yari drew is between running your own
+  // operation and accounting to someone else for their money, and owner and
+  // manager statements ARE that accounting.
+  //
+  // Gated inside proxyStatement rather than at each route on purpose: every
+  // statement route funnels through here, so a statement route added later is
+  // gated by construction instead of by somebody remembering to add it.
+  //
+  // Note this is deliberately a VISIBILITY gate, not a computation one. The
+  // ledger runs for every tier because settlement and refunds must be correct
+  // at Operate or the product is broken -- which is exactly why upgrading to
+  // Report shows a client their whole history immediately rather than starting
+  // them at zero.
+  //
+  // The plan is read LIVE from the client's subscription, cached 60s. Nothing
+  // stores it, so an upgrade or downgrade takes effect on the next load and
+  // there is no sync step to drift.
+  const gate = await planAtLeast(env, locationId, "report");
+  if (!gate.ok) {
+    return planDenied({ feature: unavailableLabel, ...gate });
+  }
+
   // An allow-list, and every name the page can send has to be in it. It dropped
   // `period` silently once (2026-10-05): the page asked for all time, the Worker
   // understood all time, and this route in between threw the word away, so the
@@ -1087,7 +1109,25 @@ async function proxyStatement(env, url, { path, params, unavailableLabel }) {
     // Pass the Worker's own status and body through. A 404 for an unknown
     // locationId or a 500 for a missing PIT says more than anything this route
     // could invent on its behalf.
-    return new Response(text, { status: res.status, headers: { "Content-Type": "application/json" } });
+    //
+    // X-HOMS-Plan-Source makes the gate observable on a request it ALLOWED,
+    // which is the only case where it can fail silently. The gate fails open,
+    // so a PIT without the scope to read saasSettings resolves every account to
+    // "lookup-failed:401" and grants everything -- a gate that is doing nothing
+    // looks exactly like a gate that is working. The header is how you tell:
+    //   subscription         read a live plan; the gate is real
+    //   saas:not_activated   not a SaaS customer (the agency's own accounts)
+    //   lookup-failed:401    the PIT cannot read the location -- SCOPE MISSING
+    // It is a header, not a body field, so nothing that parses the statement
+    // JSON has to change.
+    return new Response(text, {
+      status: res.status,
+      headers: {
+        "Content-Type": "application/json",
+        "X-HOMS-Plan-Source": String(gate.source),
+        "X-HOMS-Plan": String(gate.plan),
+      },
+    });
   } catch (err) {
     // A configuration gap is the dashboard's fault and fixable; an unreachable
     // Worker is not. They are different problems and get different statuses.
