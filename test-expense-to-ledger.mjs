@@ -238,7 +238,44 @@ function fakeLedger(seed = []) {
   assert.strictEqual((await post({ locationId: "L1" }, guarded)).status, 401);
   assert.strictEqual(guarded.LEDGER_DB.rows.size, 0, "and nothing is written on a refused call");
   assert.strictEqual((await post({ locationId: "L1", secret: "s3cret" }, guarded)).status, 200);
-  console.log("8) The endpoint reads from GHL, ignores the body's figures, and honours the webhook secret");
+
+  // The query string, because of which GHL action can call this.
+  //
+  // GHL has two webhook actions. Custom webhook is PREMIUM and can set
+  // headers; plain Webhook is FREE but posts its own fixed payload and cannot
+  // add a header or a body of ours. Every expense change in every client
+  // account fires one of these, so being callable by the free one is the
+  // difference between this costing nothing and costing a cent a time.
+  //
+  // The URL is the only channel that action leaves us.
+  const qs = async (search, e) => {
+    const res = await handleExpenseApproved(
+      new Request(`https://w.dev/ghl-expense-approved${search}`, { method: "POST" }), e);
+    return { status: res.status, body: await res.json() };
+  };
+
+  serve(200, { records: RECORDS });
+  const viaUrl = await qs("?locationId=L1", env());
+  assert.strictEqual(viaUrl.status, 200, "the free Webhook action has nowhere but the URL");
+  assert.strictEqual(viaUrl.body.posted, 1);
+
+  serve(200, { records: RECORDS });
+  const guardedUrl = env({ webhookSecret: "s3cret" });
+  assert.strictEqual((await qs("?locationId=L1", guardedUrl)).status, 401,
+    "a query-string call is still refused without the secret");
+  assert.strictEqual(guardedUrl.LEDGER_DB.rows.size, 0);
+  assert.strictEqual((await qs("?locationId=L1&secret=s3cret", guardedUrl)).status, 200);
+
+  // A header still wins over a query string, so a Custom webhook that sets
+  // both does not get authenticated by the more exposed of the two.
+  serve(200, { records: RECORDS });
+  const bothEnv = env({ webhookSecret: "s3cret" });
+  const both = await handleExpenseApproved(
+    new Request("https://w.dev/ghl-expense-approved?locationId=WRONG&secret=wrong",
+      { method: "POST", headers: { "X-Location-Id": "L1", "X-Webhook-Secret": "s3cret" } }), bothEnv);
+  assert.strictEqual(both.status, 200, "the header is read first, not the URL");
+
+  console.log("8) The endpoint reads from GHL, ignores the body's figures, and authenticates by header, body or URL");
 }
 
 // ---- 9. an account with no Expenses object is not an outage ---------

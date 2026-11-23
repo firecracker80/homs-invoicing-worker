@@ -500,11 +500,26 @@ async function handleCreateExpense(request, env) {
       { error: "paidBy is required and must be \"owner\" or \"manager\"" }, { status: 400 });
   }
 
+  // Approved on creation, not "needs review". Yari, 2026-11-23: she is the one
+  // recording the expense and she has already spoken to the owner about it, so
+  // requiring her to approve her own typing is ceremony with none of the
+  // control. Review is not pointless -- it belongs to the entry paths where
+  // NOBODY SAW THE NUMBER before it was saved.
+  //
+  // This route is not one of those, even when a receipt was read by a model:
+  // the read only PREFILLS this form, and the manager looks at the fields and
+  // presses save. A human stands behind every record created here.
+  //
+  // The paths that do need it keep it: services.js builds an expense from a
+  // vendor invoice total with nobody at a keyboard, and the GHL-native receipt
+  // workflow creates one straight from a model reading. Section 10 of
+  // homs-receipt-capture-native-plan.md.
   const properties = {
     expense_name: name,
     category: categoryKey,
     amount: { value: Number(amount), currency: "default" },
-    review_status: "needs_review",
+    review_status: "approved",
+    source: "manual",
     paid_by: whose,
   };
   if (paidOn) properties.paid_on = paidOn;
