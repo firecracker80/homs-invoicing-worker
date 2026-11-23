@@ -201,8 +201,29 @@ export async function handleExpenseApproved(request, env) {
   let body = {};
   try { body = await request.json(); } catch { /* a nudge needs no body */ }
 
-  const locationId = (request.headers?.get?.("X-Location-Id") || body.locationId || "").trim();
-  const secret = (request.headers?.get?.("X-Webhook-Secret") || body.secret || "").trim();
+  // Three places, because the caller is a GHL workflow and which of them it
+  // can use depends on which action it was built with. GHL has two:
+  //
+  //   Custom webhook  -- premium, charged per execution, can set headers and
+  //                      a raw JSON body. Header is the right choice here.
+  //   Webhook         -- free, but it posts its own fixed payload and cannot
+  //                      add headers, so the URL is the only place left.
+  //
+  // Reading the query string too is what lets the FREE action drive this.
+  // Every expense change in every client account fires one of these, so the
+  // difference is a per-execution charge on the most frequent call we have.
+  //
+  // Header first, then body, then query -- least exposed first. A secret in a
+  // query string is visible in logs and in the workflow config, so prefer the
+  // Custom webhook where the extra cent is worth it. The secret is a shared
+  // snapshot value either way, never a per-client credential.
+  let query = null;
+  try { query = new URL(request.url).searchParams; } catch { /* non-absolute URL in a test */ }
+
+  const locationId = (request.headers?.get?.("X-Location-Id")
+    || body.locationId || query?.get("locationId") || "").trim();
+  const secret = (request.headers?.get?.("X-Webhook-Secret")
+    || body.secret || query?.get("secret") || "").trim();
   if (unresolved(locationId)) return json({ error: "locationId is required" }, 400);
 
   const tenant = await env.TENANTS.get(locationId, { type: "json" });

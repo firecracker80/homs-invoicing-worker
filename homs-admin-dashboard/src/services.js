@@ -896,6 +896,11 @@ async function runSync(env, ctx) {
           amount: { value: invoiceTotal, currency: "default" },
           paid_on: paidDate,
           review_status: "needs_review",
+          // Stays needs_review while the dashboard path no longer does, and
+          // the source field is what tells them apart: this record is built
+          // from a vendor invoice total with nobody at a keyboard, so no
+          // human has seen the number yet.
+          source: "vendor_invoice",
           // A vendor fixing something at a property is the owner's cost, so it
           // comes off that owner's payout once approved. Yari, 2026-10-07,
           // choosing this default; the RL Santana fridge repair is one of these

@@ -81,8 +81,10 @@ const EXPENSE = {
     assert.strictEqual(ok.status, 200, JSON.stringify(ok.body));
     assert.strictEqual(created.length, 1);
     assert.strictEqual(created[0].paid_by, whose);
-    assert.strictEqual(created[0].review_status, "needs_review",
-      "still reviewed before it counts anywhere");
+    assert.strictEqual(created[0].review_status, "approved",
+      "a human filled this form in and pressed save -- approving your own typing is ceremony");
+    assert.strictEqual(created[0].source, "manual",
+      "and the record says a person made it, which is what decides whether it needed review");
   }
 
   // Anything else is a refusal, not a guess. "Owner " with a space, a typo, a
@@ -130,6 +132,8 @@ const EXPENSE = {
     "a service-request expense attributes itself, or every one arrives flagged");
   assert.match(props, /review_status: "needs_review"/,
     "and is still reviewed first, so the default is seen before it deducts from anybody");
+  assert.match(props, /source: "vendor_invoice"/,
+    "and says so -- source is now what separates a path a human saw from one nobody did");
   console.log("4) A service request creates its expense as the owner's, still pending review");
 }
 
