@@ -34,7 +34,7 @@ const HTML = fs.readFileSync("./public/index.html", "utf8");
   assert.deepStrictEqual(shared, ["other"], "the two charts overlap only at 'other'");
 
   const enumOf = (profile) =>
-    requestBodyFor({ mediaType: "image/png", data: "x" }, "claude-opus-5", profile)
+    requestBodyFor({ mediaType: "image/png", data: "x" }, "claude-opus-5-5", profile)
       .output_config.format.schema.properties.expenses.items.properties.category.enum;
   assert.deepStrictEqual(enumOf("property"), prop, "the schema binds the model to the property chart");
   assert.deepStrictEqual(enumOf("operations"), ops);
@@ -58,7 +58,7 @@ const HTML = fs.readFileSync("./public/index.html", "utf8");
   assert.strictEqual(resolveProfile("property"), "property");
   // Object.hasOwn, not `in`: "toString" is on the prototype and `in` would
   // accept it, then index PROFILES to undefined and throw on .categories.
-  assert.ok(requestBodyFor({ mediaType: "image/png", data: "x" }, "claude-opus-5", "toString"));
+  assert.ok(requestBodyFor({ mediaType: "image/png", data: "x" }, "claude-opus-5-5", "toString"));
   console.log("2) A junk profile falls back instead of producing an empty category list");
 }
 

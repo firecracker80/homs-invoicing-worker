@@ -17,16 +17,22 @@ import { CATEGORIES, CURRENCIES, RECURRENCES, decideInclude, dupKeyOf, keysOf } 
 
 const API_URL = "https://api.anthropic.com/v1/messages";
 const API_VERSION = "2023-06-01";
-const DEFAULT_MODEL = "claude-opus-5";
+const DEFAULT_MODEL = "claude-opus-5-5";
 
 // What a read may run on, and what it costs. Prices are USD per million tokens,
-// from Anthropic's published rates (checked 2026-09-24) -- they are used for an
+// from Anthropic's published rates (checked 2026-11-24) -- they are used for an
 // on-screen estimate only, never for billing, so a stale price misleads rather
 // than overcharges. Re-check when a model is added.
+//
+// Refreshed 2026-11-24: every row was a generation behind. Opus 5.5 is the
+// default on Yari's instruction and is both better and CHEAPER than the Opus 5
+// that was pinned here, so nothing is traded for the accuracy. Haiku 5.5 is the
+// bigger move -- at $0.10/$0.50 it is ~10x cheaper than the Haiku 4.5 it
+// replaces, which is what makes a genuinely cheap read possible at all.
 export const MODELS = {
-  "claude-opus-5":   { label: "Opus 5 — most accurate",   inPerM: 5, outPerM: 25 },
-  "claude-sonnet-5": { label: "Sonnet 5 — middle",        inPerM: 2, outPerM: 10 },
-  "claude-haiku-4-5": { label: "Haiku 4.5 — cheapest",    inPerM: 1, outPerM: 5 },
+  "claude-opus-5-5":   { label: "Opus 5.5 — most accurate", inPerM: 4,    outPerM: 20 },
+  "claude-sonnet-5-5": { label: "Sonnet 5.5 — middle",      inPerM: 2,    outPerM: 10 },
+  "claude-haiku-5-5":  { label: "Haiku 5.5 — cheapest",     inPerM: 0.10, outPerM: 0.50 },
 };
 
 // An allowlist, because the model arrives from the browser. Anything unknown
