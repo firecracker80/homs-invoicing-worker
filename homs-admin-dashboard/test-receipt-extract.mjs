@@ -69,7 +69,7 @@ const oneExpense = (over = {}) => ({
   assert.equal(pdf.messages[0].content[1].type, "text", "the file comes before the instruction");
   assert.equal(pdf.output_config.format.type, "json_schema", "structured output, not free text");
   assert.equal(pdf.output_config.effort, "low", "extraction does not need deep reasoning");
-  assert.equal(pdf.model, "claude-opus-5");
+  assert.equal(pdf.model, "claude-opus-5-5");
 
   const img = contentBlocksFor({ mediaType: "image/jpeg", data: "QkFTRTY0" });
   assert.equal(img[0].type, "image", "a photo goes in an image block");
@@ -221,29 +221,30 @@ const oneExpense = (over = {}) => ({
 
 // ---- 9c. the model is chosen from an allowlist, and the read reports its cost --
 {
-  assert.equal(resolveModel("claude-haiku-4-5"), "claude-haiku-4-5");
-  assert.equal(resolveModel("gpt-4"), "claude-opus-5", "an unknown model never reaches the API");
-  assert.equal(resolveModel(undefined), "claude-opus-5");
-  assert.equal(resolveModel("", "claude-sonnet-5"), "claude-sonnet-5", "falls back to the tenant's own setting");
-  assert.equal(resolveModel("__proto__"), "claude-opus-5", "and prototype keys are not models");
+  assert.equal(resolveModel("claude-haiku-5-5"), "claude-haiku-5-5");
+  assert.equal(resolveModel("gpt-4"), "claude-opus-5-5", "an unknown model never reaches the API");
+  assert.equal(resolveModel(undefined), "claude-opus-5-5");
+  assert.equal(resolveModel("", "claude-sonnet-5-5"), "claude-sonnet-5-5", "falls back to the tenant's own setting");
+  assert.equal(resolveModel("__proto__"), "claude-opus-5-5", "and prototype keys are not models");
 
-  // Opus 5: $5/M in, $25/M out. 3,000 in + 400 out = 0.015 + 0.010 = $0.025.
-  assert.equal(estimateCost("claude-opus-5", { input_tokens: 3000, output_tokens: 400 }).usd, 0.025);
-  // Haiku 4.5 at a fifth the price.
-  assert.equal(estimateCost("claude-haiku-4-5", { input_tokens: 3000, output_tokens: 400 }).usd, 0.005);
-  assert.equal(estimateCost("claude-opus-5", null), null, "no usage reported -> no invented figure");
+  // Opus 5.5: $4/M in, $20/M out. 3,000 in + 400 out = 0.012 + 0.008 = $0.020.
+  assert.equal(estimateCost("claude-opus-5-5", { input_tokens: 3000, output_tokens: 400 }).usd, 0.02);
+  // Haiku 5.5 at a fortieth the price -- $0.10/M in, $0.50/M out. This is the
+  // row that makes a cheap read real; Haiku 4.5 was only 5x cheaper than Opus.
+  assert.equal(estimateCost("claude-haiku-5-5", { input_tokens: 3000, output_tokens: 400 }).usd, 0.0005);
+  assert.equal(estimateCost("claude-opus-5-5", null), null, "no usage reported -> no invented figure");
   assert.equal(estimateCost("nonsense", { input_tokens: 1 }), null);
 
   anthropic = { status: 200, body: reply(oneExpense()), calls: [] };
-  const out = await (await call("/api/expenses/parse-file", { locationId: HOMS, mediaType: "image/png", data: "QkFTRTY0", model: "claude-haiku-4-5" })).json();
-  assert.equal(anthropic.calls[0].body.model, "claude-haiku-4-5", "the requested model is the one called");
-  assert.equal(out.model, "claude-haiku-4-5");
+  const out = await (await call("/api/expenses/parse-file", { locationId: HOMS, mediaType: "image/png", data: "QkFTRTY0", model: "claude-haiku-5-5" })).json();
+  assert.equal(anthropic.calls[0].body.model, "claude-haiku-5-5", "the requested model is the one called");
+  assert.equal(out.model, "claude-haiku-5-5");
   // The mocked reply reports 1500 in / 180 out.
-  assert.equal(out.cost.usd, estimateCost("claude-haiku-4-5", { input_tokens: 1500, output_tokens: 180 }).usd);
+  assert.equal(out.cost.usd, estimateCost("claude-haiku-5-5", { input_tokens: 1500, output_tokens: 180 }).usd);
 
   anthropic = { status: 200, body: reply(oneExpense()), calls: [] };
   await call("/api/expenses/parse-file", { locationId: HOMS, mediaType: "image/png", data: "QkFTRTY0", model: "definitely-not-a-model" });
-  assert.equal(anthropic.calls[0].body.model, "claude-opus-5", "junk from the browser falls back, never passed through");
+  assert.equal(anthropic.calls[0].body.model, "claude-opus-5-5", "junk from the browser falls back, never passed through");
   console.log("9c) Model picked from an allowlist (junk falls back); each read reports what it cost");
 }
 

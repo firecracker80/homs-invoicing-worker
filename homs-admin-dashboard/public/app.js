@@ -1620,10 +1620,14 @@ const RECEIPT_TYPES = ["image/jpeg", "image/png", "image/gif", "image/webp", "ap
 
 // Which model reads receipts. Kept per browser so a comparison run survives a
 // reload, and sent per request so the same receipt can be tried both ways.
+// Must stay in step with MODELS in src/receipt-extract.js. A browser that
+// stored one of the previous ids keeps sending it after this change, and that
+// is safe without a migration: resolveModel() allowlists on the server and
+// falls back to the default rather than passing an unknown id to the API.
 const READER_MODELS = [
-  ["claude-opus-5", "Opus 5 — most accurate"],
-  ["claude-sonnet-5", "Sonnet 5 — middle"],
-  ["claude-haiku-4-5", "Haiku 4.5 — cheapest"],
+  ["claude-opus-5-5", "Opus 5.5 — most accurate"],
+  ["claude-sonnet-5-5", "Sonnet 5.5 — middle"],
+  ["claude-haiku-5-5", "Haiku 5.5 — cheapest"],
 ];
 function readerModel() {
   try { return localStorage.getItem("receiptModel") || READER_MODELS[0][0]; } catch { return READER_MODELS[0][0]; }
