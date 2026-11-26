@@ -239,6 +239,42 @@ function fakeLedger(seed = []) {
   assert.strictEqual(guarded.LEDGER_DB.rows.size, 0, "and nothing is written on a refused call");
   assert.strictEqual((await post({ locationId: "L1", secret: "s3cret" }, guarded)).status, 200);
 
+  // A secret carrying a stray space still authenticates -- on the paths where a
+  // stray space can actually survive.
+  //
+  // 2026-11-26: a rotated secret went into WF-R2's X-Webhook-Secret header with
+  // one trailing space, 33 characters against KV's 32. The only symptom of a
+  // mismatch here is a bare 401, indistinguishable from a wrong key, a revoked
+  // PIT or a missing scope, and it cost an hour to tell apart once.
+  //
+  // A HEADER cannot carry that space: Headers normalises the value, so
+  // handleExpenseApproved is handed "s3cret" however many spaces were typed, and
+  // asserting on a padded header proves nothing about the trim -- that version
+  // of this test passed with the trim deleted. The BODY and the QUERY STRING do
+  // carry it, and those are the paths a hand-built payload and the free Webhook
+  // action use.
+  serve(200, { records: RECORDS });
+  const padded = env({ webhookSecret: "s3cret" });
+  const paddedRes = await post({ locationId: " L1 ", secret: "s3cret " }, padded);
+  assert.strictEqual(paddedRes.status, 200, "a pasted-in space is not a wrong key");
+  assert.ok(padded.LEDGER_DB.rows.size > 0, "and the call does its work, not merely pass auth");
+
+  serve(200, { records: RECORDS });
+  const paddedUrl = env({ webhookSecret: "s3cret" });
+  const paddedUrlRes = await handleExpenseApproved(
+    new Request("https://w.dev/ghl-expense-approved?locationId=L1&secret=%20s3cret%20",
+      { method: "POST" }), paddedUrl);
+  assert.strictEqual(paddedUrlRes.status, 200, "and the same holds for the URL the free action must use");
+
+  // The control: the trim strips OUTER whitespace and nothing else, so a secret
+  // that merely looks similar is still refused. Without this, a looser
+  // comparison would satisfy both assertions above.
+  serve(200, { records: RECORDS });
+  const nearMiss = env({ webhookSecret: "s3cret" });
+  const nearMissRes = await post({ locationId: "L1", secret: "s3c ret" }, nearMiss);
+  assert.strictEqual(nearMissRes.status, 401, "trimming is not a licence to ignore inner whitespace");
+  assert.strictEqual(nearMiss.LEDGER_DB.rows.size, 0, "and nothing is written on a refused call");
+
   // The query string, because of which GHL action can call this.
   //
   // GHL has two webhook actions. Custom webhook is PREMIUM and can set
